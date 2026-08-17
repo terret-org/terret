@@ -8,7 +8,7 @@ module Terret
   # This gem exists so that the `terret` name belongs to the project that will
   # fill it. Everything that currently works lives in terret-core and hames.
   module CLI
-    VERSION = "0.0.1"
+    VERSION = "0.0.2"
 
     def self.start(_argv = ARGV)
       abort <<~MSG

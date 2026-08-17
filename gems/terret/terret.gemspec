@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = "terret"
-  s.version = "0.0.1"
+  s.version = "0.0.2"
   s.summary = "Ruby-native, model-agnostic agent harness (name placeholder)"
   s.description = "Placeholder release. Terret is a Ruby-native, model-agnostic agent " \
                   "harness where everything is a plugin. This meta-gem will carry the " \
