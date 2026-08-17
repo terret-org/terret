@@ -2,7 +2,7 @@
 
 **A Ruby-native, model-agnostic agent harness, informed by DeepSeek Harness (`dsh`)**
 
-Version 0.2, August 2026
+Version 0.3, August 2026
 Status: Design document. M0 and M1 are shipped; see §12 for what is actually built.
 
 ---
@@ -25,13 +25,14 @@ Primary: **Terret**. The `terret`, `terret-core`, and `hames` names are register
 2. **Everything is a plugin.** The agent loop, tool registry, session store, sandbox policy, prompt assembly, and every interface are plugins mounted in a Hames context. There is no privileged core to patch.
 3. **Replayable truth.** Anything the model saw must be reconstructable from the append-only session log, enforced by a runtime invariant.
 4. **Ruby-idiomatic.** Zeitwerk, `Data` value objects, keyword args, blocks for effects, Fiber-based structured concurrency via the `async` ecosystem. It should feel like good Ruby rather than transliterated TypeScript.
-5. **Drop-in for an existing orchestrator.** Terret's first interface is a headless protocol surface compatible with Claude Code's `-p` streaming-JSON mode, so an orchestrator already speaking that protocol can point at Terret with no changes on its side. See §9.
-6. **Embeddable.** Terret must run as a headless process, as a long-lived session daemon, and as a library inside an existing Rails app.
+5. **Built for long-lived agents.** The first workload is a session that stays open indefinitely, wakes on external stimulus, and is steered while running. Terret's primary interface is a bidirectional event stream over a WebSocket, one connection per agent, shipped as a plugin. See §9.
+6. **Embeddable.** Terret must run as a long-lived multi-agent process and as a library inside an existing Rails app.
 
 ### Non-Goals (v1)
 
 - Training, fine-tuning, or eval benchmarking. That is a different kind of "harness"; see §17 on the naming collision with EleutherAI's lm-evaluation-harness.
-- **An interactive text CLI.** Explicitly deferred. Terret ships a headless protocol surface first (§9). A human-facing TUI is not on the roadmap and should not be built speculatively.
+- **An interactive text CLI.** Explicitly deferred. A human-facing TUI is not on the roadmap and should not be built speculatively.
+- **Command-line compatibility with any other harness.** Terret does not implement Claude Code's `-p` streaming-JSON contract or anyone else's. Terret is the harness, so serializing NDJSON over a pipe to reach it would be ceremony rather than architecture. Consumers connect over the socket in §9. This costs a side-by-side comparison against an incumbent on live traffic; §14 records how to recover some of that confidence.
 - Native adapters for individual providers. OpenRouter covers the model space for v1; see §6.5.
 - A native desktop app.
 - Windows support beyond WSL2. Sandbox seams assume POSIX; revisit post-1.0.
@@ -104,7 +105,7 @@ A **seam** is a Service Definition (interface) plus a Service Provider (implemen
 - **Language substrate.** There is no Cordis to vendor, so we build **Hames**, a small kernel purpose-built for Ruby, rather than porting Cordis's TypeScript declaration-merging type system. Ruby gives up compile-time event typing; we recover safety with runtime event contracts (§4.4) and RBS signatures.
 - **Monorepo tooling.** pnpm workspaces become a Bundler monorepo of path-referenced gems with a shared Rakefile.
 - **Provider strategy.** dsh ships native adapters per provider. Terret v1 ships one OpenRouter adapter instead, which reaches the same model space for a fraction of the surface area (§6.5).
-- **First interface.** dsh ships a TUI and a browser app. Terret ships neither at first. Its first interface is a machine protocol (§9), because the immediate consumer is an orchestrator rather than a human.
+- **First interface.** dsh ships a TUI and a browser app. Terret ships neither at first. Its first interface is a WebSocket event stream (§9), because the immediate consumer is an orchestrator driving long-lived agents rather than a human at a terminal.
 - **Concurrency.** Node's event loop becomes Ruby's Fiber scheduler via `async`. Every agent runs in its own Async task tree, and cancellation is structured (§8).
 
 ---
@@ -114,9 +115,9 @@ A **seam** is a Service Definition (interface) plus a Service Provider (implemen
 ```
                         ┌─────────────────────────────────────────┐
                         │              Interfaces                 │
-                        │  headless protocol (Claude Code -p      │
-                        │  stream-json wire compatibility)        │
-                        │  session daemon · Rails engine · ACP    │
+                        │  terret-ws: bidirectional event stream, │
+                        │  one socket per agent (plugin)          │
+                        │  Rails engine · ACP · web console       │
                         └───────────────┬─────────────────────────┘
                                         │ drives ctx.agents, renders session/event
         ┌───────────────────────────────┼────────────────────────────────┐
@@ -240,7 +241,7 @@ terret/
 │   ├── hames/                      # the kernel (no LLM knowledge)
 │   ├── terret-core/                # sessions, prompt, tools, agents, loop, llm seam
 │   ├── terret-openrouter/          # the one v1 adapter
-│   ├── terret-protocol/            # Claude Code -p stream-json codec + runner
+│   ├── terret-ws/                  # bidirectional event stream over WebSocket
 │   ├── terret-exec/                # fs, subprocess, shell, terminals seams
 │   ├── terret-sandbox-docker/
 │   ├── terret-sandbox-landlock/    # Linux; macOS seatbelt variant
@@ -255,7 +256,9 @@ terret/
 
 Gem dependency direction is strictly downward. Interface gems depend on core; core depends on `hames`; `hames` depends on `async` and stdlib only. Each gem declares its Terret contribution in gemspec metadata (`metadata["terret"] = { "bundle" => "config/bundle.yml" }`), the port of dsh's `package.json` `dsh` field. That is how third-party gems become discoverable bundles.
 
-Note the departures from the v0.1 layout. The per-provider adapter gems are gone, collapsed into `terret-openrouter`. The `terret-llm` vocabulary gem is gone, folded into `terret-core` where it already lives. `terret-web` and `terret-headless` are replaced by `terret-protocol`, since the headless surface is now the wire protocol rather than a one-shot runner. A web console may return later as its own bundle without touching core.
+Note the departures from the v0.1 layout. The per-provider adapter gems are gone, collapsed into `terret-openrouter`. The `terret-llm` vocabulary gem is gone, folded into `terret-core` where it already lives. `terret-web` and `terret-headless` are replaced by `terret-ws`. A web console may return later as its own bundle, consuming the same event stream, without touching core.
+
+That `terret-ws` is a gem alongside the others rather than a privileged part of core is load-bearing. The primary interface mounts through the same seams as everything else, which is the standing proof that the plugin claim in §1 is real.
 
 ---
 
@@ -277,14 +280,14 @@ The heart. An append-only log of `SessionEvent`s per session, with an in-memory 
 
 Plugins register **prompt sections** (name, priority, block returning content or nil) and the tool registry contributes schemas. Per step, assembly collects sections for this agent's scope, orders by priority, renders against a `PromptEnv` (agent, session, workdir, model capabilities), then runs a cache-stability pass so that stable section ordering and byte-identical rendering let provider prompt caching actually hit. Sections are effects, so unloading a plugin removes its section from the prompt.
 
-The protocol surface needs two entry points here, matching what an orchestrator already sends: a wholesale system prompt that replaces the default, and an appended section that adds to it. Both are ordinary prompt sections at reserved priorities.
+A long-lived agent needs its persona set once at session creation and amended over the session's life without a restart. Both are ordinary prompt sections at reserved priorities, and because sections are effects, amending one is a registration swap rather than a special case.
 
 ### 6.3 Tool registry and guarded pipeline (`ctx.tools`)
 
 - **Definition:** name, description, JSON Schema params, handler, and metadata for `mutating:`, `concurrency: :safe|:exclusive`, and `approval: :never|:policy|:always`.
 - **Registration is scoped:** global via `ctx.tools.register`, or per-agent via `agent.ctx.tools.register`, so subagents and presets get different tool sets without global state.
 - **Pipeline (waterfalls):** `tools/pre_execute` for validation, approval gating, argument rewriting, and policy veto; `tools/execute` where a provider may replace execution entirely, which is how a remote sandbox takes over Bash without forking the tool; `tools/post_execute` for result truncation, redaction, and telemetry. `tool/call` and `tool/result` are the durable bookends.
-- **Allowlisting.** A declarative allow list, expressed as config rather than a flag string, gates which tools an agent may call at all. It supports wildcards for namespaced tool sources (for example `mcp__nexus__*`). An unlisted tool is denied rather than prompted. This is required for §9 parity and is a `tools/pre_execute` listener, not a special case in the registry.
+- **Allowlisting.** A declarative allow list, expressed as config rather than a flag string, gates which tools an agent may call at all. It supports wildcards for namespaced tool sources (for example `mcp__nexus__*`). An unlisted tool is denied rather than prompted. It is a `tools/pre_execute` listener rather than a special case in the registry, which is what lets a per-agent allow list ride on the agent's forked context.
 - **Approvals.** A `ctx.approvals` service. When policy requires it, the pipeline parks the call, emits durable `approval/requested`, and resumes on `approval/resolved`. Parked calls survive process restarts because both sides are in the log.
 - **Concurrent tool calls.** Calls in one assistant message run in an Async barrier honoring each tool's concurrency class; `:exclusive` tools serialize.
 
@@ -309,7 +312,7 @@ The protocol surface needs two entry points here, matching what an orchestrator 
 
 The seam trio, ported intact. **`ctx.fs`** handles read, write, stat, glob, and watch behind a provider, with `fs/*` policy events for path allow and deny. **`ctx.subprocess`** puts spawn and PTY behind a provider. **`ctx.shell`** builds persistent bash sessions on subprocess. **`ctx.terminals`** manages long-lived PTYs and the terminal tool. Because fs and subprocess share one execution world, swapping in the Docker provider moves all of Read, Write, Edit, Bash, and PTY into the container together, with no per-tool forks. **`ctx.sandbox`** wraps argv before spawn, with providers `none` (trusted), `docker` (default isolation), `landlock` (Linux), and `seatbelt` (macOS). Local PTY uses the `pty` stdlib inside Async.
 
-Workspace scoping belongs here too. An orchestrator hands a run one or more directories the agent may touch, and that list is a config row consumed by the fs provider's policy.
+Workspace scoping belongs here too. An agent is granted one or more directories it may touch, and that list is a config row consumed by the fs provider's policy.
 
 ### 6.7 Standard tools (`terret-tools-std`)
 
@@ -359,73 +362,57 @@ rows:
 
 ## 9. Interfaces
 
-The v1 interface is a machine protocol. There is no interactive CLI, and building one is out of scope (§1 Non-Goals).
+The v1 interface is a bidirectional event stream over a WebSocket, shipped as a plugin. There is no interactive CLI (§1 Non-Goals), and there is no compatibility layer for any other harness's command-line contract.
 
-### 9.1 Why a protocol first
+### 9.1 Why a socket, and why a plugin
 
-The immediate consumer is an existing orchestrator that already drives agent runs by spawning a child process, writing newline-delimited JSON to its stdin, and reading newline-delimited JSON events from its stdout. Being wire-compatible with that contract means the orchestrator can point at Terret with a binary swap and no code change on its side. That is a far better forcing function than a TUI: the contract is written down, it exercises the whole stack (sessions, tools, approvals, MCP, streaming, cancellation), and it can be tested end to end with no human in the loop.
+The first real workload is a long-lived agent: one session that stays open for days, wakes on external stimulus, does work, and goes quiet again. That shape wants a persistent duplex connection rather than a process invocation. A run-shaped interface would force the session to be reconstructed from storage on every wake, and would push liveness questions (is this agent still there? can I steer it right now?) out into a supervisor that has to guess.
 
-### 9.2 The wire contract
+A socket answers those questions structurally. The connection *is* the liveness signal. Steering is a frame rather than a side channel. Nothing has to be torn down between wakes.
 
-Terret's headless entry point accepts the flags an orchestrator already sends and behaves the same way.
+It ships as a plugin (`terret-ws`) rather than as core, and that is the point of the architecture rather than a detail. If the primary interface cannot be a plugin, "everything is a plugin" is decoration. Anything the socket can do, another interface can do by mounting a different bundle against the same seams.
 
-| Flag | Meaning |
+### 9.2 Shape
+
+One connection per agent. The connection carries an agent id and a bearer token, resolves or creates that agent's session, and binds to the agent's **forked context** (§4.1). Registrations made on behalf of that connection dispose when the agent ends, which is exactly what the fork primitive was ported from dsh to provide.
+
+Many agents share one process and one reactor. Each is an Async task tree (§8), so agent count is bounded by memory and model concurrency rather than by process table.
+
+**Server to client.** Every durable session event, serialized as-is. The socket is a `session/event` listener like every other consumer in §6.1, so it invents no vocabulary of its own and adds no second source of truth. Nothing reaches a client that is not in the log first.
+
+**Client to server.** A small, closed set of frames, each of which lands on an existing seam rather than a new code path:
+
+| Frame | Lands on |
 |---|---|
-| `-p` | Non-interactive print mode |
-| `--input-format stream-json` | Read NDJSON user-message lines from stdin; do not exit until stdin closes |
-| `--output-format stream-json` | Emit NDJSON events on stdout |
-| `--verbose` | Emit the full event stream rather than a summary |
-| `--model <id>` | Model for the `main` role |
-| `--effort <level>` | Reasoning effort, where the model supports it |
-| `--system-prompt <text>` | Replace the default system prompt |
-| `--append-system-prompt <text>` | Append a section to the system prompt |
-| `--permission-mode <mode>` | Tool gating; the orchestrator uses a non-prompting mode where unlisted tools are denied |
-| `--mcp-config <path>` | JSON file of MCP servers to mount as tool sources |
-| `--strict-mcp-config` | Use only the servers in that file, ignoring ambient config |
-| `--add-dir <path>` | Extend the workspace the agent may touch |
-| `--resume <session_id>` | Continue an existing session |
+| `inject` (text, `wake:`) | `agent.inject` and the inbox (§6.4) |
+| `cancel` (reason) | `agent.cancel`, structured cancellation (§8) |
+| `approve` / `deny` (call id) | durable `approval/resolved` (§6.3) |
+| `set_model` (role, model) | the model-role config row (§6.5) |
+| `subscribe` (`from_seq:`) | replay-then-tail (§9.3) |
 
-**Input.** One JSON object per line on stdin, each a user message:
+That list is deliberately short. A frame that cannot be expressed as one of these is a sign the seam is missing, and the fix belongs in the seam rather than in the socket.
 
-```json
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}
-```
+### 9.3 Reconnect is the hard part, and the log already solves it
 
-stdin stays open for the duration of a turn, which is what allows steering: writing another line mid-turn injects a message into the live session, landing in the agent inbox described in §6.4. The process closes stdin at a turn's `result` event and exits once no more input is queued. Lines already queued at EOF still run as their own turns.
+Sockets drop. Deploys, idle timeouts, and network blips all end connections that the agent's life should outlast, so the protocol has to make reconnection boring.
 
-**Output.** One JSON object per line on stdout, following the same envelope shape the orchestrator already parses:
+A client reconnects and sends `subscribe` with the highest `seq` it has durably recorded. The server replays from `sessions.read(session_id, from_seq:)` and then tails live. The signature in §6.1 already exists for this. Because `seq` is a per-session monotonic integer and the log is append-only, this is exact rather than best-effort: no gaps, no duplicates that the client cannot dedupe, no negotiation.
 
-```
-{"type":"system","subtype":"init","mcp_servers":[...]}
-{"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
-{"type":"assistant","message":{"content":[{"type":"tool_use","name":"...","input":{...}}]}}
-{"type":"user","message":{"content":[{"type":"tool_result","content":"..."}]}}
-{"type":"result","subtype":"success","result":"...","usage":{...},"session_id":"..."}
-```
+Backpressure follows the same rule as §8. A slow reader drains to a bounded queue, and a client that falls too far behind is dropped and told to resubscribe with its last `seq` rather than being allowed to stall the loop. Snapshot-then-tail and reconnect-then-replay are the same mechanism.
 
-### 9.3 How this maps onto the core
+**The agent's liveness is independent of the socket.** A dropped connection must never cancel a turn or fail a run. Work continues, events accumulate in the log, and a reconnecting client catches up. Only an explicit `cancel` frame stops an agent. Getting this wrong in the other direction, by tying agent lifetime to connection lifetime, would make every deploy an outage.
 
-The protocol surface is a **codec**, not a second source of truth. Every line it emits is a projection of a durable session event, produced by a listener on `session/event`, exactly like any other consumer in §6.1. Nothing reaches stdout that is not in the log first, which is the same invariant as everywhere else and is the reason this interface is cheap to build.
+### 9.4 Operational notes
 
-The mapping is direct in most places:
+Long-lived sockets behind a load balancer need a heartbeat, since idle timeouts will otherwise close healthy connections. Ping frames on an interval below the balancer's idle timeout, with the timeout treated as configuration rather than an assumption.
 
-| Wire event | Session events behind it |
-|---|---|
-| `system`/`init` | `session/created` plus the mounted tool roster |
-| `assistant` (text) | `assistant/chunk` coalesced, then `assistant/message` |
-| `assistant` (tool_use) | `tool/call` |
-| `user` (tool_result) | `tool/result` |
-| `result` | `turn/end` plus usage totals |
+Auth is a bearer token presented at connection time and checked before the agent is resolved. Authorization is per-agent: a token scoped to one agent cannot subscribe to another's stream, because the stream carries everything the model saw.
 
-Two things need care. The wire format is Anthropic-shaped while Terret's vocabulary is provider-neutral, so the codec owns that translation and it is the only place in the codebase allowed to know the wire shape. And `session_id` on the wire must be Terret's own session id, so that `--resume` maps onto `ctx.sessions` load-and-replay rather than anything provider-specific.
-
-### 9.4 Session daemon
-
-The same codec serves a long-lived variant, where a supervisor keeps one persistent process per agent and injects messages over its lifetime rather than per run. This needs `--resume`, session fork, and durable approvals, all of which exist for other reasons. It is a thin layer over the same protocol.
+Reconnect storms after a deploy are the predictable failure mode. Jittered client backoff, plus a server-side cap on concurrent replays, since replay reads the log and a thundering herd of full-history replays is the expensive case.
 
 ### 9.5 Later, if warranted
 
-A web console rendering the live transcript over Turbo Streams, and a Rails engine exposing `Terret.boot(profile:)` for embedding agents in an existing app. Neither is v1. An interactive TUI remains out of scope.
+A web console rendering the live transcript, which is a second consumer of the same event stream and therefore mostly free. An ACP server (§6.8). A Rails engine exposing `Terret.boot(profile:)` for embedding agents in an existing app. None is v1. An interactive TUI remains out of scope.
 
 ## 10. Dependency Choices
 
@@ -434,6 +421,7 @@ A web console rendering the live transcript over Turbo Streams, and a Rails engi
 | Ruby | latest 4.x | `Data`, Fiber scheduler maturity, YJIT; pinned in `.ruby-version` and `mise.toml` |
 | Kernel deps | stdlib + `async` | hames stays tiny |
 | HTTP/SSE | `async-http` | native fiber streaming |
+| WebSocket | `async-websocket` | §9; same reactor as everything else |
 | Autoload | `zeitwerk` | per-gem loaders |
 | Config validation | `dry-schema` | also generates config catalog + tool JSON Schemas |
 | SQLite | `sqlite3` (WAL) | store gem only |
@@ -442,7 +430,7 @@ A web console rendering the live transcript over Turbo Streams, and a Rails engi
 | Lint | RuboCop | |
 | Docs | YARD; generated events.md / config-catalog.md | CI-diffed |
 
-Two entries from v0.1 are gone. There is no CLI framework dependency, since there is no CLI. There is no web framework in the core path, since the console is deferred.
+One entry is new: `async-websocket` carries §9, which keeps the socket on the same Fiber reactor as the adapter streams and the tool barriers rather than introducing a second concurrency model. Two entries from v0.1 are gone. There is no CLI framework dependency, since there is no CLI. There is no web framework in the core path, since the console is deferred.
 
 The shipped code currently uses minitest rather than RSpec, and the LLM vocabulary lives in `terret-core` rather than a separate gem. Both are settled; §11 reflects the first.
 
@@ -451,7 +439,7 @@ The shipped code currently uses minitest rather than RSpec, and the LLM vocabula
 - **Kernel unit tests** covering dispatch modes (waterfall short-circuit, prepend, disposal order), fork and isolate semantics, loader ordering, and hot-unload.
 - **Loop tests against a scripted adapter.** A `FakeAdapter` driven by declarative scripts makes turn-flow tests deterministic and fast, and every event sequence in §2.4 gets a golden-order test.
 - **Log invariant property tests.** Generate random plugin sets that inject context and rewrite claims, then assert the `derive_messages` digest always matches the outbound request.
-- **Protocol conformance suite.** The highest-value tests in v1. Drive the headless entry point with recorded stdin transcripts and assert the stdout NDJSON matches golden files byte for byte, covering a plain turn, a multi-step tool turn, a mid-turn steer, a denied tool, a resume, and a cancellation. This suite is what "compatible" means operationally, so it should be written before the implementation it checks.
+- **Socket protocol tests.** The highest-value tests in v1, and they should be written before the implementation they check. Drive a connection with recorded client frames and assert the emitted event stream matches golden files, covering a plain turn, a multi-step tool turn, a mid-turn steer, a denied tool, and a cancellation. Then the cases that only a persistent connection has: a drop mid-turn where the agent must keep working, a reconnect with `from_seq` that yields no gap and no unexpected duplicate, a slow reader that gets dropped rather than stalling the loop, and a `cancel` racing a `result`.
 - **Adapter contract suite.** One shared behavior run against the adapter with recorded SSE cassettes (VCR mangles streaming, so a custom cassette recorder is needed), plus a live smoke lane behind an env key.
 - **Tool and sandbox integration.** Docker-based tests in CI on Linux runners, landlock tests on a Linux matrix, and snapshot tests for prompt assembly, since byte-stable rendering is a test rather than an aspiration when caching depends on it.
 - **Bench lane.** Track chunk throughput and per-event dispatch overhead so kernel changes cannot silently regress streaming.
@@ -466,30 +454,36 @@ Each phase ends with demoable acceptance criteria. No estimates are given; seque
 
 **M2. Log, loop, and the OpenRouter adapter. PARTIALLY SHIPPED.** Session log with the invariant, `derive_messages`, prompt assembly, tool registry and pipeline, the default loop, and in-memory plus JSONL stores are all built and tested against `FakeAdapter`. What remains is the OpenRouter adapter itself and `async-http` streaming. *Accept:* a multi-step tool turn completes against a real model, golden event-order tests stay green, and the invariant survives an injected-context property test.
 
-**M3. The protocol surface.** The `-p` stream-json codec in both directions, stdin steering, `--resume` over session load and replay, the system-prompt entry points, model and effort selection, and the declarative tool allow list with a non-prompting deny mode. *Accept:* the protocol conformance suite passes, and an orchestrator that speaks this contract drives a Terret run end to end with no changes on its side.
+**M3. Durable sessions.** SQLite store, `read(session_id, from_seq:)`, load-and-replay resume, session fork. Nothing user-visible ships here, which is why it is easy to skip and why skipping it would be a mistake: every guarantee in §9.3 rests on this being exact. *Accept:* a session survives a process restart and resumes with byte-identical derived context, and a replay from an arbitrary `seq` yields the same events as a live tail from that point.
 
-**M4. MCP client.** stdio and streamable-HTTP servers mounted as tool sources under a namespace, with per-server policy and a strict mode that ignores ambient config. *Accept:* a run whose entire tool roster arrives from MCP servers executes under policy, driven through the M3 protocol surface.
+**M4. The socket.** `terret-ws`: one connection per agent bound to a forked context, durable events out, the five client frames in §9.2 in, `from_seq` replay-then-tail, bounded-queue backpressure, heartbeat, bearer auth. *Accept:* the socket protocol tests pass, including the connection-drop cases; an agent survives a client disconnect mid-turn and the reconnecting client sees no gap.
 
-**M5. Execution world.** fs, subprocess, shell, and terminals seams; std tools under Claude Code-compatible names; sandbox `none` and `docker`; workspace scoping; approvals end to end. *Accept:* one patch row moves bash, read, write, and PTY into a container with zero tool changes, and a parked approval survives a process restart.
+**M5. MCP client.** stdio and streamable-HTTP servers mounted as tool sources under a namespace, with per-server policy and a strict mode that ignores ambient config, plus the declarative per-agent allow list. *Accept:* an agent whose entire tool roster arrives from MCP servers works under policy, driven over the socket.
 
-**M6. Session daemon and subagents.** Persistent per-agent processes, session fork, the `task` tool over the subagent seam, background jobs, and titling. *Accept:* a session survives a restart and resumes with identical derived context, and a subagent run appears in the parent's log with correct lineage.
+**M6. Long-lived agent hardening.** Everything a session that runs for weeks needs and a short run does not: context compaction, durable approvals resolved over the socket, wake-on-stimulus semantics through the inbox, titling, and cost accounting per session. *Accept:* an agent runs across many wakes and a deploy without losing derived context, and a parked approval resolves after a restart.
 
-**M7. Hardening and 0.1 release.** ACP server, docs and cookbook, `doctor`, the bench lane, the security pass in §13, RubyGems release, and an example third-party plugin gem published from a separate repo to prove the extension story.
+**M7. Execution world.** fs, subprocess, shell, and terminals seams; std tools; sandbox `none` and `docker`; workspace scoping. *Accept:* one patch row moves bash, read, write, and PTY into a container with zero tool changes.
 
-The reordering versus v0.1 is deliberate and worth stating plainly. MCP and the tool allow list moved from late to early, because an orchestrator delivering its tool roster over MCP cannot use Terret at all without them. The execution world moved later, because a run whose tools are all MCP-provided does not need local fs or subprocess access. Multi-provider adapter work left the roadmap entirely, absorbed by OpenRouter. The interactive CLI left the roadmap entirely.
+**M8. Subagents, then 0.1 release.** The `task` tool over the subagent seam, background jobs, ACP server, docs and cookbook, `doctor`, the bench lane, the security pass in §13, RubyGems release, and an example third-party plugin gem published from a separate repo to prove the extension story.
+
+The ordering is the plan's main claim, so the reasoning is worth stating plainly. Durable sessions come before the socket because reconnect correctness is a property of the log rather than of the transport, and building the socket first would mean discovering that the hard way. MCP comes early because an agent whose tool roster arrives over MCP is the launch workload, and no amount of transport substitutes for it. The execution world moves late for the same reason: that agent needs no local fs or subprocess access at all. Multi-provider adapter work left the roadmap, absorbed by OpenRouter. The interactive CLI and command-line compatibility both left the roadmap entirely.
 
 ## 13. Security Posture
 
 Sandbox `docker` with `network: none` is the default for untrusted work, and `none` requires explicit opt-in per profile. Approval policy defaults to `:policy` for mutating fs tools, `:always` for bash outside a sandbox, and `:policy` inside. Credentials never enter the session log, enforced by redaction in `tools/post_execute` plus a log-append scrubber. `web_fetch` gets an allow and deny domain policy row.
 
-The protocol surface adds two concerns of its own. The prompt must never appear in process argv, since `ps` is world-readable on a shared host; it arrives on stdin as the first message line for exactly this reason. And a per-run config directory must be isolated, so that concurrent sibling runs cannot corrupt each other's state through a shared file.
+The socket adds concerns of its own. A connection's bearer token authorizes exactly one agent, because the stream it subscribes to carries everything that agent's model saw, which is the most sensitive artifact in the system. Authorization is checked before the agent is resolved, so a bad token cannot probe which agent ids exist. Replay is capped per connection, since an unbounded `from_seq` request is a cheap way to make the server read an entire history.
+
+Multi-tenancy inside one process is the structural risk. Agents share a reactor and a service tree, so isolation rests on the forked context in §4.1 rather than on the OS. That is adequate for agents under common ownership and inadequate for mutually untrusted ones. Where untrusted execution is required, the boundary is a separate process with the sandbox in §6.6, not a fork.
 
 Prompt-injection stance: tool results are data. The loop never executes instructions from tool output except through the model, and the approval seam is the human backstop. Document this threat model explicitly in `docs/security.md`.
 
 ## 14. Risks and Open Questions
 
 - **Waterfall ergonomics in Ruby.** Explicit `next_.()` is unfamiliar. The M0 spike validated the API feel before it fossilized, and it held up. Fallback if it sours: a `throw`/`catch` short-circuit sugar.
-- **Wire-format drift.** Compatibility is with a moving target maintained by someone else. The conformance suite in §11 is the tripwire, and it should be run against a pinned version of the reference implementation so that upstream changes surface as test failures rather than production surprises. Pin the version explicitly and treat a bump as a reviewed change.
+- **No side-by-side proving path.** Declining command-line compatibility means the first time Terret drives a real agent is also the first time anything depends on it. Recover some of that confidence cheaply: capture an incumbent harness's event stream on live traffic, replay the same stimulus into Terret offline, and diff the derived context rather than the wire bytes. That compares the thing that matters (what the model saw) without shipping a compatibility layer that would then need deleting.
+- **Blast radius of one process.** Many agents on one reactor means one wedged Fiber, one memory leak, or one deploy can affect every agent on the box. A run-per-process model spreads that risk at the cost of everything §9.1 argues for. Mitigate with per-agent supervision inside the reactor, a hard cap on agents per process, and shard by process before shipping the cap as a tuning knob.
+- **Long-session context growth.** A session measured in weeks outgrows any context window, so compaction is not a nicety and it interacts directly with the §2.5 invariant: a compacted history is still model-visible, so it must be logged as its own durable event rather than computed on the fly. Design the event before the feature.
 - **OpenRouter as a single point of failure.** One adapter means one vendor relationship, one rate limiter, and one normalization layer standing between Terret and every model. The seam makes a native adapter cheap to add, but it is worth knowing this is a deliberate concentration of risk rather than an oversight.
 - **Feature passthrough through OpenRouter.** Prompt caching and interleaved thinking are the two §15 claims most likely to degrade. Verify per model rather than assuming, and be willing to demote a claim rather than defend it.
 - **Fiber-scheduler edge cases** in `sqlite3` and `pty` under load. Mitigate with the writer-task pattern and soak tests during M5.
@@ -499,16 +493,16 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
 
 ## 15. What "Cutting Edge" Means Here, Concretely
 
-Interleaved thinking blocks preserved as first-class message parts and replayed. Provider prompt caching made reliable by byte-stable prompt assembly. Mid-conversation model switching on one session log. Structured cancellation. Parked approvals that survive restarts. MCP interop. A replaceable agent loop. A protocol surface that lets an existing orchestrator adopt Terret without rewriting itself.
+Agents that live for weeks on one session log, steerable mid-turn over a live connection, surviving disconnects and deploys without losing derived context. Interleaved thinking blocks preserved as first-class message parts and replayed. Provider prompt caching made reliable by byte-stable prompt assembly. Mid-conversation model switching on one session log. Structured cancellation. Parked approvals that survive restarts. MCP interop. A replaceable agent loop.
 
 Each of these follows from two disciplines: everything is a plugin, and model-visible means logged. Keep those two and the rest stays honest. Note that the first two on this list are the ones most exposed to §14's passthrough risk, so they are claims to verify rather than assume.
 
 ## 16. Immediate Next Actions
 
 1. Finish M2: the OpenRouter adapter over `async-http`, replacing `FakeAdapter` in the demo path.
-2. Write `docs/protocol.md` capturing the §9 contract precisely, then the conformance suite from §11, both before the M3 implementation. Primer-first is one of dsh's better exports.
-3. Write `docs/hames-primer.md`, still outstanding from the original plan.
-4. Pin the reference implementation version the conformance suite tests against.
+2. Write `docs/protocol.md` capturing the §9 frame set and the reconnect contract precisely, then the socket protocol tests from §11, both before the M4 implementation. Primer-first is one of dsh's better exports.
+3. Decide the compaction event now rather than at M6, since §14 makes it an invariant question rather than a feature.
+4. Write `docs/hames-primer.md`, still outstanding from the original plan.
 5. Run the trademark search (§1 Naming), the last unchecked item from the original launch list.
 
 ## 17. Appendix: Naming Landscape
