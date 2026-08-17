@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      - name: Test suites
+        run: bundle exec rake test
+
+      # The dispatch mode of every event is public contract. docs/events.md is
+      # generated, so a drifted catalog means someone changed a contract
+      # without saying so.
+      - name: Event catalog is current
+        run: |
+          bundle exec rake events:catalog
+          git diff --exit-code docs/events.md

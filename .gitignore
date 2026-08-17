@@ -1,0 +1,9 @@
+*.gem
+.bundle/
+vendor/bundle/
+Gemfile.lock
+pkg/
+tmp/
+sessions/
+*.jsonl
+.DS_Store
