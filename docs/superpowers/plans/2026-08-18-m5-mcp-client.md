@@ -1682,6 +1682,31 @@ git commit -m "Mark M5 shipped with a live MCP demo"
 
 ---
 
+## Final-gate fallout (post-Task-13, before push)
+
+The whole-milestone Claude review and the Codex review gate produced one last
+fix batch, landed as "Serialize stdio calls and finish teardown before M5
+ships" — the shipped code supersedes this plan's Task 6-9 blocks in four ways:
+
+1. **stdio calls serialize per entry** (Codex P1): manceps stdio correlates
+   replies by order, so a fiber already inside `call_tool` when another's
+   timeout fired could read the abandoned request's late reply. Entries for
+   `command:` servers carry a `Mutex`; `call_remote` wraps the whole
+   heal+call sequence in it (waiters re-check the poison flag after
+   acquiring). HTTP entries stay lock-free — multiplexing is safe there.
+2. **`unmount!` disposes resource sections** (Codex P1, reversing Task 9's
+   caller-owned-only ruling): sections track in `entry[:resource_disposers]`
+   (separate from `entry[:disposers]`, which reconcile churn clears) and die
+   with the server; the returned disposer still works (double-dispose safe).
+3. **Reconcile fetches before swapping** (Codex P2): `sync_tools` re-lists
+   FIRST, then disposes/re-registers, and the notification handler rescues,
+   so a transient re-list failure leaves the roster intact and the listener
+   alive.
+4. **Doc precision** (Claude final review): docs/mcp.md's listener clause
+   matches the always-runs reality, its Resources section documents unmount
+   teardown, §14's sqlite/pty soak line retargeted to M7, CLAUDE.md's gem
+   count corrected to seven.
+
 ## Acceptance (M5, from plan §12)
 
 - [x] stdio and streamable-HTTP servers mount as namespaced tool sources (Tasks 6, 11 — HTTP path exercised via fake client + manceps' own webmock-tested transport; stdio proven live).
