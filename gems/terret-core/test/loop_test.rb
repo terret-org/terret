@@ -405,6 +405,38 @@ class TurnFlowTest < Minitest::Test
     assert_same second, ctx[:loop].agent(first.id)
   end
 
+  def test_a_pre_execute_listener_on_the_agents_fork_fires_for_that_agent_only
+    ctx, = boot(script: two_step_script)
+    register_weather(ctx)
+    session_a = ctx[:sessions].create
+    session_b = ctx[:sessions].create
+    agent_a = ctx[:loop].spawn_agent(session_id: session_a.id)
+    agent_b = ctx[:loop].spawn_agent(session_id: session_b.id)
+
+    agent_a.ctx.with_owner("policy-a") do
+      agent_a.ctx.on("tools/pre_execute") do |call, _next_|
+        Terret::Tools::Veto.new(reason: "agent A may not use tools")
+      end
+    end
+
+    assert_equal :completed, ctx[:loop].run_turn(agent_a, "weather?")
+    vetoed = session_a.events.find { |e| e.type == "tool/result" }
+    assert_equal "agent A may not use tools", vetoed.payload[:error]
+
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(two_step_script))
+    assert_equal :completed, ctx[:loop].run_turn(agent_b, "weather?")
+    fine = session_b.events.find { |e| e.type == "tool/result" }
+    assert_equal "22C in CDMX", fine.payload[:content]
+  end
+
+  def test_execute_refuses_to_run_without_a_context
+    ctx, = boot(script: [{ text: "hi" }])
+    register_weather(ctx)
+    assert_raises(ArgumentError) do
+      ctx[:tools].execute(Terret::Tools::Call.new(id: "t", name: "weather", args: {}, session_id: "s"))
+    end
+  end
+
   class WeatherPlugin < Hames::Service
     inject :tools
     def start(ctx)

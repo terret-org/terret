@@ -157,7 +157,8 @@ module Terret
             end
 
             result = ctx[:tools].execute(
-              Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid)
+              Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid),
+              ctx: ctx
             )
             sessions.append(sid, "tool/result",
                             { id: result.id, content: result.content, error: result.error })

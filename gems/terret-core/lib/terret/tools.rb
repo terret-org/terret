@@ -37,11 +37,18 @@ module Terret
       def schemas = @defs.values.map(&:schema)
       def fetch(name) = @defs.fetch(name.to_s)
 
-      def execute(call)
-        admitted = @ctx.waterfall("tools/pre_execute", call)
+      # Execution runs the three-waterfall pipeline: pre_execute (validate /
+      # veto / rewrite) -> execute (a provider may replace execution
+      # wholesale) -> post_execute (truncate / redact). Waterfalls dispatch
+      # on `ctx`, which callers set to the AGENT's forked context so
+      # per-agent policy listeners ride the fork (root listeners still run
+      # first — fork dispatch chains parent-first). ctx is required — a
+      # forgotten kwarg must fail loudly, not silently skip per-agent policy.
+      def execute(call, ctx:)
+        admitted = ctx.waterfall("tools/pre_execute", call)
         return Result.new(id: call.id, content: nil, error: admitted.reason) if admitted.is_a?(Veto)
 
-        result = @ctx.waterfall("tools/execute", admitted) do |c|
+        result = ctx.waterfall("tools/execute", admitted) do |c|
           d = fetch(c.name)
           begin
             Result.new(id: c.id, content: d.handler.call(**c.args), error: nil)
@@ -49,7 +56,7 @@ module Terret
             Result.new(id: c.id, content: nil, error: "#{e.class}: #{e.message}")
           end
         end
-        @ctx.waterfall("tools/post_execute", result)
+        ctx.waterfall("tools/post_execute", result)
       end
     end
 
