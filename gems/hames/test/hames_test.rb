@@ -244,3 +244,72 @@ class HamesServiceInheritanceTest < Minitest::Test
     assert_equal %i[dep dep2], grandchild.inject
   end
 end
+
+class HamesEffectHygieneTest < Minitest::Test
+  def setup
+    Hames.reset_events!
+    @ctx = Hames::Context.new
+  end
+
+  def effects_count = @ctx.instance_variable_get(:@effects).size
+
+  def test_a_called_disposer_removes_its_own_effect_entry
+    calls = 0
+    disposer = @ctx.effect { -> { calls += 1 } }
+    assert_equal 1, effects_count
+
+    disposer.call
+    assert_equal 1, calls
+    assert_equal 0, effects_count, "a disposed effect must not stay pinned in @effects"
+  end
+
+  def test_a_disposer_is_idempotent
+    calls = 0
+    disposer = @ctx.effect { -> { calls += 1 } }
+    disposer.call
+    disposer.call
+    assert_equal 1, calls
+  end
+
+  def test_dispose_owner_still_runs_everything_once_in_reverse
+    order = []
+    @ctx.with_owner("me") do
+      @ctx.effect { -> { order << :a } }
+      @ctx.effect { -> { order << :b } }
+    end
+    @ctx.dispose_owner!("me")
+    assert_equal %i[b a], order
+    assert_equal 0, effects_count
+  end
+
+  def test_manually_disposing_then_owner_disposal_does_not_double_run
+    calls = 0
+    disposer = nil
+    @ctx.with_owner("me") { disposer = @ctx.effect { -> { calls += 1 } } }
+    disposer.call
+    @ctx.dispose_owner!("me")
+    assert_equal 1, calls
+  end
+
+  def test_a_disposed_listener_leaves_no_effect_entry
+    Hames.event "tick", mode: :emit
+    seen = []
+    disposer = @ctx.on("tick") { seen << 1 }
+    assert_equal 1, effects_count
+
+    disposer.call
+    @ctx.emit("tick")
+    assert_empty seen, "a disposed listener must not fire"
+    assert_equal 0, effects_count, "a disposed listener must not stay pinned in @effects"
+  end
+
+  def test_a_listener_disposer_is_idempotent_across_owner_disposal
+    Hames.event "tock", mode: :emit
+    disposer = nil
+    @ctx.with_owner("me") { disposer = @ctx.on("tock") { } }
+    disposer.call
+    @ctx.dispose_owner!("me") # must not double-run or raise
+    disposer.call             # nor this
+    assert_equal 0, effects_count
+  end
+end

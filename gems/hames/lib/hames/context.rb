@@ -49,10 +49,28 @@ module Hames
 
     # Runs the block now; the block must return a disposer callable (or nil).
     # Disposal happens in reverse registration order, per owner, on unload.
+    # The disposer handed back is self-removing and idempotent: calling it
+    # runs the teardown once and drops its own entry from @effects, so a
+    # long-lived context does not pin every disposed registration (and
+    # whatever its closure captured). The done flag lives on the frame (not
+    # presence in @effects) because dispose_owner! removes frames from
+    # @effects BEFORE running them — a presence check would silently skip
+    # the real teardown there.
     def effect(&block)
       disposer = block.call
-      @effects << [@owner, disposer] if disposer
-      disposer
+      return disposer unless disposer
+
+      frame = [@owner, nil, false]
+      wrapped = lambda do
+        next if frame[2]
+
+        frame[2] = true
+        @effects.delete(frame)
+        disposer.call
+      end
+      frame[1] = wrapped
+      @effects << frame
+      wrapped
     end
 
     def with_owner(owner)
@@ -73,7 +91,7 @@ module Hames
 
     # Dispose the whole context (child scopes call this when they end).
     def dispose!
-      @effects.reverse_each { |(_o, d)| d.call }
+      @effects.dup.reverse_each { |(_o, d)| d.call }
       @effects.clear
     end
 
@@ -88,9 +106,7 @@ module Hames
       l = Listener.new(name:, block:, prepend:, owner: @owner)
       bucket = @listeners[name]
       prepend ? bucket.unshift(l) : bucket.push(l)
-      disposer = -> { bucket.delete(l) }
-      @effects << [@owner, disposer]
-      disposer
+      effect { -> { bucket.delete(l) } }
     end
 
     # Listeners visible to this context: parent chain first (registration
