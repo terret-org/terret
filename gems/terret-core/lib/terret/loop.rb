@@ -14,6 +14,9 @@ module Terret
   # process rather than raising the cap when this bites.
   class AgentCapExceeded < StandardError; end
 
+  # Claimed messages are [type, text] pairs — "user/message" for the turn's
+  # input, "context/injected" for steers drained from the inbox — so the log
+  # records provenance even after a pre_step listener rewrites the claim.
   Claim = Data.define(:messages, :rejected, :reason) do
     def self.of(messages) = new(messages:, rejected: false, reason: nil)
     def self.reject(reason:) = new(messages: [], rejected: true, reason:)
@@ -133,7 +136,7 @@ module Terret
       steps = 0
       steered = []
 
-      pending = [input].compact
+      pending = input.nil? ? [] : [["user/message", input]]
 
       begin
         sessions.append(sid, "turn/start", { agent: agent.id })
@@ -145,7 +148,7 @@ module Terret
 
           # anything injected since the last step rides along with this one
           steered = agent.drain_inbox
-          pending.concat(steered)
+          pending.concat(steered.map { |t| ["context/injected", t] })
 
           claim = ctx.waterfall("agent/pre_step", Claim.of(pending)) { |c| c }
           if claim.rejected || (steps.zero? && claim.messages.empty? && pending.empty?)
@@ -160,7 +163,7 @@ module Terret
           raise "runaway turn" if steps > MAX_STEPS
 
           sessions.append(sid, "step/start", { n: steps })
-          claim.messages.each { |t| sessions.append(sid, "user/message", { text: t }) }
+          claim.messages.each { |(type, text)| sessions.append(sid, type, { text: text }) }
           steered = [] # once logged, these must never requeue
           pending = []
 

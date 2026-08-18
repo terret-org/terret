@@ -105,6 +105,8 @@ class Renderer
       turbo_tag("update", "transcript", "")
     when "user/message"
       turbo_tag("append", "transcript", %(<div class="msg user">#{h(ev.payload[:text])}</div>))
+    when "context/injected"
+      turbo_tag("append", "transcript", %(<div class="msg user">(injected) #{h(ev.payload[:text])}</div>))
     when "step/start"
       @step_id = "step-#{ev.seq}"
       turbo_tag("append", "transcript", %(<div class="msg assistant" id="#{@step_id}"></div>))

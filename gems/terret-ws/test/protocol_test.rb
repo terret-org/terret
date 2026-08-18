@@ -242,10 +242,10 @@ class ProtocolTest < Minitest::Test
         turn/start
         step/start user/message assistant/message
         tool/call tool/result step/end
-        step/start user/message assistant/message step/end
+        step/start context/injected assistant/message step/end
         turn/end
       ], sock.event_types
-      steer = sock.events.select { |f| f[:type] == "user/message" }.last
+      steer = sock.events.select { |f| f[:type] == "context/injected" }.last
       assert_equal "actually, celsius please", steer[:payload][:text]
       sock.client_close
     end

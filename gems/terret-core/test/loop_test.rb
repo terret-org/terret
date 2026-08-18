@@ -170,15 +170,29 @@ class TurnFlowTest < Minitest::Test
     refute_includes ctx[:tools].schemas.map { |s| s[:name] }, "weather"
   end
 
+  def test_steers_log_as_context_injected_and_input_as_user_message
+    ctx, = boot(script: [{ text: "ok" }])
+    agent, session = spawn(ctx)
+    agent.inject("remember the tone")
+
+    ctx[:loop].run_turn(agent, "hello")
+
+    typed = session.events.filter_map do |e|
+      [e.type, e.payload[:text]] if %w[user/message context/injected].include?(e.type)
+    end
+    assert_equal [["user/message", "hello"], ["context/injected", "remember the tone"]], typed
+  end
+
   def test_injected_context_rides_along_with_the_waking_message
     ctx, = boot(script: [{ text: "noted" }])
     agent, session = spawn(ctx)
     agent.inject("FYI: user prefers metric units")
     ctx[:loop].run_turn(agent, "hello")
 
-    user_events = session.events.select { |e| e.type == "user/message" }
-    assert_equal ["hello", "FYI: user prefers metric units"],
-                 user_events.map { |e| e.payload[:text] }
+    assert_equal ["hello"],
+                 session.events.select { |e| e.type == "user/message" }.map { |e| e.payload[:text] }
+    assert_equal ["FYI: user prefers metric units"],
+                 session.events.select { |e| e.type == "context/injected" }.map { |e| e.payload[:text] }
   end
 
   def test_a_mid_turn_inject_lands_in_the_next_step
@@ -202,11 +216,11 @@ class TurnFlowTest < Minitest::Test
       turn/start
       step/start user/message assistant/message
       tool/call tool/result step/end
-      step/start user/message assistant/message step/end
+      step/start context/injected assistant/message step/end
       turn/end
     ], chunkless
 
-    steer = session.events.select { |e| e.type == "user/message" }.last
+    steer = session.events.select { |e| e.type == "context/injected" }.last
     assert_equal "actually, celsius please", steer.payload[:text]
     assert agent.inbox_empty?
   end
@@ -353,8 +367,10 @@ class TurnFlowTest < Minitest::Test
     refute agent.inbox_empty?, "a rejected claim must not eat the steer"
 
     assert_equal :completed, ctx[:loop].run_turn(agent, "second try")
-    texts = session.events.select { |e| e.type == "user/message" }.map { |e| e.payload[:text] }
-    assert_equal ["second try", "remember the umbrella"], texts
+    typed = session.events.filter_map do |e|
+      [e.type, e.payload[:text]] if %w[user/message context/injected].include?(e.type)
+    end
+    assert_equal [["user/message", "second try"], ["context/injected", "remember the umbrella"]], typed
   end
 
   def test_usage_reported_by_the_adapter_lands_in_the_step_end_payload
