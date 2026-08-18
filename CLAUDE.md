@@ -1,6 +1,6 @@
 # Terret
 
-Ruby-native, model-agnostic agent harness where everything is a plugin. Four gems in one
+Ruby-native, model-agnostic agent harness where everything is a plugin. Five gems in one
 repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible effects,
@@ -12,14 +12,19 @@ repo:
   OpenAI-compatible API behind `ctx.llm`, streaming SSE with tool calling and usage
   accounting. The transport is injectable, so its unit tests need no network and no
   gems; only the default `AsyncTransport` requires `async-http`.
+- `gems/terret-store-sqlite` is the durable session store (M3): the append-only log
+  one event per row in SQLite (WAL) behind the `ctx[:session_store]` seam. Memory and
+  JSONL providers live in terret-core; the store row is explicit in every boot.
 - `gems/terret` is a placeholder holding the name. It will carry profiles and boot.
   None of that is written. Do not add real behaviour here without reading §5 and §9 of
   the plan first.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
-here covers M0–M2: kernel, session log with the invariant, tools pipeline, loop, and the
+here covers M0–M3: kernel, session log with the invariant, tools pipeline, loop, and the
 OpenRouter adapter. `LLM::FakeAdapter` (canned script replay) remains the test/demo
 default; the OpenRouter path is proven by canned-wire tests plus a live smoke lane.
+Session payloads are primitives at the append boundary; typed parts encode through
+`LLM.encode_part`.
 
 Note the plan has drifted from the code in places. It specifies RSpec (this uses minitest),
 Ruby 3.4+ (this targets 4.0.6), and a separate `terret-llm` gem (the vocabulary lives in
