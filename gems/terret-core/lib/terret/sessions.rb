@@ -8,6 +8,7 @@ module Terret
   SessionEvent = Data.define(:id, :session_id, :seq, :at, :type, :payload)
 
   class LogInvariantViolation < StandardError; end
+  class NonPrimitivePayload < StandardError; end
 
   # ctx.sessions — the append-only session log. The single source of the
   # context the model sees: derive_messages projects model history from it,
@@ -40,7 +41,7 @@ module Terret
       s = fetch(session_id)
       ev = SessionEvent.new(
         id: SecureRandom.hex(8), session_id:, seq: s.events.length,
-        at: Time.now.utc, type: type.to_s, payload: payload
+        at: Time.now.utc, type: type.to_s, payload: normalize_payload(payload)
       )
       s.events << ev
       persist(ev)
@@ -57,7 +58,8 @@ module Terret
         when "user/message", "context/injected"
           LLM::Message.new(role: :user, parts: [LLM::Text.new(text: ev.payload[:text])])
         when "assistant/message"
-          LLM::Message.new(role: :assistant, parts: ev.payload[:parts])
+          LLM::Message.new(role: :assistant,
+                           parts: ev.payload[:parts].map { |p| LLM.decode_part(p) })
         when "tool/result"
           LLM::Message.new(role: :tool, parts: [
             LLM::ToolResult.new(id: ev.payload[:id], content: ev.payload[:content],
@@ -89,6 +91,27 @@ module Terret
     end
 
     private
+
+    # The primitives contract: durable payloads hold only strings, numbers,
+    # booleans, nil, arrays, and symbol-keyed hashes of the same. Symbols in
+    # value position become strings; string keys become symbols. Anything
+    # else raises — typed objects are encoded at the edges (LLM.encode_part).
+    def normalize_payload(value)
+      case value
+      when String, Integer, Float, true, false, nil then value
+      when Symbol then value.to_s
+      when Array then value.map { |v| normalize_payload(v) }
+      when Hash
+        value.each_with_object({}) do |(k, v), out|
+          key = k.is_a?(Symbol) ? k : k.to_s.to_sym
+          raise NonPrimitivePayload, "duplicate key #{key.inspect} after coercion" if out.key?(key)
+
+          out[key] = normalize_payload(v)
+        end
+      else
+        raise NonPrimitivePayload, "#{value.class} is not storable; encode it first"
+      end
+    end
 
     def digest(messages)
       Digest::SHA256.hexdigest(messages.map(&:inspect).join("\x1e"))

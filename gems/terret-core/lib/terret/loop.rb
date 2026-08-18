@@ -89,7 +89,8 @@ module Terret
               usage = ev
             end
           end
-          sessions.append(sid, "assistant/message", { parts: message.parts })
+          sessions.append(sid, "assistant/message",
+                          { parts: message.parts.map { |p| LLM.encode_part(p) } })
           step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
 
           calls = message.tool_calls

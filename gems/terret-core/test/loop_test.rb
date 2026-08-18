@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "json"
 require_relative "../lib/terret"
 
 module TerretTestHarness
@@ -86,6 +87,18 @@ class TurnFlowTest < Minitest::Test
     assert_equal "22C in CDMX", history[2].parts.first.content
   end
 
+  def test_assistant_message_payloads_are_stored_as_primitives
+    ctx, = boot(script: two_step_script)
+    register_weather(ctx)
+    agent, session = spawn(ctx)
+    ctx[:loop].run_turn(agent, "Weather?")
+
+    parts = session.events.select { |e| e.type == "assistant/message" }
+                   .flat_map { |e| e.payload[:parts] }
+    assert(parts.all? { |p| p.is_a?(Hash) && p[:type].is_a?(String) })
+    assert_equal parts, JSON.parse(JSON.generate(parts), symbolize_names: true)
+  end
+
   def test_log_invariant_catches_a_side_channel
     ctx, = boot(script: [{ text: "hi" }])
     agent, = spawn(ctx)
@@ -105,7 +118,7 @@ class TurnFlowTest < Minitest::Test
     assert_raises(RuntimeError) { ctx[:loop].run_turn(agent, "hello") }
 
     assert_equal "turn/end", session.events.last.type
-    assert_equal :failed, session.events.last.payload[:status]
+    assert_equal "failed", session.events.last.payload[:status]
     assert_equal :idle, agent.status
   end
 
@@ -117,7 +130,7 @@ class TurnFlowTest < Minitest::Test
     status = ctx[:loop].run_turn(agent, "hello")
     assert_equal :rejected, status
     assert_equal %w[session/created turn/start turn/end], session.events.map(&:type)
-    assert_equal :rejected, session.events.last.payload[:status]
+    assert_equal "rejected", session.events.last.payload[:status]
   end
 
   def test_tools_pre_execute_veto_short_circuits_to_an_error_result
