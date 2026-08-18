@@ -99,7 +99,25 @@ module Terret
 
     def session_ids = @store.session_ids
 
+    # Rebuild a session's working set from the durable store. Idempotent: a
+    # session already in memory is returned as-is (write-through keeps the
+    # store equal). New appends continue after the last recorded seq.
+    def resume(session_id)
+      return @cache[session_id] if @cache.key?(session_id)
+
+      events = @store.read(session_id)
+      raise KeyError, "unknown session #{session_id}" if events.empty?
+
+      @cache[session_id] = Session.new(id: session_id, events: events,
+                                       parent_id: parent_id_from(events))
+    end
+
     private
+
+    def parent_id_from(events)
+      forked = events.reverse.find { |e| e.type == "session/forked" }
+      forked ? forked.payload[:from] : events.first&.payload&.[](:parent_id)
+    end
 
     # The primitives contract: durable payloads hold only strings, numbers,
     # booleans, nil, arrays, and symbol-keyed hashes of the same. Symbols in

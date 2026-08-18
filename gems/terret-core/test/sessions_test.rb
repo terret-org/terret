@@ -61,4 +61,65 @@ class SessionsPrimitivesTest < Minitest::Test
       ctx[:sessions].append(s.id, "user/message", { 1 => "x" })
     end
   end
+
+  def boot_with_store(store)
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: store },
+      { id: "sessions", plugin: Terret::Sessions }
+    ])
+    loader.boot!
+  end
+
+  def test_resume_rebuilds_a_session_from_the_store_and_continues_appending
+    store = Terret::Store::Memory.new
+    ctx1 = boot_with_store(store)
+    s = ctx1[:sessions].create
+    ctx1[:sessions].append(s.id, "user/message", { text: "hello" })
+
+    ctx2 = boot_with_store(store) # same provider instance = same durable state
+    resumed = ctx2[:sessions].resume(s.id)
+    assert_equal s.events, resumed.events
+
+    n = resumed.events.length
+    ev = ctx2[:sessions].append(s.id, "user/message", { text: "again" })
+    assert_equal n, ev.seq
+  end
+
+  def test_resume_is_idempotent_and_unknown_sessions_raise
+    store = Terret::Store::Memory.new
+    ctx = boot_with_store(store)
+    s = ctx[:sessions].create
+    assert_same ctx[:sessions].resume(s.id), ctx[:sessions].resume(s.id)
+    assert_raises(KeyError) { ctx[:sessions].resume("nope") }
+  end
+
+  def test_replay_from_seq_equals_a_live_tail_from_that_point
+    ctx = sessions_ctx
+    sessions = ctx[:sessions]
+    s = sessions.create
+    3.times { |i| sessions.append(s.id, "user/message", { text: "before #{i}" }) }
+
+    from = s.events.length
+    tail = []
+    ctx.on("session/event") { |ev| tail << ev if ev.session_id == s.id }
+    3.times { |i| sessions.append(s.id, "user/message", { text: "after #{i}" }) }
+
+    assert_equal tail, sessions.read(s.id, from_seq: from)
+  end
+
+  def test_fork_lineage_survives_resume
+    store = Terret::Store::Memory.new
+    ctx1 = boot_with_store(store)
+    s = ctx1[:sessions].create
+    ctx1[:sessions].append(s.id, "user/message", { text: "hello" })
+    child = ctx1[:sessions].fork(s.id)
+
+    ctx2 = boot_with_store(store)
+    resumed = ctx2[:sessions].resume(child.id)
+    assert_equal s.id, resumed.parent_id
+    assert_equal child.events, resumed.events
+  end
 end
