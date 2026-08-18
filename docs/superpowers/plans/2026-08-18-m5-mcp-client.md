@@ -235,11 +235,18 @@ Add to `gems/terret-core/test/loop_test.rb`:
     vetoed = session_a.events.find { |e| e.type == "tool/result" }
     assert_equal "agent A may not use tools", vetoed.payload[:error]
 
-    ctx[:llm].register_adapter("fake2", Terret::LLM::FakeAdapter.new(two_step_script))
-    ctx[:llm].set_role(:main, "fake2/scripted")
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(two_step_script))
     assert_equal :completed, ctx[:loop].run_turn(agent_b, "weather?")
     fine = session_b.events.find { |e| e.type == "tool/result" }
     assert_equal "22C in CDMX", fine.payload[:content]
+  end
+
+  def test_execute_refuses_to_run_without_a_context
+    ctx, = boot(script: [{ text: "hi" }])
+    register_weather(ctx)
+    assert_raises(ArgumentError) do
+      ctx[:tools].execute(Terret::Tools::Call.new(id: "t", name: "weather", args: {}, session_id: "s"))
+    end
   end
 ```
 
@@ -258,8 +265,9 @@ In `gems/terret-core/lib/terret/tools.rb`, change `execute`'s signature and ever
       # wholesale) -> post_execute (truncate / redact). Waterfalls dispatch
       # on `ctx`, which callers set to the AGENT's forked context so
       # per-agent policy listeners ride the fork (root listeners still run
-      # first — fork dispatch chains parent-first).
-      def execute(call, ctx: @ctx)
+      # first — fork dispatch chains parent-first). ctx is required — a
+      # forgotten kwarg must fail loudly, not silently skip per-agent policy.
+      def execute(call, ctx:)
         admitted = ctx.waterfall("tools/pre_execute", call)
         return Result.new(id: call.id, content: nil, error: admitted.reason) if admitted.is_a?(Veto)
 
@@ -784,7 +792,8 @@ class MCPServiceTest < Minitest::Test
     ctx[:mcp].mount!
 
     result = ctx[:tools].execute(
-      Terret::Tools::Call.new(id: "t1", name: "mcp__s__echo", args: { text: "hi" }, session_id: "x")
+      Terret::Tools::Call.new(id: "t1", name: "mcp__s__echo", args: { text: "hi" }, session_id: "x"),
+      ctx: ctx
     )
     assert_nil result.error
     assert_equal({ "said" => "hi" }, result.content)
@@ -798,7 +807,8 @@ class MCPServiceTest < Minitest::Test
     ctx[:mcp].mount!
 
     result = ctx[:tools].execute(
-      Terret::Tools::Call.new(id: "t1", name: "mcp__s__bad", args: {}, session_id: "x")
+      Terret::Tools::Call.new(id: "t1", name: "mcp__s__bad", args: {}, session_id: "x"),
+      ctx: ctx
     )
     assert_equal "kaboom", result.error
     assert_nil result.content
@@ -1008,12 +1018,14 @@ The stdio transport correlates responses by ordering, not ids — a late reply t
 
     Sync do
       first = ctx[:tools].execute(
-        Terret::Tools::Call.new(id: "t1", name: "mcp__s__slow", args: {}, session_id: "x")
+        Terret::Tools::Call.new(id: "t1", name: "mcp__s__slow", args: {}, session_id: "x"),
+        ctx: ctx
       )
       assert_match(/mcp timeout after 1s/, first.error)
 
       second = ctx[:tools].execute(
-        Terret::Tools::Call.new(id: "t2", name: "mcp__s__slow", args: {}, session_id: "x")
+        Terret::Tools::Call.new(id: "t2", name: "mcp__s__slow", args: {}, session_id: "x"),
+        ctx: ctx
       )
       assert_nil second.error
       assert_equal 1, fake.reconnects, "the poisoned connection must reconnect exactly once"
@@ -1327,7 +1339,8 @@ class MCPIntegrationTest < Minitest::Test
       assert_equal %w[mcp__fix__echo mcp__fix__slow], names
 
       result = ctx[:tools].execute(
-        Terret::Tools::Call.new(id: "t1", name: "mcp__fix__echo", args: { text: "hi" }, session_id: "x")
+        Terret::Tools::Call.new(id: "t1", name: "mcp__fix__echo", args: { text: "hi" }, session_id: "x"),
+        ctx: ctx
       )
       assert_nil result.error
       assert_equal "echo: hi", result.content
@@ -1344,7 +1357,8 @@ class MCPIntegrationTest < Minitest::Test
       ticker = task.async { 10.times { ticks += 1; sleep 0.1 } }
 
       result = ctx[:tools].execute(
-        Terret::Tools::Call.new(id: "t1", name: "mcp__fix__slow", args: { seconds: 30 }, session_id: "x")
+        Terret::Tools::Call.new(id: "t1", name: "mcp__fix__slow", args: { seconds: 30 }, session_id: "x"),
+        ctx: ctx
       )
       assert_match(/mcp timeout after 2s/, result.error)
       ticker.wait
@@ -1352,7 +1366,8 @@ class MCPIntegrationTest < Minitest::Test
 
       # poisoned connection heals: next call reconnects and succeeds
       again = ctx[:tools].execute(
-        Terret::Tools::Call.new(id: "t2", name: "mcp__fix__echo", args: { text: "back" }, session_id: "x")
+        Terret::Tools::Call.new(id: "t2", name: "mcp__fix__echo", args: { text: "back" }, session_id: "x"),
+        ctx: ctx
       )
       assert_nil again.error
       assert_equal "echo: back", again.content
