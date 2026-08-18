@@ -48,6 +48,7 @@ require_relative "terret/llm"
 require_relative "terret/store"
 require_relative "terret/sessions"
 require_relative "terret/tools"
+require_relative "terret/approvals"
 require_relative "terret/loop"
 
 Terret.declare_events!
