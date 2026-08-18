@@ -103,6 +103,19 @@ module Terret
         [@adapters.fetch(provider), model]
       end
 
+      # §9.2 set_model lands here: repoint a role at a "provider/model" spec
+      # on the live service. Takes effect at the next step's resolve.
+      def set_role(role, spec)
+        raise ArgumentError, "role must be a name, got #{role.inspect}" unless role.respond_to?(:to_sym)
+
+        provider, model = spec.to_s.split("/", 2)
+        if provider.nil? || provider.empty? || model.nil? || model.empty?
+          raise ArgumentError, "model spec must be provider/model, got #{spec.inspect}"
+        end
+
+        @roles[role.to_sym] = spec.to_s
+      end
+
       # Streams the request through the `llm/stream` waterfall; the base of
       # the waterfall invokes the resolved adapter. Yields StreamEvents,
       # returns the final assistant Message.

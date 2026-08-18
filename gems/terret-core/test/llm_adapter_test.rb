@@ -67,3 +67,24 @@ class AdapterBaseTest < Minitest::Test
     end
   end
 end
+
+class LLMServiceRolesTest < Minitest::Test
+  def test_set_role_repoints_a_role_at_a_new_provider_and_model
+    service = Terret::LLM::Service.new(roles: { main: "fake/one" })
+    service.start(nil)
+    a = Object.new
+    b = Object.new
+    service.register_adapter("fake", a)
+    service.register_adapter("alt", b)
+
+    assert_equal [a, "one"], service.resolve(:main)
+
+    service.set_role(:main, "alt/two")
+    assert_equal [b, "two"], service.resolve(:main)
+
+    assert_raises(ArgumentError) { service.set_role(:main, "no-slash") }
+    assert_raises(ArgumentError) { service.set_role(:main, "trailing/") }
+    assert_raises(ArgumentError) { service.set_role(nil, "alt/two") }
+    assert_raises(ArgumentError) { service.set_role(123, "alt/two") }
+  end
+end
