@@ -5,6 +5,15 @@ module Terret
   # turns would interleave the durable log, so this refuses loudly instead.
   class TurnAlreadyRunning < StandardError; end
 
+  # Raised on id or session collision in spawn_agent: silent replacement
+  # leaked the old agent's forked context and orphaned its mid-turn state
+  # (plan §14). Dispose the old agent first, explicitly.
+  class AgentExists < StandardError; end
+
+  # The hard cap on agents per process (plan §14, blast-radius): shard by
+  # process rather than raising the cap when this bites.
+  class AgentCapExceeded < StandardError; end
+
   Claim = Data.define(:messages, :rejected, :reason) do
     def self.of(messages) = new(messages:, rejected: false, reason: nil)
     def self.reject(reason:) = new(messages: [], rejected: true, reason:)
@@ -19,7 +28,7 @@ module Terret
       @session_id = session_id
       @ctx = ctx           # a forked, agent-scoped context
       @inbox = []          # injected context waits here until a waking message
-      @status = :idle
+      @status = :idle # :idle | :running | :waiting_approval (parked in the tools pipeline)
       @cancelled = false
       @cancel_reason = nil
     end
@@ -69,14 +78,47 @@ module Terret
     def start(ctx)
       @ctx = ctx
       @agents = {}
+      @by_session = {}
+      @max_agents = config[:max_agents] || 128
     end
 
     def spawn_agent(session_id:, id: "agent-#{session_id}")
-      @agents[id] = Agent.new(id:, session_id:, ctx: @ctx.fork)
+      raise AgentExists, "agent #{id} already exists" if @agents.key?(id)
+      if (live = @by_session[session_id])
+        raise AgentExists, "session #{session_id} already has agent #{live.id}"
+      end
+      if @agents.size >= @max_agents
+        raise AgentCapExceeded,
+              "#{@agents.size} agents live; max_agents is #{@max_agents}"
+      end
+
+      agent = Agent.new(id:, session_id:, ctx: @ctx.fork)
+      @agents[id] = agent
+      @by_session[session_id] = agent
+      agent
     end
 
     # Live-agent lookup for interfaces (§9.2); nil when never spawned.
     def agent(id) = @agents[id]
+
+    # Session -> live agent, for services that learn a session id from an
+    # event and need the agent (approvals flips status through this).
+    def agent_for_session(session_id) = @by_session[session_id]
+
+    # Tear an idle agent down: its forked context disposes (listeners and
+    # effects die with it) and both registry slots free. Mid-turn agents
+    # refuse — cancel or resolve first.
+    def dispose_agent(id)
+      agent = @agents.fetch(id)
+      unless agent.status == :idle
+        raise TurnAlreadyRunning, "agent #{id} is #{agent.status}; dispose only idle agents"
+      end
+
+      agent.ctx.dispose!
+      @agents.delete(id)
+      @by_session.delete(agent.session_id)
+      agent
+    end
 
     # Runs one turn for `input`. Returns the turn status symbol.
     def run_turn(agent, input)

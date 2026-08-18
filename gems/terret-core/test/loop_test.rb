@@ -396,13 +396,11 @@ class TurnFlowTest < Minitest::Test
     assert_nil ctx[:loop].agent("agent-nowhere")
   end
 
-  def test_respawning_an_id_replaces_the_registry_entry
+  def test_respawning_an_id_raises_instead_of_replacing_the_registry_entry
     ctx, = boot(script: [{ text: "hi" }])
     session = ctx[:sessions].create
-    first  = ctx[:loop].spawn_agent(session_id: session.id)
-    second = ctx[:loop].spawn_agent(session_id: session.id)
-
-    assert_same second, ctx[:loop].agent(first.id)
+    ctx[:loop].spawn_agent(session_id: session.id)
+    assert_raises(Terret::AgentExists) { ctx[:loop].spawn_agent(session_id: session.id) }
   end
 
   def test_a_pre_execute_listener_on_the_agents_fork_fires_for_that_agent_only
@@ -535,5 +533,88 @@ class SessionForkTest < Minitest::Test
     assert_equal "session/forked", child.events.last.type
     assert_equal session.id, child.events.last.payload[:from]
     assert(child.events.take(boundary).all? { |e| e.session_id == child.id })
+  end
+end
+
+class AgentLifecycleTest < Minitest::Test
+  include TerretTestHarness
+
+  def test_spawning_a_taken_id_raises_instead_of_silently_replacing
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    ctx[:loop].spawn_agent(session_id: s.id)
+    assert_raises(Terret::AgentExists) { ctx[:loop].spawn_agent(session_id: s.id) }
+  end
+
+  def test_one_live_agent_per_session
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    ctx[:loop].spawn_agent(session_id: s.id, id: "a1")
+    assert_raises(Terret::AgentExists) { ctx[:loop].spawn_agent(session_id: s.id, id: "a2") }
+  end
+
+  def test_agent_for_session_finds_the_live_agent
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    assert_same agent, ctx[:loop].agent_for_session(s.id)
+    assert_nil ctx[:loop].agent_for_session("nope")
+  end
+
+  def test_dispose_agent_disposes_the_fork_and_frees_both_slots
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    fired = []
+    agent.ctx.on("session/event") { |ev| fired << ev.type }
+
+    ctx[:loop].dispose_agent(agent.id)
+    ctx[:sessions].append(s.id, "user/message", { text: "after" })
+
+    assert_empty fired, "a disposed agent's fork must not keep listening"
+    assert_nil ctx[:loop].agent(agent.id)
+    assert_nil ctx[:loop].agent_for_session(s.id)
+    # the slot is genuinely free: respawning works
+    ctx[:loop].spawn_agent(session_id: s.id)
+  end
+
+  def test_dispose_refuses_a_busy_agent
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    agent.status = :running
+    assert_raises(Terret::TurnAlreadyRunning) { ctx[:loop].dispose_agent(agent.id) }
+    agent.status = :waiting_approval
+    assert_raises(Terret::TurnAlreadyRunning) { ctx[:loop].dispose_agent(agent.id) }
+  end
+
+  def test_the_agent_cap_holds
+    ctx2, = boot_with_cap(2)
+    a = ctx2[:sessions].create
+    b = ctx2[:sessions].create
+    c = ctx2[:sessions].create
+    ctx2[:loop].spawn_agent(session_id: a.id)
+    ctx2[:loop].spawn_agent(session_id: b.id)
+    err = assert_raises(Terret::AgentCapExceeded) { ctx2[:loop].spawn_agent(session_id: c.id) }
+    assert_match(/max_agents/, err.message)
+  end
+
+  private
+
+  def boot_with_cap(n)
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions },
+      { id: "prompt",   plugin: Terret::Prompt },
+      { id: "tools",    plugin: Terret::Tools::Registry },
+      { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
+      { id: "loop",     plugin: Terret::Loop, config: { max_agents: n } }
+    ])
+    ctx = loader.boot!
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new([]))
+    [ctx, loader]
   end
 end

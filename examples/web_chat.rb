@@ -165,6 +165,7 @@ class AgentHost
   def busy? = @busy
 
   def reset!
+    drop_stale_agent!
     @session = @ctx[:sessions].create
     @agent = @ctx[:loop].spawn_agent(session_id: @session.id)
     @session
@@ -175,6 +176,7 @@ class AgentHost
   def select!(session_id)
     return false if @busy
 
+    drop_stale_agent!(session_id)
     @session = @ctx[:sessions].resume(session_id)
     @agent = @ctx[:loop].spawn_agent(session_id: @session.id)
     @session
@@ -203,6 +205,18 @@ class AgentHost
   end
 
   private
+
+  # Never abandon a registered agent: dispose whatever agent currently
+  # occupies the slot we're about to spawn into — the one for the
+  # target session (reselecting the active session, or an earlier
+  # visit left it registered) or, failing that, the one we're
+  # switching away from. Without this, spawn_agent below collides
+  # (one live agent per session) instead of silently leaking the old
+  # forked context the way it used to.
+  def drop_stale_agent!(target_session_id = nil)
+    old = (target_session_id && @ctx[:loop].agent_for_session(target_session_id)) || @agent
+    @ctx[:loop].dispose_agent(old.id) if old && old.status == :idle
+  end
 
   def most_recent_session_id
     @ctx[:sessions].session_ids
