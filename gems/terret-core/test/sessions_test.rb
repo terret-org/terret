@@ -172,3 +172,27 @@ class SessionsPrimitivesTest < Minitest::Test
     assert_equal %w[SECOND fresh], sessions.derive_messages(s.id).map(&:text)
   end
 end
+
+class ApprovalEventsTest < Minitest::Test
+  def sessions_ctx
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions }
+    ])
+    loader.boot!
+  end
+
+  def test_approval_events_are_durable_and_invisible_to_the_projection
+    sessions = sessions_ctx[:sessions]
+    s = sessions.create
+    sessions.append(s.id, "approval/requested", { call_id: "tc1", name: "bash" })
+    sessions.append(s.id, "approval/resolved",  { call_id: "tc1", verdict: "denied", reason: "nope" })
+
+    types = sessions.read(s.id).map(&:type)
+    assert_equal %w[session/created approval/requested approval/resolved], types
+    assert_equal [], sessions.derive_messages(s.id)
+  end
+end

@@ -30,6 +30,8 @@ module Terret
     e.("context/injected",  :emit, durable: true, doc: "agent.inject landed in a request")
     e.("session/compacted", :emit, durable: true,
        doc: "history up to upto_seq replaced by summary (still model-visible)")
+    e.("approval/requested", :emit, durable: true, doc: "tool call parked awaiting a decision")
+    e.("approval/resolved",  :emit, durable: true, doc: "parked call decided (approve/deny)")
     # live extension points
     e.("session/event",     :emit,      doc: "fan-out of every durable append")
     e.("agent/pre_step",    :waterfall, doc: "rewrite or reject the claimed messages")

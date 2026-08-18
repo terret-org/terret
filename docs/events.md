@@ -8,6 +8,8 @@ event's public contract; the bus enforces it at runtime.
 | `agent/pre_step` | waterfall |  | rewrite or reject the claimed messages |
 | `agent/request` | waterfall |  | rewrite the outbound model request |
 | `agent/turn_stopping` | serial |  | ordered veto point before turn/end |
+| `approval/requested` | emit | yes | tool call parked awaiting a decision |
+| `approval/resolved` | emit | yes | parked call decided (approve/deny) |
 | `assistant/chunk` | emit | yes | raw stream delta (replay/UI fidelity) |
 | `assistant/message` | emit | yes | completed assistant message |
 | `context/injected` | emit | yes | agent.inject landed in a request |
