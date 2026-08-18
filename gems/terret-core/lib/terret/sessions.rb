@@ -98,12 +98,20 @@ module Terret
     # else raises — typed objects are encoded at the edges (LLM.encode_part).
     def normalize_payload(value)
       case value
-      when String, Integer, Float, true, false, nil then value
+      when String, Integer, true, false, nil then value
+      when Float
+        raise NonPrimitivePayload, "non-finite Float is not storable" unless value.finite?
+
+        value
       when Symbol then value.to_s
       when Array then value.map { |v| normalize_payload(v) }
       when Hash
         value.each_with_object({}) do |(k, v), out|
-          key = k.is_a?(Symbol) ? k : k.to_s.to_sym
+          key = case k
+                when Symbol then k
+                when String then k.to_sym
+                else raise NonPrimitivePayload, "#{k.class} is not a storable hash key"
+                end
           raise NonPrimitivePayload, "duplicate key #{key.inspect} after coercion" if out.key?(key)
 
           out[key] = normalize_payload(v)

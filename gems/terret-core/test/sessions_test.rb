@@ -37,4 +37,25 @@ class SessionsPrimitivesTest < Minitest::Test
       ctx[:sessions].append(s.id, "user/message", { text: Object.new })
     end
   end
+
+  def test_non_finite_floats_are_rejected_at_the_boundary
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    [Float::NAN, Float::INFINITY, -Float::INFINITY].each do |bad|
+      assert_raises(Terret::NonPrimitivePayload) do
+        ctx[:sessions].append(s.id, "user/message", { value: bad })
+      end
+    end
+  end
+
+  def test_hash_keys_must_be_symbols_or_strings
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    assert_raises(Terret::NonPrimitivePayload) do
+      ctx[:sessions].append(s.id, "user/message", { Object.new => "x" })
+    end
+    assert_raises(Terret::NonPrimitivePayload) do
+      ctx[:sessions].append(s.id, "user/message", { 1 => "x" })
+    end
+  end
 end
