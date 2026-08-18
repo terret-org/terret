@@ -489,6 +489,12 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
 - **Fiber-scheduler edge cases** in `sqlite3` and `pty` under load. Mitigate with the writer-task pattern and soak tests during M5.
 - **Event typing without a compiler.** Runtime contracts plus CI catalog diffing is the bet. If drift still bites, add a Steep-checked events RBS generated from declarations.
 - **Tool naming.** Whether std tools carry Claude Code's names or an alias map is unresolved and blocks nothing until M5, but it should be settled before allow-list formats harden.
+- **Kernel ergonomics debt, found during M3 review.** Two small Hames sharp edges hit
+  independently by multiple reviewers: `Hames::Service.service_key` is a per-class ivar
+  not inherited by subclasses, so a test double subclassing a keyed provider silently
+  fails to mount; and `Hames.event` on an undeclared name raises a bare `KeyError` from
+  `Hash#fetch` rather than a `ContractError` naming the event. Neither blocks anything;
+  both are worth fixing together in a small kernel pass.
 - **Open:** should `hames` move to its own repo, for a cleaner story at the cost of more overhead? Should the meta-gem vendor a pinned bundle version map?
 
 ## 15. What "Cutting Edge" Means Here, Concretely
