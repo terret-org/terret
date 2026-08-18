@@ -96,12 +96,29 @@ module Terret
       end
 
       def call_remote(name, entry, remote, call_args, timeout)
+        if entry[:poisoned]
+          # claim the heal before reconnecting (reconnect! yields): a second
+          # fiber arriving mid-heal proceeds against the reconnecting client
+          # and at worst gets a transport error that re-poisons. A waiting
+          # latch would be race-free; that arrives with the M6 lifecycle work.
+          entry[:poisoned] = false
+          begin
+            entry[:client].reconnect!
+          rescue StandardError
+            entry[:poisoned] = true
+            raise Terret::Tools::Failure, "mcp #{name}: reconnect failed"
+          end
+        end
         result = with_timeout(timeout) { entry[:client].call_tool(remote, **call_args) }
         error = Translate.result_error(result)
         raise Terret::Tools::Failure, error if error
 
         Translate.result_content(result)
+      rescue *timeout_errors
+        entry[:poisoned] = true
+        raise Terret::Tools::Failure, "mcp timeout after #{timeout}s"
       rescue *transport_errors => e
+        entry[:poisoned] = true
         raise Terret::Tools::Failure, "mcp #{name}: #{e.class}: #{e.message}"
       end
 
@@ -110,8 +127,13 @@ module Terret
         return yield unless task
 
         task.with_timeout(seconds) { block.call }
-      rescue Async::TimeoutError
-        raise "mcp timeout after #{seconds}s"
+      end
+
+      # Async is optional for terret-mcp; a rescue clause must not name a
+      # constant the host may never load. Evaluated at exception time, so a
+      # late `require "async"` still matches.
+      def timeout_errors
+        defined?(Async::TimeoutError) ? [Async::TimeoutError] : []
       end
 
       def transport_errors

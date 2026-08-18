@@ -3,6 +3,13 @@
 require "minitest/autorun"
 require_relative "../lib/terret/mcp"
 
+ASYNC_AVAILABLE = begin
+  require "async"
+  true
+rescue LoadError
+  false
+end
+
 class MCPServiceTest < Minitest::Test
   FakeTool = Struct.new(:name, :description, :input_schema)
 
@@ -54,6 +61,54 @@ class MCPServiceTest < Minitest::Test
 
       super
     end
+  end
+
+  class SleepyClient < FakeClient
+    attr_reader :reconnects
+
+    def initialize(**)
+      super
+      @reconnects = 0
+      @slow = true
+    end
+
+    def reconnect!
+      @reconnects += 1
+      @slow = false # healthy after reconnect
+      super
+    end
+
+    def call_tool(name, **args)
+      sleep 5 if @slow
+      super
+    end
+  end
+
+  class SlowHealClient < FakeClient
+    attr_reader :reconnects
+
+    def initialize(**)
+      super
+      @reconnects = 0
+      @broken = true
+    end
+
+    def reconnect!
+      @reconnects += 1
+      sleep 0.05 # a real reconnect yields; that window is the race
+      @broken = false
+      super
+    end
+
+    def call_tool(name, **args)
+      raise IOError, "pipe gone" if @broken
+
+      super
+    end
+  end
+
+  def setup
+    skip "async not installed" unless ASYNC_AVAILABLE
   end
 
   def boot(servers:, strict: false, factory:)
@@ -152,5 +207,53 @@ class MCPServiceTest < Minitest::Test
     ctx[:mcp].mount! # a retry must actually retry, not silently no-op
     assert_equal ["s"], ctx[:mcp].mounted
     assert_equal 1, ctx[:tools].schemas.size
+  end
+
+  def test_a_timeout_returns_an_error_result_and_reconnects_before_the_next_call
+    require "async"
+    fake = SleepyClient.new(tools: [FakeTool.new("slow", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp", timeout: 1 } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+
+    Sync do
+      first = ctx[:tools].execute(
+        Terret::Tools::Call.new(id: "t1", name: "mcp__s__slow", args: {}, session_id: "x"),
+        ctx: ctx
+      )
+      assert_match(/mcp timeout after 1s/, first.error)
+
+      second = ctx[:tools].execute(
+        Terret::Tools::Call.new(id: "t2", name: "mcp__s__slow", args: {}, session_id: "x"),
+        ctx: ctx
+      )
+      assert_nil second.error
+      assert_equal 1, fake.reconnects, "the poisoned connection must reconnect exactly once"
+    end
+  end
+
+  def test_concurrent_callers_do_not_double_heal_a_poisoned_entry
+    fake = SlowHealClient.new(tools: [FakeTool.new("t", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp", timeout: 1 } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+
+    Sync do |task|
+      # first call poisons (broken transport)
+      first = ctx[:tools].execute(
+        Terret::Tools::Call.new(id: "p", name: "mcp__s__t", args: {}, session_id: "x"), ctx: ctx
+      )
+      assert_match(/mcp s: IOError/, first.error)
+
+      # two concurrent callers race the heal
+      results = 2.times.map do |i|
+        task.async do
+          ctx[:tools].execute(
+            Terret::Tools::Call.new(id: "c#{i}", name: "mcp__s__t", args: {}, session_id: "x"), ctx: ctx
+          )
+        end
+      end.map(&:wait)
+
+      assert_equal 1, fake.reconnects, "exactly one heal must win the race"
+      assert results.any? { |r| r.error.nil? }, "the winning caller succeeds"
+    end
   end
 end
