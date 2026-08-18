@@ -41,6 +41,11 @@ class FramesTest < Minitest::Test
     assert_raises(F::BadFrame) { F.decode(%({"type":"inject","text":"\xFF\xFE"})) }
   end
 
+  def test_rejects_a_frame_over_the_size_limit
+    huge = %({"type":"inject","text":"#{"x" * (1 << 20)}"})
+    assert_raises(F::BadFrame) { F.decode(huge) }
+  end
+
   def test_serializes_the_event_envelope_as_is
     ev = Struct.new(:id, :session_id, :seq, :at, :type, :payload)
              .new("e1", "s1", 4, Time.utc(2026, 8, 18, 4, 10, 11, 123_456), "user/message", { text: "hi" })

@@ -14,6 +14,7 @@ module Terret
         @items = []
         @closed = false
         @waiting = Async::Notification.new
+        @space = Async::Notification.new
       end
 
       def push(item)
@@ -24,11 +25,27 @@ module Terret
         true
       end
 
+      # Blocking push for the connection's own replay fiber: waits for the
+      # writer to drain instead of dropping. Dispatch-path pushes must stay
+      # non-blocking — only replay may use this. False when closed.
+      def wait_push(item)
+        loop do
+          return false if @closed
+          return true if push(item)
+
+          @space.wait
+        end
+      end
+
       # Blocks until an item arrives or the queue closes; nil means
       # closed-and-drained.
       def pop
         loop do
-          return @items.shift unless @items.empty?
+          unless @items.empty?
+            item = @items.shift
+            @space.signal
+            return item
+          end
           return nil if @closed
 
           @waiting.wait
@@ -42,6 +59,7 @@ module Terret
       def close
         @closed = true
         @waiting.signal
+        @space.signal
       end
     end
   end

@@ -13,6 +13,8 @@ module Terret
 
       PROTO = 1
 
+      MAX_FRAME_BYTES = 1 << 20 # nothing legitimate on this wire is bigger
+
       # required keys per client frame type
       CLIENT = {
         "subscribe" => [:from_seq],
@@ -27,6 +29,7 @@ module Terret
 
       def decode(text)
         raise BadFrame, "frame must be a string" unless text.is_a?(String)
+        raise BadFrame, "frame exceeds #{MAX_FRAME_BYTES} bytes" if text.bytesize > MAX_FRAME_BYTES
 
         h = begin
           JSON.parse(text, symbolize_names: true)

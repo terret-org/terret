@@ -321,4 +321,56 @@ class ProtocolTest < Minitest::Test
       sock.client_close
     end
   end
+
+  def test_a_long_replay_is_flow_controlled_not_dropped
+    ctx = boot(script: [])
+    agent, session = spawn_agent(ctx)
+    50.times { |i| ctx[:sessions].append(session.id, "user/message", { text: "m#{i}" }) }
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task, queue_limit: 8)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      await { sock.events.size >= 51 } # session/created + 50 messages
+
+      assert_equal (0..50).to_a, sock.events.map { |f| f[:seq] }
+      refute sock.closed?
+      assert_empty sock.protocol_frames.select { |f| f[:code] == "lagged" }
+      sock.client_close
+    end
+  end
+
+  def test_a_future_from_seq_filters_the_live_tail
+    ctx = boot(script: [{ text: "hi" }])
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 1000)
+      sock.client_send(type: "inject", text: "hello", wake: true)
+      await { session.events.any? { |e| e.type == "turn/end" } }
+
+      assert_empty sock.events, "events below the requested from_seq must not leak"
+      sock.client_send(type: "subscribe", from_seq: 0)
+      await { sock.events.any? { |f| f[:type] == "turn/end" } }
+      sock.client_close
+    end
+  end
+
+  def test_a_poison_payload_drops_the_connection_not_the_append
+    ctx = boot(script: [])
+    agent, session = spawn_agent(ctx)
+    poison = "\xFF\xFE".dup.force_encoding(Encoding::UTF_8)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      await { sock.events.any? }
+
+      appended = ctx[:sessions].append(session.id, "user/message", { text: poison })
+      assert appended, "the durable append must succeed regardless of the socket"
+      assert_includes session.events, appended
+      await { sock.closed? }
+      assert_equal "internal", sock.written.last[:code]
+    end
+  end
 end

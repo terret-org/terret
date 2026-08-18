@@ -50,10 +50,13 @@ ISO8601 with microseconds. Event types and payloads are the durable set in
     connection closes. Resubscribe from your last durable seq.
   - `bad_frame` — unparseable or invalid client frame; connection stays open.
   - `not_running` — `cancel` arrived while no turn was running; stays open.
+  - `internal` — the server hit an unexpected error serving this connection;
+    connection closes. Resubscribe from your last durable seq.
 
 ## Client → server
 
 The closed set from plan §9.2. Anything else is answered with `bad_frame`.
+Frames larger than 1 MiB are rejected as `bad_frame`.
 
 | Frame | Fields | Lands on |
 |---|---|---|
@@ -117,6 +120,9 @@ Outbound events go through a bounded per-connection queue. Session dispatch
 never blocks on a slow socket: when the queue overflows, the client is dropped
 with `lagged` rather than allowed to stall the loop. Reconnect-then-replay and
 snapshot-then-tail are the same mechanism, so recovery is one `subscribe`.
+Replay is flow-controlled: the server waits for the client while replaying
+history, so a long log never looks like a slow reader. Only the live tail is
+drop-eligible.
 
 ## Versioning
 

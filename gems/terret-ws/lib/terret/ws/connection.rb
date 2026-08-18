@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "async"
 require "json"
 require_relative "frames"
 require_relative "bounded_queue"
@@ -21,9 +22,11 @@ module Terret
         @io = io
         @runner = runner # ->(agent, text) { start a turn task owned by the server }
         @sid = agent.session_id
+        @queue_limit = queue_limit
         @queue = BoundedQueue.new(queue_limit)
         @tail = nil
         @live = false
+        @floor = 0
       end
 
       # Serve until the client goes away. A writer task drains the bounded
@@ -34,6 +37,9 @@ module Terret
             while (text = @queue.pop)
               @io.write(text)
             end
+          rescue StandardError => e
+            warn "terret-ws: #{@sid}: writer failed: #{e.class}: #{e.message}"
+          ensure
             @io.close
           end
 
@@ -68,7 +74,7 @@ module Terret
       # a Connection is built — fetch here never sees an unknown sid.
       def hello
         last = sessions.fetch(@sid).events.last&.seq || -1
-        @queue.push(Frames.hello(session_id: @sid, last_seq: last))
+        push_frame(Frames.hello(session_id: @sid, last_seq: last))
       end
 
       def dispatch(text)
@@ -80,28 +86,62 @@ module Terret
           raise Frames::BadFrame, "#{frame[:type]} is not supported yet"
         end
       rescue Frames::BadFrame => e
-        @queue.push(Frames.error(code: "bad_frame", message: e.message))
+        push_frame(Frames.error(code: "bad_frame", message: e.message))
       end
 
-      # Replay-then-tail with no gap and no duplicate, without timing
-      # assumptions: buffer live events while the replay reads, then flush
-      # the buffer past the replay's last seq and go direct. The flush and
-      # the mode flip are pure array work — nothing yields between them.
+      # A client that can't even take protocol frames is gone.
+      def push_frame(text)
+        return if @queue.push(text)
+
+        shutdown(code: "lagged")
+      end
+
+      # Replay-then-tail with no gap and no duplicate. Live events buffer
+      # while the replay reads and flushes; the flush loops until it drains
+      # because wait_push yields, and the final empty-check-to-flip is pure
+      # array work — nothing can slip between them on one reactor.
       def handle_subscribe(from_seq)
         @tail&.call
         @live = false
+        @floor = from_seq
         buffered = []
         @tail = @ctx.on("session/event") do |ev|
-          next unless ev.session_id == @sid
+          next unless ev.session_id == @sid && ev.seq >= @floor
 
-          @live ? push_event(ev) : buffered << ev
+          if @live
+            push_event(ev)
+          elsif buffered.size >= @queue_limit
+            # too far behind before the tail even started
+            shutdown(code: "lagged")
+          else
+            buffered << ev
+          end
+        rescue StandardError => e
+          # a socket-side failure must never surface into Sessions#append
+          warn "terret-ws: #{@sid}: dropping connection on listener error: #{e.class}: #{e.message}"
+          shutdown(code: "internal")
         end
 
         replayed = sessions.read(@sid, from_seq: from_seq)
-        replayed.each { |ev| push_event(ev) }
+        return unless replay(replayed)
+
         last = replayed.empty? ? from_seq - 1 : replayed.last.seq
-        buffered.each { |ev| push_event(ev) if ev.seq > last }
+        until buffered.empty?
+          batch = buffered.select { |ev| ev.seq > last }
+          buffered.clear
+          return unless replay(batch)
+
+          last = batch.last.seq unless batch.empty?
+        end
         @live = true
+      end
+
+      # Replay runs in the connection's own fiber, so it waits for the writer
+      # to drain instead of dropping the client — a long log must never look
+      # like a slow reader. False when the queue closed mid-replay.
+      def replay(events)
+        events.each { |ev| return false unless @queue.wait_push(Frames.event(ev)) }
+        true
       end
 
       def handle_inject(text, wake)
