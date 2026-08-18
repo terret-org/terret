@@ -85,6 +85,7 @@ module Terret
         when "cancel" then handle_cancel(frame[:reason])
         when "approve" then handle_resolution(frame[:call_id], "approved", nil)
         when "deny"    then handle_resolution(frame[:call_id], "denied", frame[:reason])
+        when "set_model" then handle_set_model(frame[:role], frame[:model])
         else
           raise Frames::BadFrame, "#{frame[:type]} is not supported yet"
         end
@@ -170,6 +171,12 @@ module Terret
         payload = { call_id: call_id, verdict: verdict }
         payload[:reason] = reason if reason
         sessions.append(@sid, "approval/resolved", payload)
+      end
+
+      def handle_set_model(role, model)
+        @ctx[:llm].set_role(role, model)
+      rescue ArgumentError => e
+        push_frame(Frames.error(code: "bad_frame", message: e.message))
       end
 
       def push_event(ev)

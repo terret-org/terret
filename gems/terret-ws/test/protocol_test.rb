@@ -483,6 +483,28 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  def test_set_model_repoints_the_role_for_the_next_turn
+    ctx = boot(script: [{ text: "from fake" }])
+    ctx[:llm].register_adapter("alt", Terret::LLM::FakeAdapter.new([{ text: "from alt" }]))
+    agent, = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "set_model", role: "main", model: "alt/anything")
+      sock.client_send(type: "inject", text: "hi", wake: true)
+      await { sock.event_types.include?("turn/end") }
+
+      chunks = sock.events.select { |f| f[:type] == "assistant/chunk" }.map { |f| f[:payload][:text] }.join
+      assert_equal "from alt", chunks
+
+      sock.client_send(type: "set_model", role: "main", model: "nonsense")
+      await { sock.protocol_frames.any? { |f| f[:code] == "bad_frame" } }
+      refute sock.closed?
+      sock.client_close
+    end
+  end
+
   def test_a_poison_payload_drops_the_connection_not_the_append
     ctx = boot(script: [])
     agent, session = spawn_agent(ctx)
