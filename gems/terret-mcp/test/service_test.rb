@@ -256,4 +256,32 @@ class MCPServiceTest < Minitest::Test
       assert results.any? { |r| r.error.nil? }, "the winning caller succeeds"
     end
   end
+
+  def test_list_changed_reconciles_the_registered_tools
+    fake = FakeClient.new(tools: [FakeTool.new("a", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+    assert_equal ["mcp__s__a"], ctx[:tools].schemas.map { |s| s[:name] }
+
+    # the server's roster changes: a vanishes, b appears
+    fake.instance_variable_set(:@tools, [FakeTool.new("b", "changed", {})])
+    fake.notify!("notifications/tools/list_changed")
+
+    names = ctx[:tools].schemas.map { |s| s[:name] }
+    assert_equal ["mcp__s__b"], names
+  end
+
+  def test_a_late_notification_cannot_resurrect_an_unmounted_server
+    fake = FakeClient.new(tools: [FakeTool.new("a", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+    ctx[:mcp].unmount!("s")
+    assert_equal 0, ctx[:tools].schemas.size
+
+    fake.instance_variable_set(:@tools, [FakeTool.new("b", "", {})])
+    fake.notify!("notifications/tools/list_changed") # in-flight straggler
+
+    assert_equal 0, ctx[:tools].schemas.size, "an unmounted server must stay unmounted"
+    assert_empty ctx[:mcp].mounted
+  end
 end

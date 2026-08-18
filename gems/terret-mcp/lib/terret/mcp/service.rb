@@ -42,6 +42,7 @@ module Terret
       # Reverses every registration the server contributed and disconnects.
       def unmount!(name)
         entry = @mounted.delete(name.to_s) or return
+        entry[:listener]&.stop
         entry[:disposers].reverse_each(&:call)
         begin
           entry[:client].disconnect
@@ -73,7 +74,29 @@ module Terret
           raise
         end
         @mounted[name] = entry
+        entry[:client].on("notifications/tools/list_changed") do |_params|
+          # a straggler notification after unmount (or from a superseded
+          # mount) must not resurrect tools from a dead entry
+          next unless @mounted[name].equal?(entry)
+
+          sync_tools(name, entry, cfg)
+        end
+        start_listener(entry)
         entry
+      end
+
+      # manceps' listen is a blocking dispatch loop; give it its own task
+      # when a reactor exists. Without one there is nothing to run it on —
+      # notifications are skipped (docs/mcp.md documents this).
+      def start_listener(entry)
+        task = defined?(Async) ? Async::Task.current? : nil
+        return unless task
+
+        entry[:listener] = task.async do
+          entry[:client].listen
+        rescue StandardError => e
+          warn "terret-mcp: listener died: #{e.class}: #{e.message}"
+        end
       end
 
       def sync_tools(name, entry, cfg)

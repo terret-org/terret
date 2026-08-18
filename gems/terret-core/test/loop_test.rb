@@ -500,6 +500,18 @@ class TurnFlowTest < Minitest::Test
     assert_equal "not today", domain.error
   end
 
+  def test_calling_an_unknown_tool_is_an_error_result_not_a_failed_turn
+    ctx, = boot(script: [
+      { text: "Trying.", tool_calls: [Terret::LLM::ToolCall.new(id: "t1", name: "vanished", args: {})] },
+      { text: "Recovered." }
+    ])
+    agent, session = spawn(ctx)
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "go")
+    result = session.events.find { |e| e.type == "tool/result" }
+    assert_match(/\AKeyError: /, result.payload[:error])
+  end
+
   class WeatherPlugin < Hames::Service
     inject :tools
     def start(ctx)

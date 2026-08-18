@@ -49,8 +49,8 @@ module Terret
         return Result.new(id: call.id, content: nil, error: admitted.reason) if admitted.is_a?(Veto)
 
         result = ctx.waterfall("tools/execute", admitted) do |c|
-          d = fetch(c.name)
           begin
+            d = fetch(c.name)
             Result.new(id: c.id, content: d.handler.call(**c.args), error: nil)
           rescue Failure => e
             Result.new(id: c.id, content: nil, error: e.message)
