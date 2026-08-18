@@ -538,13 +538,15 @@ class TranslateTest < Minitest::Test
   T = Terret::MCP::Translate
 
   FakeTool = Struct.new(:name, :description, :input_schema)
-  FakeContent = Struct.new(:type, :text, :mime_type)
+  FakeContent = Struct.new(:type, :text, :mime_type, :uri)
   FakeResult = Struct.new(:content, :structured_content, keyword_init: true) do
     def error? = false
+    def structured? = !structured_content.nil? # mirror Manceps::ToolResult
   end
   FakeError = Struct.new(:content, keyword_init: true) do
     def error? = true
     def structured_content = nil
+    def structured? = false
     def text = content.map(&:text).compact.join("\n")
   end
 
@@ -585,6 +587,18 @@ class TranslateTest < Minitest::Test
     assert_nil T.result_content(err)
     assert_equal "boom", T.result_error(err)
   end
+
+  def test_a_falsy_structured_result_still_wins_over_text
+    result = FakeResult.new(content: [FakeContent.new("text", "fallback", nil)],
+                            structured_content: false)
+    assert_equal false, T.result_content(result)
+  end
+
+  def test_resource_links_surface_their_uri_in_the_placeholder
+    result = FakeResult.new(content: [FakeContent.new("resource_link", nil, nil, "doc://guide")],
+                            structured_content: nil)
+    assert_equal "[resource_link doc://guide]", T.result_content(result)
+  end
 end
 ```
 
@@ -623,14 +637,16 @@ module Terret
           params: tool.input_schema || {}, mutating: true, approval: approval }
       end
 
-      # structured_content wins (already primitives); else text items join,
-      # binary/resource items degrade to a typed placeholder. nil for errors.
+      # structured_content wins (already primitives; manceps' structured?
+      # is the present-vs-falsy predicate); else text items join, binary and
+      # resource items degrade to a placeholder naming what the model is
+      # missing (uri first). nil for errors.
       def result_content(result)
         return nil if result.error?
-        return result.structured_content if result.structured_content
+        return result.structured_content if result.structured?
 
         result.content.map do |item|
-          item.type == "text" ? item.text : "[#{item.type} #{item.mime_type || item.type}]"
+          item.type == "text" ? item.text : "[#{item.type} #{item.uri || item.mime_type || item.type}]"
         end.join("\n")
       end
 
@@ -755,12 +771,15 @@ class MCPServiceTest < Minitest::Test
 
     Result = Struct.new(:content, :structured_content, :err, keyword_init: true) do
       def error? = err
+      def structured? = !structured_content.nil?
       def text = content.to_s
     end
 
     def call_tool(name, **args)
       @calls << [name, args]
-      spec = @results.fetch(name) { { structured: nil, text: "ok:#{name}", error: false } }
+      # default results are structured so the fake's String content never
+      # meets result_content's array path (real content is always an array)
+      spec = @results.fetch(name) { { structured: { "ok" => name } } }
       Result.new(content: spec[:text], structured_content: spec[:structured], err: spec[:error] || false)
     end
   end
@@ -1425,6 +1444,7 @@ Add to `ProtocolTest` (its `boot` already takes `extra_rows:`; requires terret-m
     Tool = Struct.new(:name, :description, :input_schema)
     Result = Struct.new(:structured_content, keyword_init: true) do
       def error? = false
+      def structured? = !structured_content.nil?
       def content = []
     end
 
