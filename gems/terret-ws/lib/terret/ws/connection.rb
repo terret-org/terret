@@ -83,6 +83,8 @@ module Terret
         when "subscribe" then handle_subscribe(frame[:from_seq])
         when "inject" then handle_inject(frame[:text], frame.fetch(:wake, false))
         when "cancel" then handle_cancel(frame[:reason])
+        when "approve" then handle_resolution(frame[:call_id], "approved", nil)
+        when "deny"    then handle_resolution(frame[:call_id], "denied", frame[:reason])
         else
           raise Frames::BadFrame, "#{frame[:type]} is not supported yet"
         end
@@ -159,6 +161,15 @@ module Terret
         else
           push_frame(Frames.error(code: "not_running"))
         end
+      end
+
+      # call_id is deliberately not id: it is a foreign key to the tool/call
+      # event's id, and the wire-facing name in docs/protocol.md — recorded
+      # here so the M6 parking machinery correlates the two knowingly.
+      def handle_resolution(call_id, verdict, reason)
+        payload = { call_id: call_id, verdict: verdict }
+        payload[:reason] = reason if reason
+        sessions.append(@sid, "approval/resolved", payload)
       end
 
       def push_event(ev)

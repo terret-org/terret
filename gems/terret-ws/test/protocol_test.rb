@@ -463,6 +463,26 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  def test_approve_and_deny_append_durable_resolutions
+    ctx = boot(script: [{ text: "hi" }])
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "approve", call_id: "tc1")
+      sock.client_send(type: "deny", call_id: "tc2", reason: "too spicy")
+      await { sock.events.count { |f| f[:type] == "approval/resolved" } == 2 }
+
+      approved, denied = sock.events.select { |f| f[:type] == "approval/resolved" }
+      assert_equal({ call_id: "tc1", verdict: "approved" }, approved[:payload])
+      assert_equal({ call_id: "tc2", verdict: "denied", reason: "too spicy" }, denied[:payload])
+      # durable, not just visible: the log has both
+      assert_equal 2, session.events.count { |e| e.type == "approval/resolved" }
+      sock.client_close
+    end
+  end
+
   def test_a_poison_payload_drops_the_connection_not_the_append
     ctx = boot(script: [])
     agent, session = spawn_agent(ctx)
