@@ -7,6 +7,7 @@ gem "terret-core", path: "gems/terret-core"
 gem "terret-openrouter", path: "gems/terret-openrouter"
 gem "terret-store-sqlite", path: "gems/terret-store-sqlite"
 gem "terret-ws", path: "gems/terret-ws"
+gem "terret-mcp", path: "gems/terret-mcp"
 gem "terret", path: "gems/terret"
 
 group :development, :test do
