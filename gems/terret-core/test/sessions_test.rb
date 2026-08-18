@@ -202,6 +202,37 @@ class SessionsPrimitivesTest < Minitest::Test
   end
 end
 
+class SessionsUsageTest < Minitest::Test
+  def sessions_ctx
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions }
+    ])
+    loader.boot!
+  end
+
+  def test_usage_sums_every_step_end_over_the_log
+    sessions = sessions_ctx[:sessions]
+    s = sessions.create
+    sessions.append(s.id, "step/end", { n: 1, usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.01 } })
+    sessions.append(s.id, "step/end", { n: 2 }) # provider sent no usage
+    sessions.append(s.id, "step/end", { n: 3, usage: { prompt_tokens: 40, completion_tokens: 2, cost: 0.005 } })
+
+    assert_equal({ prompt_tokens: 50, completion_tokens: 7, cost: 0.015, steps: 3 },
+                 sessions.usage(s.id))
+  end
+
+  def test_usage_of_a_fresh_session_is_zero
+    sessions = sessions_ctx[:sessions]
+    s = sessions.create
+    assert_equal({ prompt_tokens: 0, completion_tokens: 0, cost: 0.0, steps: 0 },
+                 sessions.usage(s.id))
+  end
+end
+
 class ApprovalEventsTest < Minitest::Test
   def sessions_ctx
     Hames.reset_events!

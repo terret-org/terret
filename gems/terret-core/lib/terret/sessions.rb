@@ -73,6 +73,23 @@ module Terret
       end
     end
 
+    # Lifetime spend, projected from the log: sums every step/end's usage.
+    # A step whose provider sent no usage still counts as a step; its costs
+    # count as zero rather than poisoning the sum.
+    def usage(session_id)
+      out = { prompt_tokens: 0, completion_tokens: 0, cost: 0.0, steps: 0 }
+      fetch(session_id).events.each do |ev|
+        next unless ev.type == "step/end"
+
+        out[:steps] += 1
+        u = ev.payload[:usage] or next
+        out[:prompt_tokens]     += u[:prompt_tokens]     || 0
+        out[:completion_tokens] += u[:completion_tokens] || 0
+        out[:cost]              += u[:cost]              || 0.0
+      end
+      out
+    end
+
     # The enforcement point for "model-visible means logged": the loop calls
     # this with the message list it is about to send; a mismatch against the
     # log projection raises in dev/test.
