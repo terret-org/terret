@@ -867,6 +867,34 @@ class MCPServiceTest < Minitest::Test
       boot(servers: { "s" => { approval: :policy } }, factory: ->(*) { FakeClient.new(tools: []) })
     end
   end
+
+  class FlakyClient < FakeClient
+    def initialize(**)
+      super
+      @attempts = 0
+    end
+
+    def tools(*)
+      @attempts += 1
+      raise "network blip" if @attempts == 1
+
+      super
+    end
+  end
+
+  def test_a_failed_discovery_leaves_no_half_mounted_server
+    fake = FlakyClient.new(tools: [FakeTool.new("a", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+
+    assert_raises(RuntimeError) { ctx[:mcp].mount! }
+    assert_empty ctx[:mcp].mounted
+    assert fake.disconnected, "the connected client must not leak"
+    assert_equal 0, ctx[:tools].schemas.size
+
+    ctx[:mcp].mount! # a retry must actually retry, not silently no-op
+    assert_equal ["s"], ctx[:mcp].mounted
+    assert_equal 1, ctx[:tools].schemas.size
+  end
 end
 ```
 
@@ -919,13 +947,15 @@ module Terret
       end
 
       # Reverses every registration the server contributed and disconnects.
+      # Disconnect failures are swallowed (unload! must not abort mid-teardown)
+      # but never silently.
       def unmount!(name)
         entry = @mounted.delete(name.to_s) or return
         entry[:disposers].reverse_each(&:call)
         begin
           entry[:client].disconnect
-        rescue StandardError
-          nil
+        rescue StandardError => e
+          warn "terret-mcp: #{name}: disconnect failed: #{e.class}: #{e.message}"
         end
       end
 
@@ -940,8 +970,20 @@ module Terret
         client = @factory.call(name, cfg)
         client.connect
         entry = { client: client, disposers: [], tool_names: [] }
+        begin
+          sync_tools(name, entry, cfg)
+        rescue StandardError
+          # a failed discovery must not half-mount: unwind any partial
+          # registrations, close the connection, and leave mount! retryable
+          entry[:disposers].reverse_each(&:call)
+          begin
+            client.disconnect
+          rescue StandardError => e
+            warn "terret-mcp: #{name}: disconnect after failed mount: #{e.class}: #{e.message}"
+          end
+          raise
+        end
         @mounted[name] = entry
-        sync_tools(name, entry, cfg)
         entry
       end
 
@@ -952,15 +994,15 @@ module Terret
         entry[:disposers].clear
         entry[:tool_names].clear
 
-        entry[:client].tools.each do |tool|
-          args = Translate.definition_args(server: name, tool: tool, approval: approval)
-          remote = tool.name
-          @ctx.with_owner("mcp:#{name}") do
+        @ctx.with_owner("mcp:#{name}") do
+          entry[:client].tools.each do |tool|
+            args = Translate.definition_args(server: name, tool: tool, approval: approval)
+            remote = tool.name
             entry[:disposers] << @ctx[:tools].register(**args) do |**call_args|
               call_remote(name, entry, remote, call_args, timeout)
             end
+            entry[:tool_names] << args[:name]
           end
-          entry[:tool_names] << args[:name]
         end
       end
 
