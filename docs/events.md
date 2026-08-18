@@ -12,6 +12,7 @@ event's public contract; the bus enforces it at runtime.
 | `assistant/message` | emit | yes | completed assistant message |
 | `context/injected` | emit | yes | agent.inject landed in a request |
 | `llm/stream` | waterfall |  | wrap/replace the adapter stream |
+| `session/compacted` | emit | yes | history up to upto_seq replaced by summary (still model-visible) |
 | `session/created` | emit | yes | session opened |
 | `session/event` | emit |  | fan-out of every durable append |
 | `session/forked` | emit | yes | lineage record |

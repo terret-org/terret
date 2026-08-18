@@ -147,4 +147,30 @@ class SessionsPrimitivesTest < Minitest::Test
     assert_empty emitted # nothing model-visible happened
     assert_equal s.events, ctx[:sessions].read(s.id) # cache == store
   end
+
+  def test_compaction_replaces_prior_history_in_the_projection
+    ctx = sessions_ctx
+    sessions = ctx[:sessions]
+    s = sessions.create
+    sessions.append(s.id, "user/message", { text: "old one" })
+    sessions.append(s.id, "user/message", { text: "old two" })
+    boundary = s.events.last.seq
+    sessions.append(s.id, "session/compacted", { upto_seq: boundary, summary: "SUMMARY" })
+    sessions.append(s.id, "user/message", { text: "fresh" })
+
+    assert_equal %w[SUMMARY fresh], sessions.derive_messages(s.id).map(&:text)
+  end
+
+  def test_the_latest_compaction_wins
+    ctx = sessions_ctx
+    sessions = ctx[:sessions]
+    s = sessions.create
+    sessions.append(s.id, "user/message", { text: "ancient" })
+    sessions.append(s.id, "session/compacted", { upto_seq: 1, summary: "FIRST" })
+    sessions.append(s.id, "user/message", { text: "middle" })
+    sessions.append(s.id, "session/compacted", { upto_seq: 3, summary: "SECOND" })
+    sessions.append(s.id, "user/message", { text: "fresh" })
+
+    assert_equal %w[SECOND fresh], sessions.derive_messages(s.id).map(&:text)
+  end
 end

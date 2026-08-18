@@ -55,10 +55,12 @@ module Terret
     def derive_messages(session_id, upto: nil)
       events = fetch(session_id).events
       events = events.take(upto) if upto
-      events.filter_map do |ev|
+      apply_compaction(events).filter_map do |ev|
         case ev.type
         when "user/message", "context/injected"
           LLM::Message.new(role: :user, parts: [LLM::Text.new(text: ev.payload[:text])])
+        when "session/compacted"
+          LLM::Message.new(role: :user, parts: [LLM::Text.new(text: ev.payload[:summary])])
         when "assistant/message"
           LLM::Message.new(role: :assistant,
                            parts: ev.payload[:parts].map { |p| LLM.decode_part(p) })
@@ -115,6 +117,20 @@ module Terret
     end
 
     private
+
+    # Compacted history is still model-visible, so it lives in the log and
+    # projects as a user message standing in for everything at or before its
+    # boundary. The latest compaction wins; superseded ones drop out.
+    def apply_compaction(events)
+      latest = nil
+      events.each { |ev| latest = ev if ev.type == "session/compacted" }
+      return events unless latest
+
+      survivors = events.select do |ev|
+        ev.seq > latest.payload[:upto_seq] && ev.type != "session/compacted"
+      end
+      [latest] + survivors
+    end
 
     def parent_id_from(events)
       forked = events.reverse.find { |e| e.type == "session/forked" }

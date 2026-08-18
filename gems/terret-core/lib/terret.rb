@@ -28,6 +28,8 @@ module Terret
     e.("tool/call",         :emit, durable: true, doc: "tool invocation requested by model")
     e.("tool/result",       :emit, durable: true, doc: "tool outcome")
     e.("context/injected",  :emit, durable: true, doc: "agent.inject landed in a request")
+    e.("session/compacted", :emit, durable: true,
+       doc: "history up to upto_seq replaced by summary (still model-visible)")
     # live extension points
     e.("session/event",     :emit,      doc: "fan-out of every durable append")
     e.("agent/pre_step",    :waterfall, doc: "rewrite or reject the claimed messages")
