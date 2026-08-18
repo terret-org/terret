@@ -413,6 +413,51 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  def test_cancel_racing_a_tool_result_keeps_the_result_and_cancels_the_turn
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) { |city:| gate.dequeue; "22C in #{city}" }
+    agent, = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "weather?", wake: true)
+      await { sock.event_types(chunkless: false).include?("tool/call") }
+
+      sock.client_send(type: "cancel", reason: "changed my mind")
+      await { agent.cancelled? } # the frame landed before the result exists
+      gate.enqueue(nil)
+      await { sock.event_types.include?("turn/end") }
+
+      assert_equal %w[
+        session/created
+        turn/start
+        step/start user/message assistant/message
+        tool/call tool/result step/end
+        turn/end
+      ], sock.event_types
+      turn_end = sock.events.last
+      assert_equal "cancelled", turn_end[:payload][:status]
+      assert_equal "changed my mind", turn_end[:payload][:reason]
+      sock.client_close
+    end
+  end
+
+  def test_cancel_with_no_turn_running_answers_not_running
+    ctx = boot(script: [{ text: "hi" }])
+    agent, = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "cancel")
+      await { sock.protocol_frames.any? { |f| f[:code] == "not_running" } }
+
+      refute sock.closed?
+      sock.client_close
+    end
+  end
+
   def test_a_poison_payload_drops_the_connection_not_the_append
     ctx = boot(script: [])
     agent, session = spawn_agent(ctx)

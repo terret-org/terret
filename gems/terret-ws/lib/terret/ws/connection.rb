@@ -82,6 +82,7 @@ module Terret
         case frame[:type]
         when "subscribe" then handle_subscribe(frame[:from_seq])
         when "inject" then handle_inject(frame[:text], frame.fetch(:wake, false))
+        when "cancel" then handle_cancel(frame[:reason])
         else
           raise Frames::BadFrame, "#{frame[:type]} is not supported yet"
         end
@@ -149,6 +150,14 @@ module Terret
           @runner.call(@agent, text)
         else
           @agent.inject(text)
+        end
+      end
+
+      def handle_cancel(reason)
+        if @agent.status == :running
+          @agent.cancel(reason)
+        else
+          push_frame(Frames.error(code: "not_running"))
         end
       end
 
