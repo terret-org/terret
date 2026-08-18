@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "stringio"
 require_relative "../lib/hames"
 
 class HamesEventsTest < Minitest::Test
@@ -312,5 +313,41 @@ class HamesEffectHygieneTest < Minitest::Test
     @ctx.dispose_owner!("me") # must not double-run or raise
     disposer.call             # nor this
     assert_equal 0, effects_count
+  end
+end
+
+class HamesEmitIsolationTest < Minitest::Test
+  def setup
+    Hames.reset_events!
+    Hames.event "boom", mode: :emit
+    Hames.event "flow", mode: :waterfall
+    @ctx = Hames::Context.new
+  end
+
+  def test_a_raising_emit_listener_is_isolated_and_later_listeners_still_run
+    seen = []
+    @ctx.on("boom") { |_| raise "listener bug" }
+    @ctx.on("boom") { |x| seen << x }
+
+    warned = capture_warn { @ctx.emit("boom", 1) } # must not raise
+    assert_equal [1], seen
+    assert_includes warned, "listener bug"
+    assert_includes warned, "RuntimeError"
+  end
+
+  def test_waterfall_listeners_still_raise_through
+    @ctx.on("flow") { |_x, _next_| raise "load-bearing" }
+    assert_raises(RuntimeError) { @ctx.waterfall("flow", 1) }
+  end
+
+  private
+
+  def capture_warn
+    old = $stderr
+    $stderr = StringIO.new
+    yield
+    $stderr.string
+  ensure
+    $stderr = old
   end
 end

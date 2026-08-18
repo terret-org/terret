@@ -628,21 +628,23 @@ class ProtocolTest < Minitest::Test
 
   def test_an_unexpected_dispatch_error_surfaces_as_internal
     ctx = boot(script: [])
-    agent, session = spawn_agent(ctx)
-    ctx.with_owner("angry-plugin") do
-      ctx.on("session/event") do |ev|
-        raise "boom" if ev.type == "approval/resolved"
-      end
-    end
+    agent, = spawn_agent(ctx)
+    # Inject the failure at the dispatch path itself (Sessions#read), not via
+    # a raising session/event listener: as of emit isolation (Task 2), a
+    # listener bug no longer surfaces as a producer-side dispatch failure --
+    # that's the whole point of the fix. subscribe -> handle_subscribe ->
+    # sessions.read raises -> Connection#run's dispatch rescue ->
+    # shutdown(code: "internal"). Deliberately not the approve/deny path: a
+    # later task rewrites handle_resolution, and this keeps the test out of
+    # its blast radius.
+    ctx[:sessions].define_singleton_method(:read) { |*| raise "boom" }
 
     Sync do |task|
       sock, = connect(ctx, agent, task)
-      sock.client_send(type: "approve", call_id: "tc1")
+      sock.client_send(type: "subscribe", from_seq: 0)
       await { sock.closed? }
 
       assert_equal "internal", sock.written.last[:code]
-      # durable-first: the append committed before the listener raised
-      assert_equal 1, session.events.count { |e| e.type == "approval/resolved" }
     end
   end
 end

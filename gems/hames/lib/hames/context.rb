@@ -120,10 +120,18 @@ module Hames
       parent ? parent.listeners_for(name) + own : own.dup
     end
 
-    # emit: fire-and-forget, registration order, no return value.
+    # emit: fire-and-forget, registration order, no return value. Listener
+    # failures are isolated (warned, not raised): by the time listeners run,
+    # the producer's fact is already committed — a durable append emits after
+    # the store write — so a consumer bug must not un-happen it. The other
+    # modes raise through: their results are load-bearing.
     def emit(name, *args)
       Hames.assert_mode!(name, :emit)
-      listeners_for(name).each { |l| l.block.call(*args) }
+      listeners_for(name).each do |l|
+        l.block.call(*args)
+      rescue StandardError => e
+        warn "hames: emit(#{name}): listener isolated: #{e.class}: #{e.message}"
+      end
       nil
     end
 
