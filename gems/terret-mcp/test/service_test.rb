@@ -84,6 +84,36 @@ class MCPServiceTest < Minitest::Test
     end
   end
 
+  class JournalClient < FakeClient
+    attr_reader :journal
+
+    def initialize(**)
+      super
+      @journal = []
+    end
+
+    def call_tool(name, **args)
+      @journal << [:enter, name, Time.now]
+      sleep 0.05
+      @journal << [:exit, name, Time.now]
+      super
+    end
+  end
+
+  class FlakyReconcileClient < FakeClient
+    def initialize(**)
+      super
+      @calls_to_tools = 0
+    end
+
+    def tools(*)
+      @calls_to_tools += 1
+      raise "network blip" if @calls_to_tools == 2 # 1st call is the mount; 2nd is the first reconcile
+
+      super
+    end
+  end
+
   class SlowHealClient < FakeClient
     attr_reader :reconnects
 
@@ -298,5 +328,74 @@ class MCPServiceTest < Minitest::Test
 
     disposer.call
     refute_includes ctx[:prompt].render, "resource body"
+  end
+
+  def test_unmount_disposes_registered_resource_sections
+    fake = FakeClient.new(tools: [FakeTool.new("a", "", {})])
+    def fake.read_resource(uri)
+      Struct.new(:text).new("resource body for #{uri}")
+    end
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+    disposer = ctx[:mcp].register_resource_section("s", "doc://guide", name: "guide", priority: 5)
+    assert_includes ctx[:prompt].render, "resource body for doc://guide"
+
+    # a reconcile must not remove the section (a separate array from the
+    # tool disposers, which sync_tools clears on every reconcile)
+    fake.instance_variable_set(:@tools, [FakeTool.new("b", "", {})])
+    fake.notify!("notifications/tools/list_changed")
+    assert_includes ctx[:prompt].render, "resource body for doc://guide"
+
+    ctx[:mcp].unmount!("s")
+    refute_includes ctx[:prompt].render, "resource body"
+    disposer.call # already disposed by unmount; must not raise
+  end
+
+  def test_stdio_calls_serialize_per_entry_but_http_still_multiplexes
+    sio = JournalClient.new(tools: [FakeTool.new("t", "", {})])
+    web = JournalClient.new(tools: [FakeTool.new("t", "", {})])
+    ctx = boot(servers: { "sio" => { command: "fake" }, "web" => { url: "https://x/mcp" } },
+               factory: ->(name, _cfg) { name == "sio" ? sio : web })
+    ctx[:mcp].mount!
+
+    Sync do |task|
+      2.times.map do |i|
+        task.async do
+          ctx[:tools].execute(
+            Terret::Tools::Call.new(id: "sio#{i}", name: "mcp__sio__t", args: {}, session_id: "x"), ctx: ctx
+          )
+        end
+      end.map(&:wait)
+
+      2.times.map do |i|
+        task.async do
+          ctx[:tools].execute(
+            Terret::Tools::Call.new(id: "web#{i}", name: "mcp__web__t", args: {}, session_id: "x"), ctx: ctx
+          )
+        end
+      end.map(&:wait)
+    end
+
+    assert_equal %i[enter exit enter exit], sio.journal.map(&:first),
+                 "stdio calls on the same entry must not interleave"
+    assert_equal %i[enter enter exit exit], web.journal.map(&:first),
+                 "http calls must still multiplex"
+  end
+
+  def test_a_flaky_relist_leaves_the_roster_in_place_and_recovers_on_retry
+    fake = FlakyReconcileClient.new(tools: [FakeTool.new("a", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+    assert_equal ["mcp__s__a"], ctx[:tools].schemas.map { |s| s[:name] }
+
+    # the roster changes but the first reconcile attempt hits a transient failure
+    fake.instance_variable_set(:@tools, [FakeTool.new("b", "", {})])
+    fake.notify!("notifications/tools/list_changed") # must not raise, must not empty the roster
+
+    assert_equal ["mcp__s__a"], ctx[:tools].schemas.map { |s| s[:name] },
+                 "a failed relist must leave the current roster in place"
+
+    fake.notify!("notifications/tools/list_changed") # retry succeeds
+    assert_equal ["mcp__s__b"], ctx[:tools].schemas.map { |s| s[:name] }
   end
 end

@@ -87,13 +87,16 @@ carries no binary payloads into the log.
 
 ## Change notifications
 
-When a server declares `tools.listChanged`, the service runs a listener
-task; on `notifications/tools/list_changed` it re-lists and reconciles:
-new tools register, vanished tools dispose, changed schemas re-register.
+Given a reactor, the service runs a listener task per mounted server; on
+`notifications/tools/list_changed` it re-lists and reconciles: new tools
+register, vanished tools dispose, changed schemas re-register. A failed
+re-list leaves the current roster in place and retries on the next
+notification.
 
 ## Resources
 
 `ctx[:mcp].register_resource_section(server, uri, name:, priority: 100)`
 reads the resource once and registers its text as a prompt section (an
 effect — disposing unregisters). Live refresh on `resources/updated` is
-deferred until a consumer needs it.
+deferred until a consumer needs it. Unmounting the server also unregisters
+every section it served.

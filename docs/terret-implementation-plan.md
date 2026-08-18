@@ -486,7 +486,7 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
 - **Long-session context growth.** A session measured in weeks outgrows any context window, so compaction is not a nicety and it interacts directly with the §2.5 invariant: a compacted history is still model-visible, so it must be logged as its own durable event rather than computed on the fly. Design the event before the feature.
 - **OpenRouter as a single point of failure.** One adapter means one vendor relationship, one rate limiter, and one normalization layer standing between Terret and every model. The seam makes a native adapter cheap to add, but it is worth knowing this is a deliberate concentration of risk rather than an oversight.
 - **Feature passthrough through OpenRouter.** Prompt caching and interleaved thinking are the two §15 claims most likely to degrade. Verify per model rather than assuming, and be willing to demote a claim rather than defend it.
-- **Fiber-scheduler edge cases** in `sqlite3` and `pty` under load. Mitigate with the writer-task pattern and soak tests during M5.
+- **Fiber-scheduler edge cases** in `sqlite3` and `pty` under load. Mitigate with the writer-task pattern and soak tests during M7's execution-world work. (M5's canary pins fiber-safety at the MCP boundary only.)
 - **Event typing without a compiler.** Runtime contracts plus CI catalog diffing is the bet. If drift still bites, add a Steep-checked events RBS generated from declarations.
 - **Tool naming.** Whether std tools carry Claude Code's names or an alias map is unresolved and blocks nothing until M5, but it should be settled before allow-list formats harden.
 - **Kernel ergonomics debt, found during M3 review.** Two small Hames sharp edges hit

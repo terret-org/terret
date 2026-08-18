@@ -1,6 +1,6 @@
 # Terret
 
-Ruby-native, model-agnostic agent harness where everything is a plugin. Five gems in one
+Ruby-native, model-agnostic agent harness where everything is a plugin. Seven gems in one
 repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible effects,

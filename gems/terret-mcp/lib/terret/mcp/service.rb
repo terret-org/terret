@@ -43,6 +43,7 @@ module Terret
       def unmount!(name)
         entry = @mounted.delete(name.to_s) or return
         entry[:listener]&.stop
+        entry[:resource_disposers].reverse_each(&:call)
         entry[:disposers].reverse_each(&:call)
         begin
           entry[:client].disconnect
@@ -57,9 +58,11 @@ module Terret
       def register_resource_section(server, uri, name:, priority: 100)
         entry = @mounted.fetch(server.to_s) { raise ArgumentError, "server #{server.inspect} is not mounted" }
         body = entry[:client].read_resource(uri).text.to_s
-        @ctx.with_owner("mcp:#{server}") do
+        disposer = @ctx.with_owner("mcp:#{server}") do
           @ctx[:prompt].register_section(name, priority: priority) { body }
         end
+        entry[:resource_disposers] << disposer
+        disposer
       end
 
       private
@@ -72,7 +75,8 @@ module Terret
 
         client = @factory.call(name, cfg)
         client.connect
-        entry = { client: client, disposers: [], tool_names: [] }
+        entry = { client: client, disposers: [], tool_names: [],
+                  lock: (cfg[:command] ? Mutex.new : nil), resource_disposers: [] }
         begin
           sync_tools(name, entry, cfg)
         rescue StandardError
@@ -90,7 +94,14 @@ module Terret
           # mount) must not resurrect tools from a dead entry
           next unless @mounted[name].equal?(entry)
 
-          sync_tools(name, entry, cfg)
+          begin
+            sync_tools(name, entry, cfg)
+          rescue StandardError => e
+            # a transient relist failure must not kill the listener or take
+            # down the roster; sync_tools already left it in place (fetch
+            # happens before disposal) — just retry on the next notification
+            warn "terret-mcp: #{name}: reconcile failed: #{e.class}: #{e.message}"
+          end
         end
         start_listener(entry)
         entry
@@ -113,12 +124,17 @@ module Terret
       def sync_tools(name, entry, cfg)
         approval = cfg[:approval] || :policy
         timeout = cfg[:timeout] || DEFAULT_TIMEOUT
+        # fetch before disposing anything: a relist failure (network blip,
+        # server hiccup) must leave the current roster registered, not tear
+        # it down and then have nothing to put back.
+        tools = entry[:client].tools
+
         entry[:disposers].reverse_each(&:call)
         entry[:disposers].clear
         entry[:tool_names].clear
 
         @ctx.with_owner("mcp:#{name}") do
-          entry[:client].tools.each do |tool|
+          tools.each do |tool|
             args = Translate.definition_args(server: name, tool: tool, approval: approval)
             remote = tool.name
             entry[:disposers] << @ctx[:tools].register(**args) do |**call_args|
@@ -130,6 +146,17 @@ module Terret
       end
 
       def call_remote(name, entry, remote, call_args, timeout)
+        if (lock = entry[:lock])
+          # stdio replies correlate by order, not id: the whole
+          # heal+call sequence must serialize per server, so a waiter
+          # re-checks the poison flag after the loser's timeout lands.
+          lock.synchronize { locked_call(name, entry, remote, call_args, timeout) }
+        else
+          locked_call(name, entry, remote, call_args, timeout)
+        end
+      end
+
+      def locked_call(name, entry, remote, call_args, timeout)
         if entry[:poisoned]
           # claim the heal before reconnecting (reconnect! yields): a second
           # fiber arriving mid-heal proceeds against the reconnecting client
