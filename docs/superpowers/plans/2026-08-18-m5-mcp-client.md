@@ -1274,20 +1274,41 @@ git commit -m "Poison a timed-out MCP connection and reconnect on next use"
     names = ctx[:tools].schemas.map { |s| s[:name] }
     assert_equal ["mcp__s__b"], names
   end
+
+  def test_a_late_notification_cannot_resurrect_an_unmounted_server
+    fake = FakeClient.new(tools: [FakeTool.new("a", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+    ctx[:mcp].unmount!("s")
+    assert_equal 0, ctx[:tools].schemas.size
+
+    fake.instance_variable_set(:@tools, [FakeTool.new("b", "", {})])
+    fake.notify!("notifications/tools/list_changed") # in-flight straggler
+
+    assert_equal 0, ctx[:tools].schemas.size, "an unmounted server must stay unmounted"
+    assert_empty ctx[:mcp].mounted
+  end
 ```
 
 - [ ] **Step 2: Run and verify failure** — `KeyError` (no handler registered) or stale roster.
 
 - [ ] **Step 3: Implement**
 
-In `mount_one`, after `sync_tools`, subscribe and start the listener:
+In `mount_one`, after the sync-success point, PUBLISH the entry first, then subscribe and start the listener (publishing first means the guard's `equal?` check always has the right entry by the time any notification could be dispatched — subscribing first would drop a legitimate first-mount reconcile if buffered data dispatched before publication):
 
 ```ruby
+        @mounted[name] = entry
         entry[:client].on("notifications/tools/list_changed") do |_params|
+          # a straggler notification after unmount (or from a superseded
+          # mount) must not resurrect tools from a dead entry
+          next unless @mounted[name].equal?(entry)
+
           sync_tools(name, entry, cfg)
         end
         start_listener(entry)
 ```
+
+(the `@mounted[name] = entry` line moves up from the end of `mount_one` accordingly)
 
 ```ruby
       # manceps' listen is a blocking dispatch loop; give it its own task
