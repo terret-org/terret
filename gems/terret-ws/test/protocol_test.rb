@@ -14,6 +14,7 @@ rescue LoadError
 end
 
 require_relative "../lib/terret/ws" if ASYNC_AVAILABLE
+require_relative "../../terret-mcp/lib/terret/mcp" if ASYNC_AVAILABLE
 
 class ProtocolTest < Minitest::Test
   def setup
@@ -571,6 +572,57 @@ class ProtocolTest < Minitest::Test
       assert_equal total, (sock1.events.map { |f| f[:seq] } + seqs),
                    "old stream plus new stream must equal the whole log with no overlap"
       sock2.client_close
+    end
+  end
+
+  class RosterClient
+    Tool = Struct.new(:name, :description, :input_schema)
+    Result = Struct.new(:structured_content, keyword_init: true) do
+      def error? = false
+      def structured? = !structured_content.nil?
+      def content = []
+    end
+
+    def connect = true
+    def disconnect = true
+    def reconnect! = true
+    def on(*) = nil
+    def listen = nil
+    def tools(*) = [Tool.new("lookup", "", {}), Tool.new("wipe", "", {})]
+    def call_tool(name, **args) = Result.new(structured_content: { "did" => name, "args" => args })
+  end
+
+  def test_an_all_mcp_roster_works_under_policy_over_the_socket
+    script = [
+      { text: "Using tools.", tool_calls: [
+        Terret::LLM::ToolCall.new(id: "t1", name: "mcp__nexus__lookup", args: { q: "x" }),
+        Terret::LLM::ToolCall.new(id: "t2", name: "mcp__nexus__wipe", args: {})
+      ] },
+      { text: "Done." }
+    ]
+    ctx = boot(script: script, extra_rows: [
+      { id: "mcp", plugin: Terret::MCP::Service,
+        config: { servers: { "nexus" => { url: "https://x/mcp" } },
+                  client_factory: ->(*) { RosterClient.new } } }
+    ])
+    ctx[:mcp].mount!
+    agent, session = spawn_agent(ctx)
+    Terret::Tools::AllowList.install(agent.ctx, ["mcp__nexus__lookup"])
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "go", wake: true)
+      await { sock.event_types.include?("turn/end") }
+
+      results = session.events.select { |e| e.type == "tool/result" }
+      lookup = results.find { |e| e.payload[:id] == "t1" }
+      wipe   = results.find { |e| e.payload[:id] == "t2" }
+      assert_equal({ did: "lookup", args: { q: "x" } }, lookup.payload[:content])
+      assert_nil lookup.payload[:error]
+      assert_equal "mcp__nexus__wipe is not on the allow list", wipe.payload[:error]
+      assert_equal "completed", sock.events.last[:payload][:status]
+      sock.client_close
     end
   end
 
