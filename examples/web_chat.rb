@@ -13,6 +13,7 @@ Warning[:experimental] = false # async's resolv use of IO::Buffer warns on Ruby 
 
 require_relative "../gems/terret-core/lib/terret"
 require_relative "../gems/terret-openrouter/lib/terret/openrouter"
+require_relative "../gems/terret-store-sqlite/lib/terret/store/sqlite"
 require "async"
 require "async/http/server"
 require "async/http/endpoint"
@@ -46,6 +47,51 @@ def composer_html(disabled: false)
       <button type="submit"#{attrs}>Send</button>
     </form>
   HTML
+end
+
+# The sidebar is cross-session state derived from store queries, deliberately
+# separate from the per-session Renderer, which stays replay-pure.
+def session_label(events)
+  first = events.find { |ev| ev.type == "user/message" }
+  first ? first.payload[:text][0, 40] : "untitled"
+end
+
+def sidebar_html(sessions, active_id)
+  entries = sessions.session_ids
+                    .map { |id| [id, sessions.read(id)] }
+                    .sort_by { |(_id, events)| events.last&.at || Time.at(0) }
+                    .reverse
+  items = entries.map do |(id, events)|
+    active = id == active_id ? " active" : ""
+    <<~HTML
+      <form action="/session/select" method="post" data-turbo="false">
+        <input type="hidden" name="id" value="#{h(id)}">
+        <button class="session#{active}" type="submit">#{h(session_label(events))}</button>
+      </form>
+    HTML
+  end
+  <<~HTML
+    <form action="/session" method="post" data-turbo="false"><button class="new">+ new session</button></form>
+    #{items.join}
+  HTML
+end
+
+def sidebar_frame(sessions, active_id)
+  turbo_tag("update", "sessions", sidebar_html(sessions, active_id))
+end
+
+# Rebuild every connected tab after a session switch: clear, replay the
+# active session through a fresh Renderer, refresh the sidebar, then send
+# the authoritative composer state (covers logs that end mid-turn).
+def broadcast_session(hub, sessions, host)
+  hub.broadcast(turbo_tag("update", "transcript", ""))
+  replay = Renderer.new
+  host.session.events.each do |ev|
+    html = replay.render(ev)
+    hub.broadcast(html) if html
+  end
+  hub.broadcast(sidebar_frame(sessions, host.session.id))
+  hub.broadcast(turbo_tag("replace", "composer", composer_html(disabled: host.busy?)))
 end
 
 # Durable session event -> <turbo-stream> fragment (or nil for events with no
@@ -112,7 +158,8 @@ class AgentHost
     @ctx = ctx
     @hub = hub
     @busy = false
-    reset!
+    latest = most_recent_session_id
+    latest ? select!(latest) : reset!
   end
 
   def busy? = @busy
@@ -120,6 +167,17 @@ class AgentHost
   def reset!
     @session = @ctx[:sessions].create
     @agent = @ctx[:loop].spawn_agent(session_id: @session.id)
+    @session
+  end
+
+  # Switch the globally active session (every tab follows, same as the
+  # new-session button). Refused while a turn runs.
+  def select!(session_id)
+    return false if @busy
+
+    @session = @ctx[:sessions].resume(session_id)
+    @agent = @ctx[:loop].spawn_agent(session_id: @session.id)
+    @session
   end
 
   # Runs one turn in its own task on the shared reactor. Returns false when a
@@ -143,6 +201,13 @@ class AgentHost
     end
     true
   end
+
+  private
+
+  def most_recent_session_id
+    @ctx[:sessions].session_ids
+        .max_by { |id| @ctx[:sessions].read(id).last&.at || Time.at(0) }
+  end
 end
 
 def page_html(model)
@@ -153,7 +218,14 @@ def page_html(model)
       <meta charset="utf-8">
       <title>Terret</title>
       <style>
-        body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: flex; min-height: 100vh; }
+        nav#sessions { width: 240px; flex-shrink: 0; background: #f7f7f8; padding: 1rem .75rem; box-sizing: border-box; overflow-y: auto; }
+        nav#sessions form { margin: 0 0 .25rem; }
+        nav#sessions button { width: 100%; text-align: left; border: 0; background: transparent; padding: .5rem; border-radius: .375rem; cursor: pointer; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        nav#sessions button:hover { background: #ececf1; }
+        nav#sessions button.active { background: #e3e3ea; font-weight: 600; }
+        nav#sessions button.new { border: 1px solid #ccc; text-align: center; margin-bottom: 1rem; }
+        main { flex: 1; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
         header { display: flex; justify-content: space-between; align-items: baseline; color: #666; }
         .msg { padding: .5rem .75rem; border-radius: .5rem; margin: .5rem 0; white-space: pre-wrap; }
         .msg:empty { display: none; } /* a tool-only step never fills its bubble */
@@ -167,24 +239,24 @@ def page_html(model)
       </style>
     </head>
     <body>
-      <header>
-        <span>terret · #{h(model)}</span>
-        <form action="/session" method="post" data-turbo="false"><button>new session</button></form>
-      </header>
-      <div id="transcript"></div>
-      #{composer_html}
-      <script type="module">
-        import { connectStreamSource } from "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/+esm";
-        connectStreamSource(new EventSource("/events"));
-        // Delegated so the handler survives composer replacement by turbo-streams.
-        document.addEventListener("submit", async (event) => {
-          const form = event.target;
-          event.preventDefault();
-          const response = await fetch(form.action, { method: "POST", body: new URLSearchParams(new FormData(form)) });
-          const input = form.querySelector("input[name=text]");
-          if (input && response.ok) input.value = "";
-        });
-      </script>
+      <nav id="sessions"></nav>
+      <main>
+        <header><span>terret · #{h(model)}</span></header>
+        <div id="transcript"></div>
+        #{composer_html}
+        <script type="module">
+          import { connectStreamSource } from "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/+esm";
+          connectStreamSource(new EventSource("/events"));
+          // Delegated so the handler survives composer replacement by turbo-streams.
+          document.addEventListener("submit", async (event) => {
+            const form = event.target;
+            event.preventDefault();
+            const response = await fetch(form.action, { method: "POST", body: new URLSearchParams(new FormData(form)) });
+            const input = form.querySelector("input[name=text]");
+            if (input && response.ok) input.value = "";
+          });
+        </script>
+      </main>
     </body>
     </html>
   HTML
@@ -192,7 +264,7 @@ end
 
 # Snapshot the log and subscribe with no await in between, so the stream has
 # no gap and no duplicate; then replay through a fresh Renderer and tail.
-def sse_response(hub, host)
+def sse_response(hub, host, sessions)
   body = Protocol::HTTP::Body::Writable.new
   Async do
     queue = nil
@@ -203,6 +275,8 @@ def sse_response(hub, host)
       html = replay.render(ev)
       body.write(sse_frame(html)) if html
     end
+    body.write(sse_frame(sidebar_frame(sessions, host.session.id)))
+    body.write(sse_frame(turbo_tag("replace", "composer", composer_html(disabled: host.busy?))))
     loop { body.write(sse_frame(queue.dequeue)) }
   rescue StandardError
     # any write failure means the browser went away; drop the connection
@@ -218,7 +292,8 @@ model = ENV.fetch("TERRET_MODEL", "openai/gpt-5-mini")
 
 loader = Hames::Loader.new
 loader.layer([
-  { id: "session_store", plugin: Terret::Store::Memory },
+  { id: "session_store", plugin: Terret::Store::SQLite,
+    config: { path: File.expand_path("../tmp/web_chat.sqlite3", __dir__) } },
   { id: "sessions",   plugin: Terret::Sessions },
   { id: "prompt",     plugin: Terret::Prompt },
   { id: "tools",      plugin: Terret::Tools::Registry },
@@ -264,7 +339,7 @@ Sync do
       Protocol::HTTP::Response[200, { "content-type" => "text/html; charset=utf-8" },
                                [page_html(model)]]
     when ["GET", "/events"]
-      sse_response(hub, host)
+      sse_response(hub, host, ctx[:sessions])
     when ["POST", "/messages"]
       text = begin
         URI.decode_www_form(request.read.to_s).to_h["text"].to_s.strip
@@ -285,6 +360,22 @@ Sync do
         Protocol::HTTP::Response[409, {}, ["a turn is already running"]]
       else
         host.reset!
+        broadcast_session(hub, ctx[:sessions], host)
+        Protocol::HTTP::Response[204, {}, []]
+      end
+    when ["POST", "/session/select"]
+      id = begin
+        URI.decode_www_form(request.read.to_s).to_h["id"].to_s
+      rescue ArgumentError
+        ""
+      end
+      if host.busy?
+        Protocol::HTTP::Response[409, {}, ["a turn is already running"]]
+      elsif id.empty? || !ctx[:sessions].session_ids.include?(id)
+        Protocol::HTTP::Response[404, {}, ["unknown session"]]
+      else
+        host.select!(id)
+        broadcast_session(hub, ctx[:sessions], host)
         Protocol::HTTP::Response[204, {}, []]
       end
     else
