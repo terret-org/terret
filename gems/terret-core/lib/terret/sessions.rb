@@ -143,7 +143,19 @@ module Terret
     # else raises — typed objects are encoded at the edges (LLM.encode_part).
     def normalize_payload(value)
       case value
-      when String, Integer, true, false, nil then value
+      when Integer, true, false, nil then value
+      when String
+        utf8 = begin
+          value.encoding == Encoding::UTF_8 ? value : value.encode(Encoding::UTF_8)
+        rescue EncodingError
+          raise NonPrimitivePayload,
+                "#{value.encoding.name} string does not convert to UTF-8; scrub it first"
+        end
+        unless utf8.valid_encoding?
+          raise NonPrimitivePayload, "invalid UTF-8 string is not storable; scrub it first"
+        end
+
+        utf8
       when Float
         raise NonPrimitivePayload, "non-finite Float is not storable" unless value.finite?
 

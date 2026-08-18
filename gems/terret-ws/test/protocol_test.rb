@@ -506,7 +506,11 @@ class ProtocolTest < Minitest::Test
     end
   end
 
-  def test_a_poison_payload_drops_the_connection_not_the_append
+  # Before the M6 boundary (Task 3), invalid UTF-8 appended durably and blew up
+  # in the socket's JSON serializer, dropping the connection. Now the boundary
+  # refuses it before any consumer can see it: the log stays untouched and the
+  # connection never even notices.
+  def test_a_poison_payload_is_refused_at_the_boundary_and_the_socket_survives
     ctx = boot(script: [])
     agent, session = spawn_agent(ctx)
     poison = "\xFF\xFE".dup.force_encoding(Encoding::UTF_8)
@@ -516,11 +520,13 @@ class ProtocolTest < Minitest::Test
       sock.client_send(type: "subscribe", from_seq: 0)
       await { sock.events.any? }
 
-      appended = ctx[:sessions].append(session.id, "user/message", { text: poison })
-      assert appended, "the durable append must succeed regardless of the socket"
-      assert_includes session.events, appended
-      await { sock.closed? }
-      assert_equal "internal", sock.written.last[:code]
+      before = session.events.length
+      assert_raises(Terret::NonPrimitivePayload) do
+        ctx[:sessions].append(session.id, "user/message", { text: poison })
+      end
+      assert_equal before, session.events.length, "a refused append must leave the log untouched"
+      refute sock.closed?, "the poison never reached the wire; the connection lives"
+      sock.client_close
     end
   end
 

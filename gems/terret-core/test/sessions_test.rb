@@ -70,6 +70,35 @@ class SessionsPrimitivesTest < Minitest::Test
     end
   end
 
+  def test_invalid_utf8_raises_non_primitive_payload_at_the_boundary
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    junk = "ok \xFF\xFE not utf8".dup.force_encoding(Encoding::UTF_8)
+    err = assert_raises(Terret::NonPrimitivePayload) do
+      ctx[:sessions].append(s.id, "user/message", { text: junk })
+    end
+    assert_match(/UTF-8/, err.message)
+  end
+
+  def test_binary_strings_raise_and_name_their_encoding
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    blob = [0xDE, 0xAD].pack("C*") # ASCII-8BIT with high bytes
+    err = assert_raises(Terret::NonPrimitivePayload) do
+      ctx[:sessions].append(s.id, "user/message", { text: blob })
+    end
+    assert_match(/ASCII-8BIT/, err.message)
+  end
+
+  def test_convertible_encodings_convert_and_store_as_utf8
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    latin = "caf\xE9".dup.force_encoding(Encoding::ISO_8859_1)
+    ev = ctx[:sessions].append(s.id, "user/message", { text: latin })
+    assert_equal "café", ev.payload[:text]
+    assert_equal Encoding::UTF_8, ev.payload[:text].encoding
+  end
+
   def boot_with_store(store)
     Hames.reset_events!
     Terret.declare_events!
