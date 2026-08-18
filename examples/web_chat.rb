@@ -131,13 +131,12 @@ class AgentHost
     Async do
       @ctx[:loop].run_turn(@agent, text)
     rescue => e
-      # ephemeral by design: a failed turn is not model-visible truth, so it
-      # stays out of the session log — and the loop never appended turn/end,
-      # so the composer must be re-enabled from here
+      # the durable turn/end (status :failed) already re-enabled the composer
+      # through the normal render path; only the exception detail is ephemeral —
+      # it is not model-visible truth, so it stays out of the session log
       @hub.broadcast(
         turbo_tag("append", "transcript",
-                  %(<div class="tool error">turn failed: #{h(e.message)}</div>)) +
-        turbo_tag("replace", "composer", composer_html)
+                  %(<div class="tool error">turn failed: #{h(e.message)}</div>))
       )
     ensure
       @busy = false
@@ -208,7 +207,7 @@ def sse_response(hub, host)
     # any write failure means the browser went away; drop the connection
   ensure
     hub.unsubscribe(queue) if queue
-    body.close
+    body.close_write
   end
   Protocol::HTTP::Response[200, { "content-type" => "text/event-stream",
                                   "cache-control" => "no-cache" }, body]
@@ -265,8 +264,14 @@ Sync do
     when ["GET", "/events"]
       sse_response(hub, host)
     when ["POST", "/messages"]
-      text = URI.decode_www_form(request.read.to_s).to_h["text"].to_s.strip
-      if text.empty?
+      text = begin
+        URI.decode_www_form(request.read.to_s).to_h["text"].to_s.strip
+      rescue ArgumentError
+        nil
+      end
+      if text.nil?
+        Protocol::HTTP::Response[400, {}, ["malformed form body"]]
+      elsif text.empty?
         Protocol::HTTP::Response[422, {}, ["missing text"]]
       elsif host.run(text)
         Protocol::HTTP::Response[204, {}, []]
