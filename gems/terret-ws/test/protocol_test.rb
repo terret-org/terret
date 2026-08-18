@@ -128,12 +128,17 @@ class ProtocolTest < Minitest::Test
     [sock, conn, conn_task]
   end
 
-  # Bounded wait: scheduling order is the async gem's business, not the
-  # test's. Poll the observable outcome instead of assuming interleavings.
+  # Bounded wait: poll the observable outcome instead of assuming fiber
+  # scheduling. On timeout, stop the enclosing task's children first — a
+  # StandardError alone doesn't stop siblings (async 2.44.1), so without
+  # this a failing await hangs the process instead of failing the test.
   def await(timeout = 5)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     until yield
-      raise "await timed out" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        Async::Task.current.children&.each(&:stop)
+        raise "await timed out"
+      end
 
       sleep 0.002
     end
