@@ -86,6 +86,10 @@ module Hames
       doomed = []
       @effects.each { |fr| (fr[0] == owner ? doomed : kept) << fr }
       @effects = kept
+      # each wrapped disposer re-scans @effects for a frame that the
+      # partition above already removed — an O(doomed·kept) miss. Negligible
+      # at current roster sizes; if owner disposal ever gets hot, carry the
+      # original disposer on the frame and call it directly here.
       doomed.reverse_each { |(_o, d)| d.call }
     end
 

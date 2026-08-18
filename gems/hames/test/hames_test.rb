@@ -195,6 +195,7 @@ class HamesLoaderTest < Minitest::Test
     assert ctx.service?(:store)
     loader.unload!("store")
     refute ctx.service?(:store)
+    assert_equal 0, ctx.instance_variable_get(:@effects).size
   end
 end
 
