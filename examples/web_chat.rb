@@ -83,3 +83,109 @@ class Renderer
     end
   end
 end
+
+# Fan-out of rendered HTML to per-connection SSE queues.
+class Hub
+  def initialize
+    @queues = []
+  end
+
+  def subscribe
+    queue = Async::Queue.new
+    @queues << queue
+    queue
+  end
+
+  def unsubscribe(queue) = @queues.delete(queue)
+
+  def broadcast(html)
+    @queues.each { |q| q.enqueue(html) }
+  end
+end
+
+# Owns the current session and agent; serializes turns with a plain flag —
+# safe on one reactor because there is no await between check and set.
+class AgentHost
+  attr_reader :session, :agent
+
+  def initialize(ctx, hub)
+    @ctx = ctx
+    @hub = hub
+    @busy = false
+    reset!
+  end
+
+  def busy? = @busy
+
+  def reset!
+    @session = @ctx[:sessions].create
+    @agent = @ctx[:loop].spawn_agent(session_id: @session.id)
+  end
+
+  # Runs one turn in its own task on the shared reactor. Returns false when a
+  # turn is already running (the composer is disabled; this is belt and braces).
+  def run(text)
+    return false if @busy
+
+    @busy = true
+    Async do
+      @ctx[:loop].run_turn(@agent, text)
+    rescue => e
+      # ephemeral by design: a failed turn is not model-visible truth, so it
+      # stays out of the session log — and the loop never appended turn/end,
+      # so the composer must be re-enabled from here
+      @hub.broadcast(
+        turbo_tag("append", "transcript",
+                  %(<div class="tool error">turn failed: #{h(e.message)}</div>)) +
+        turbo_tag("replace", "composer", composer_html)
+      )
+    ensure
+      @busy = false
+    end
+    true
+  end
+end
+
+def page_html(model)
+  <<~HTML
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Terret</title>
+      <style>
+        body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+        header { display: flex; justify-content: space-between; align-items: baseline; color: #666; }
+        .msg { padding: .5rem .75rem; border-radius: .5rem; margin: .5rem 0; white-space: pre-wrap; }
+        .user { background: #e8f0fe; margin-left: 20%; }
+        .assistant { background: #f5f5f5; margin-right: 20%; }
+        .tool { color: #666; font-family: ui-monospace, monospace; font-size: .85em; margin: .25rem 0; }
+        .tool.error { color: #c00; }
+        .meta { color: #999; font-size: .8em; margin: .25rem 0; }
+        #composer { display: flex; gap: .5rem; margin-top: 1rem; }
+        #composer input { flex: 1; padding: .5rem; }
+      </style>
+    </head>
+    <body>
+      <header>
+        <span>terret · #{h(model)}</span>
+        <form action="/session" method="post" data-turbo="false"><button>new session</button></form>
+      </header>
+      <div id="transcript"></div>
+      #{composer_html}
+      <script type="module">
+        import { connectStreamSource } from "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/+esm";
+        connectStreamSource(new EventSource("/events"));
+        // Delegated so the handler survives composer replacement by turbo-streams.
+        document.addEventListener("submit", async (event) => {
+          const form = event.target;
+          event.preventDefault();
+          const response = await fetch(form.action, { method: "POST", body: new URLSearchParams(new FormData(form)) });
+          const input = form.querySelector("input[name=text]");
+          if (input && response.ok) input.value = "";
+        });
+      </script>
+    </body>
+    </html>
+  HTML
+end
