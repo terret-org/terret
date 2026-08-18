@@ -45,7 +45,15 @@ module Terret
 
           hello
           while (text = @io.read)
-            dispatch(text)
+            begin
+              dispatch(text)
+            rescue StandardError => e
+              # docs/protocol.md: any unexpected server-side failure while
+              # serving this connection surfaces as internal, then closes.
+              warn "terret-ws: #{@sid}: dropping connection on dispatch error: #{e.class}: #{e.message}"
+              shutdown(code: "internal")
+              break
+            end
           end
         ensure
           dispose

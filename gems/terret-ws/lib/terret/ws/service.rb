@@ -72,6 +72,11 @@ module Terret
           task.async do
             @ctx[:loop].run_turn(agent, text)
           rescue => e
+            # Unreachable via the socket's own wake path today: status flips
+            # to :running inside run_turn before any yield point, and
+            # handle_inject checks status first. If M6's wake-on-stimulus can
+            # race this, decide then whether to requeue the text instead of
+            # dropping it.
             warn "terret-ws: turn failed for #{agent.id}: #{e.class}: #{e.message}"
           end
         end

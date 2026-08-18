@@ -573,4 +573,24 @@ class ProtocolTest < Minitest::Test
       sock2.client_close
     end
   end
+
+  def test_an_unexpected_dispatch_error_surfaces_as_internal
+    ctx = boot(script: [])
+    agent, session = spawn_agent(ctx)
+    ctx.with_owner("angry-plugin") do
+      ctx.on("session/event") do |ev|
+        raise "boom" if ev.type == "approval/resolved"
+      end
+    end
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "approve", call_id: "tc1")
+      await { sock.closed? }
+
+      assert_equal "internal", sock.written.last[:code]
+      # durable-first: the append committed before the listener raised
+      assert_equal 1, session.events.count { |e| e.type == "approval/resolved" }
+    end
+  end
 end
