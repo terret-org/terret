@@ -89,3 +89,8 @@ Declare it in `Terret.declare_events!` with its mode and, if it belongs in the s
 `durable: true`. Durable events can then be appended via `Sessions#append`, which fans them
 out on `session/event`. Run `rake events:catalog` and commit the regenerated
 `docs/events.md` in the same change.
+
+## Shipping
+
+Whenever shipping work lands on main — any push, and especially a milestone — update
+README.md in the same push so it keeps reflecting the current state of the repo.
