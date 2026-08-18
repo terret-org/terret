@@ -22,6 +22,7 @@ module Terret
         @events.fetch(session_id, []).select { |ev| ev.seq >= from_seq }
       end
 
+      # Order is provider-defined; recency must be derived from event timestamps.
       def session_ids = @events.keys
     end
   end

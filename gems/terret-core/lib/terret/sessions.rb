@@ -44,8 +44,9 @@ module Terret
         id: SecureRandom.hex(8), session_id:, seq: s.events.length,
         at: Time.now.utc, type: type.to_s, payload: normalize_payload(payload)
       )
-      s.events << ev
+      # durable first: if the store raises, nothing believes the event happened
       @store.append(ev)
+      s.events << ev
       @ctx.emit("session/event", ev)
       ev
     end
@@ -81,6 +82,7 @@ module Terret
             "outbound request diverges from session log projection for #{session_id}"
     end
 
+    # Forks the in-memory working set; resume a store-only session first.
     def fork(source_id, boundary: nil, child_id: SecureRandom.hex(6))
       src = fetch(source_id)
       child = Session.new(id: child_id, events: [], parent_id: source_id)
@@ -88,8 +90,8 @@ module Terret
       events = boundary ? src.events.take(boundary) : src.events.dup
       events.each do |ev|
         copy = ev.with(session_id: child_id)
-        child.events << copy
         @store.append(copy)
+        child.events << copy
       end
       append(child_id, "session/forked", { from: source_id, boundary: boundary })
       child

@@ -5,6 +5,16 @@ require "json"
 require_relative "../lib/terret"
 
 class SessionsPrimitivesTest < Minitest::Test
+  class ExplodingStore < Terret::Store::Memory
+    service_key :session_store
+
+    def append(event)
+      raise IOError, "disk full" if event.payload[:text] == "boom"
+
+      super
+    end
+  end
+
   def sessions_ctx
     Hames.reset_events!
     Terret.declare_events!
@@ -121,5 +131,20 @@ class SessionsPrimitivesTest < Minitest::Test
     resumed = ctx2[:sessions].resume(child.id)
     assert_equal s.id, resumed.parent_id
     assert_equal child.events, resumed.events
+  end
+
+  def test_a_failed_store_append_leaves_no_phantom_event_in_memory
+    store = ExplodingStore.new
+    ctx = boot_with_store(store)
+    s = ctx[:sessions].create
+    ctx[:sessions].append(s.id, "user/message", { text: "ok" })
+
+    emitted = []
+    ctx.on("session/event") { |ev| emitted << ev }
+    assert_raises(IOError) { ctx[:sessions].append(s.id, "user/message", { text: "boom" }) }
+
+    assert_equal 2, s.events.length # session/created + "ok" only, no phantom
+    assert_empty emitted # nothing model-visible happened
+    assert_equal s.events, ctx[:sessions].read(s.id) # cache == store
   end
 end
