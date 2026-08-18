@@ -52,7 +52,11 @@ module Terret
         return [] unless File.exist?(path(session_id))
 
         File.foreach(path(session_id)).filter_map do |line|
-          h = JSON.parse(line, symbolize_names: true)
+          h = begin
+            JSON.parse(line, symbolize_names: true)
+          rescue JSON::ParserError
+            next # a torn line (crash mid-write) loses itself, not the session
+          end
           next if h[:seq] < from_seq
 
           SessionEvent.new(id: h[:id], session_id: h[:session_id], seq: h[:seq],

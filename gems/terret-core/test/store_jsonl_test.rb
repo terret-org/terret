@@ -25,4 +25,15 @@ class JSONLStoreTest < Minitest::Test
     assert_equal writer.read("s1"), reader.read("s1")
     assert_equal ["s1"], reader.session_ids
   end
+
+  def test_a_torn_trailing_line_loses_itself_not_the_session
+    dir = File.join(Dir.mktmpdir("terret-jsonl"), "sessions")
+    store = Terret::Store::JSONL.new(dir: dir)
+    store.start(nil)
+    store.append(contract_event("s1", 0))
+    store.append(contract_event("s1", 1))
+    File.open(File.join(dir, "s1.jsonl"), "a") { |f| f.write('{"id":"torn","se') } # crash mid-write
+
+    assert_equal [0, 1], store.read("s1").map(&:seq)
+  end
 end
