@@ -212,6 +212,23 @@ class TurnFlowTest < Minitest::Test
     assert_equal "Be terse.", ctx[:prompt].render
   end
 
+  def test_spawned_agents_are_findable_by_id
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, = spawn(ctx)
+
+    assert_same agent, ctx[:loop].agent(agent.id)
+    assert_nil ctx[:loop].agent("agent-nowhere")
+  end
+
+  def test_respawning_an_id_replaces_the_registry_entry
+    ctx, = boot(script: [{ text: "hi" }])
+    session = ctx[:sessions].create
+    first  = ctx[:loop].spawn_agent(session_id: session.id)
+    second = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_same second, ctx[:loop].agent(first.id)
+  end
+
   class WeatherPlugin < Hames::Service
     inject :tools
     def start(ctx)

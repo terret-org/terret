@@ -37,11 +37,15 @@ module Terret
 
     def start(ctx)
       @ctx = ctx
+      @agents = {}
     end
 
     def spawn_agent(session_id:, id: "agent-#{session_id}")
-      Agent.new(id:, session_id:, ctx: @ctx.fork)
+      @agents[id] = Agent.new(id:, session_id:, ctx: @ctx.fork)
     end
+
+    # Live-agent lookup for interfaces (§9.2); nil when never spawned.
+    def agent(id) = @agents[id]
 
     # Runs one turn for `input`. Returns the turn status symbol.
     def run_turn(agent, input)
