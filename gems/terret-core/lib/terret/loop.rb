@@ -1,6 +1,10 @@
 # frozen_string_literal: true
 
 module Terret
+  # Raised when run_turn is called on an agent already mid-turn: concurrent
+  # turns would interleave the durable log, so this refuses loudly instead.
+  class TurnAlreadyRunning < StandardError; end
+
   Claim = Data.define(:messages, :rejected, :reason) do
     def self.of(messages) = new(messages:, rejected: false, reason: nil)
     def self.reject(reason:) = new(messages: [], rejected: true, reason:)
@@ -76,18 +80,21 @@ module Terret
 
     # Runs one turn for `input`. Returns the turn status symbol.
     def run_turn(agent, input)
+      raise TurnAlreadyRunning, "agent #{agent.id} is mid-turn" if agent.status == :running
+
       ctx      = agent.ctx
       sessions = ctx[:sessions]
       sid      = agent.session_id
       agent.status = :running
 
-      sessions.append(sid, "turn/start", { agent: agent.id })
       status = :completed
       steps = 0
+      steered = []
 
       pending = [input].compact
 
       begin
+        sessions.append(sid, "turn/start", { agent: agent.id })
         loop do
           if agent.cancelled?
             status = :cancelled
@@ -112,6 +119,7 @@ module Terret
 
           sessions.append(sid, "step/start", { n: steps })
           claim.messages.each { |t| sessions.append(sid, "user/message", { text: t }) }
+          steered = [] # once logged, these must never requeue
           pending = []
 
           history = sessions.derive_messages(sid)
@@ -136,11 +144,18 @@ module Terret
           calls = message.tool_calls
           if calls.empty?
             sessions.append(sid, "step/end", step_end)
+            status = :cancelled if agent.cancelled?
             break # nothing owed
           end
 
           calls.each do |tc|
             sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
+            if agent.cancelled?
+              sessions.append(sid, "tool/result",
+                              { id: tc.id, content: nil, error: "cancelled before execution" })
+              next
+            end
+
             result = ctx[:tools].execute(
               Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid)
             )
@@ -158,14 +173,18 @@ module Terret
         end
       rescue Exception
         status = :failed
+        agent.requeue(steered) unless steered.empty?
         raise
       ensure
-        ctx.serial("agent/turn_stopping", agent)
-        payload = { status: status }
-        payload[:reason] = agent.cancel_reason if status == :cancelled && agent.cancel_reason
-        sessions.append(sid, "turn/end", payload)
-        agent.clear_cancel!
-        agent.status = :idle
+        begin
+          ctx.serial("agent/turn_stopping", agent)
+          payload = { status: status }
+          payload[:reason] = agent.cancel_reason if status == :cancelled && agent.cancel_reason
+          sessions.append(sid, "turn/end", payload)
+        ensure
+          agent.clear_cancel!
+          agent.status = :idle
+        end
       end
       status
     end

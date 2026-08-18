@@ -262,6 +262,76 @@ class TurnFlowTest < Minitest::Test
     refute agent.inbox_empty?, "a cancelled turn must not consume the inbox"
   end
 
+  def test_run_turn_refuses_a_concurrent_call_on_a_running_agent
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, = spawn(ctx)
+    agent.status = :running
+
+    assert_raises(Terret::TurnAlreadyRunning) { ctx[:loop].run_turn(agent, "hello") }
+  end
+
+  def test_a_pre_step_exception_requeues_the_drained_steer_and_unwedges_the_agent
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, session = spawn(ctx)
+    agent.inject("don't lose me")
+    ctx.on("agent/pre_step") { |_claim, _next_| raise "boom" }
+
+    assert_raises(RuntimeError) { ctx[:loop].run_turn(agent, "hello") }
+
+    refute agent.inbox_empty?, "the steer drained before the exception must be requeued"
+    assert_equal :idle, agent.status
+    assert_equal "turn/end", session.events.last.type
+    assert_equal "failed", session.events.last.payload[:status]
+  end
+
+  def test_a_cancel_raised_from_pre_step_closes_a_final_no_tool_step_as_cancelled
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, session = spawn(ctx)
+    ctx.on("agent/pre_step") do |claim, next_|
+      agent.cancel(nil)
+      next_.(claim)
+    end
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "hello")
+
+    chunkless = session.events.map(&:type).reject { |t| t == "assistant/chunk" }
+    assert_equal %w[
+      session/created
+      turn/start
+      step/start user/message assistant/message step/end
+      turn/end
+    ], chunkless
+    assert_equal "cancelled", session.events.last.payload[:status]
+  end
+
+  def test_cancel_from_one_tool_handler_skips_execution_of_the_next_tool_in_the_same_step
+    call_a = Terret::LLM::ToolCall.new(id: "tc-a", name: "tool_a", args: {})
+    call_b = Terret::LLM::ToolCall.new(id: "tc-b", name: "tool_b", args: {})
+    ctx, = boot(script: [{ text: "two tools", tool_calls: [call_a, call_b] }])
+    agent = nil
+    b_ran = false
+    ctx.with_owner("two-tool-plugin") do
+      ctx[:tools].register(name: "tool_a", description: "A", params: {}) do
+        agent.cancel("stop")
+        "a-result"
+      end
+      ctx[:tools].register(name: "tool_b", description: "B", params: {}) do
+        b_ran = true
+        "b-result"
+      end
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "go")
+
+    refute b_ran, "tool B must never execute once cancel landed"
+    results = session.events.select { |e| e.type == "tool/result" }
+    assert_equal "a-result", results[0].payload[:content]
+    assert_nil results[1].payload[:content]
+    assert_equal "cancelled before execution", results[1].payload[:error]
+  end
+
   def test_a_rejected_claim_requeues_the_drained_steer_for_the_next_turn
     ctx, = boot(script: [{ text: "ok" }])
     reject_once = true

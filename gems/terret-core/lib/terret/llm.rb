@@ -89,7 +89,7 @@ module Terret
 
       def start(_ctx)
         @adapters = {}
-        @roles    = config[:roles] || {} # :main => "fake/scripted"
+        @roles    = (config[:roles] || {}).dup # :main => "fake/scripted"
       end
 
       def register_adapter(name, adapter)
@@ -113,6 +113,7 @@ module Terret
           raise ArgumentError, "model spec must be provider/model, got #{spec.inspect}"
         end
 
+        @adapters.fetch(provider) { raise ArgumentError, "unknown provider #{provider.inspect}" }
         @roles[role.to_sym] = spec.to_s
       end
 

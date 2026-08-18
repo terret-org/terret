@@ -87,4 +87,27 @@ class LLMServiceRolesTest < Minitest::Test
     assert_raises(ArgumentError) { service.set_role(nil, "alt/two") }
     assert_raises(ArgumentError) { service.set_role(123, "alt/two") }
   end
+
+  def test_set_role_rejects_a_provider_with_no_registered_adapter
+    service = Terret::LLM::Service.new(roles: { main: "fake/one" })
+    service.start(nil)
+    service.register_adapter("fake", Object.new)
+
+    assert_raises(ArgumentError) { service.set_role(:main, "ghost/x") }
+    assert_equal [service.instance_variable_get(:@adapters)["fake"], "one"], service.resolve(:main)
+  end
+
+  def test_start_does_not_alias_the_callers_config_hash
+    original_roles = { main: "fake/one" }
+    service = Terret::LLM::Service.new(roles: original_roles)
+    service.start(nil)
+    a = Object.new
+    b = Object.new
+    service.register_adapter("fake", a)
+    service.register_adapter("alt", b)
+
+    service.set_role(:main, "alt/two")
+
+    assert_equal "fake/one", original_roles[:main]
+  end
 end
