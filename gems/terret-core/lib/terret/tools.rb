@@ -23,6 +23,7 @@ module Terret
         @defs = {}
       end
 
+      # Returns the registration's disposer.
       def register(name:, description:, params: {}, mutating: false,
                    approval: :never, &handler)
         d = Definition.new(name: name.to_s, description:, params:, handler:,
@@ -31,7 +32,6 @@ module Terret
           @defs[d.name] = d
           -> { @defs.delete(d.name) }
         end
-        d
       end
 
       def schemas = @defs.values.map(&:schema)
@@ -52,6 +52,8 @@ module Terret
           d = fetch(c.name)
           begin
             Result.new(id: c.id, content: d.handler.call(**c.args), error: nil)
+          rescue Failure => e
+            Result.new(id: c.id, content: nil, error: e.message)
           rescue => e
             Result.new(id: c.id, content: nil, error: "#{e.class}: #{e.message}")
           end
@@ -61,6 +63,12 @@ module Terret
     end
 
     Veto = Data.define(:reason)
+
+    # A domain failure whose message is the whole story: handlers raise it
+    # when the error is the tool's outcome, not a bug. Registry#execute logs
+    # it message-only; any other exception keeps its class name, because a
+    # crash's class is diagnostics, not noise.
+    Failure = Class.new(StandardError)
 
     # Deny-by-default allow list (plan §6.3): a tools/pre_execute listener,
     # not a registry special case, so a per-agent list rides the agent's

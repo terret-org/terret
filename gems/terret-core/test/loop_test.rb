@@ -480,6 +480,26 @@ class TurnFlowTest < Minitest::Test
     assert_equal "found", result.content
   end
 
+  def test_handler_bugs_keep_their_class_and_domain_failures_do_not
+    ctx, = boot(script: [{ text: "hi" }])
+    ctx.with_owner("tools") do
+      ctx[:tools].register(name: "buggy", description: "", params: {}) { raise "oops" }
+      ctx[:tools].register(name: "doomed", description: "", params: {}) { raise Terret::Tools::Failure, "not today" }
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    bug = ctx[:tools].execute(
+      Terret::Tools::Call.new(id: "a", name: "buggy", args: {}, session_id: session.id), ctx: agent.ctx
+    )
+    assert_equal "RuntimeError: oops", bug.error
+
+    domain = ctx[:tools].execute(
+      Terret::Tools::Call.new(id: "b", name: "doomed", args: {}, session_id: session.id), ctx: agent.ctx
+    )
+    assert_equal "not today", domain.error
+  end
+
   class WeatherPlugin < Hames::Service
     inject :tools
     def start(ctx)
