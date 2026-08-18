@@ -3,7 +3,7 @@
 **A Ruby-native, model-agnostic agent harness, informed by DeepSeek Harness (`dsh`)**
 
 Version 0.5, August 2026
-Status: Design document. M0–M4 are shipped; see §12 for what is actually built.
+Status: Design document. M0–M5 are shipped; see §12 for what is actually built.
 
 ---
 
@@ -458,7 +458,7 @@ Each phase ends with demoable acceptance criteria. No estimates are given; seque
 
 **M4. The socket. SHIPPED.** `terret-ws`: one connection per agent, durable session events out, the five §9.2 client frames plus subscribe in, exact replay-then-tail reconnect with flow-controlled replay, bounded-queue backpressure with an idempotent lagged-drop, bearer auth per agent with connection supersede, and heartbeat pings. Cooperative cancel is honored at step boundaries; mid-stream abort waits on the §8 async work. Approval events are declared, with resolution machinery deferred to M6. A cross-model adversarial review (Codex) plus two-stage per-task reviews drove several hardening fixes during implementation; accepted-but-deferred findings from that review are recorded in §14. *Accepted:* the socket protocol tests pass, including the connection-drop cases; an agent survives a client disconnect mid-turn and the reconnecting client sees no gap.
 
-**M5. MCP client.** stdio and streamable-HTTP servers mounted as tool sources under a namespace, with per-server policy and a strict mode that ignores ambient config, plus the declarative per-agent allow list. *Accept:* an agent whose entire tool roster arrives from MCP servers works under policy, driven over the socket.
+**M5. MCP client. SHIPPED.** `terret-mcp`: a manceps-backed client mounting stdio and streamable-HTTP servers as namespaced `mcp__<server>__<tool>` tool sources behind `ctx[:tools]`, targeting the deployed legacy wire (protocol revisions 2025-11-25/2025-06-18); per-server approval metadata, a strict mode closed to ambient config, per-call timeouts that poison a connection and reconnect on next use, live `tools/list_changed` reconciliation, and resources registered as prompt sections. Two core preludes made policy real: `Context#effect` disposers became self-removing and idempotent (paying down an M4 debt item), and `Registry#execute` now dispatches its waterfalls on the calling agent's forked context, so `Terret::Tools::AllowList` — a deny-by-default `tools/pre_execute` veto with `File.fnmatch` globs — actually governs one agent alone when installed on its fork. *Accepted:* an agent whose entire tool roster arrived from a real stdio MCP server ran a turn over the M4 socket with the allow list admitting one call and denying another, proven live against a fixture subprocess. *Deferred:* approval resolution machinery (M6); the 2026-07-28 stateless MCP wire revision, not yet deployed anywhere.
 
 **M6. Long-lived agent hardening.** Everything a session that runs for weeks needs and a short run does not: context compaction, durable approvals resolved over the socket, wake-on-stimulus semantics through the inbox, titling, and cost accounting per session. *Accept:* an agent runs across many wakes and a deploy without losing derived context, and a parked approval resolves after a restart. Two notes from M3's review for the compactor: `derive_messages(upto:)` slices by event count, not seq boundary, before compaction applies; and the compactor must always set `upto_seq` to the immediately preceding seq, or the projection can interleave a summary among events that predate it.
 
@@ -499,7 +499,8 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   none blocking M4's acceptance: (1) a disposed `Context#on` listener's effect entry
   stays in `@effects` forever — long-lived contexts retain every disposed disposer and
   whatever its closure captures (each socket subscription, for one); the fix belongs in
-  `Context#effect` making disposers self-removing, a kernel pass. (2) `Hames::Context#emit`
+  `Context#effect` making disposers self-removing, a kernel pass. *Paid down during M5*,
+  driven by MCP mounting and unmounting tools constantly. (2) `Hames::Context#emit`
   runs listeners inline and unrescued, so any listener error surfaces to the producer
   after a durable append has committed — decide whether fire-and-forget should isolate
   listener failures (the socket rescues its own listener as a workaround). (3) the JSONL
@@ -508,6 +509,11 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   store instead of at the boundary — tighten `normalize_payload`. (4) `Loop`'s agent
   registry is unbounded, never disposes a replaced agent's forked context, and allows
   silent id replacement — needs a lifecycle story before M6's long-lived agents.
+- **MCP wire and fiber-safety, from M5.** v1 targets the deployed legacy wire (protocol
+  revisions 2025-11-25/2025-06-18); the 2026-07-28 stateless revision stays out of scope
+  until something actually deploys it. manceps' fiber-safety under the async scheduler is
+  empirically verified, not an upstream contract — the integration canary pins it at our
+  boundary, and a future manceps release could still break it silently.
 - **Open:** should `hames` move to its own repo, for a cleaner story at the cost of more overhead? Should the meta-gem vendor a pinned bundle version map?
 
 ## 15. What "Cutting Edge" Means Here, Concretely
