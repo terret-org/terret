@@ -1116,6 +1116,57 @@ The stdio transport correlates responses by ordering, not ids — a late reply t
 
 (Add `require "async"`-guarded skip at the top of the test class setup if async is unavailable, following the terret-ws convention.)
 
+Also add the concurrent-heal race test (review fallout — proves exactly one heal wins when two fibers hit the same poisoned entry; the loser proceeds against the reconnecting client and at worst re-poisons):
+
+```ruby
+  class SlowHealClient < FakeClient
+    attr_reader :reconnects
+
+    def initialize(**)
+      super
+      @reconnects = 0
+      @broken = true
+    end
+
+    def reconnect!
+      @reconnects += 1
+      sleep 0.05 # a real reconnect yields; that window is the race
+      @broken = false
+      super
+    end
+
+    def call_tool(name, **args)
+      raise IOError, "pipe gone" if @broken
+
+      super
+    end
+  end
+
+  def test_concurrent_callers_do_not_double_heal_a_poisoned_entry
+    fake = SlowHealClient.new(tools: [FakeTool.new("t", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp", timeout: 1 } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+
+    Sync do |task|
+      first = ctx[:tools].execute(
+        Terret::Tools::Call.new(id: "p", name: "mcp__s__t", args: {}, session_id: "x"), ctx: ctx
+      )
+      assert_match(/mcp s: IOError/, first.error)
+
+      results = 2.times.map do |i|
+        task.async do
+          ctx[:tools].execute(
+            Terret::Tools::Call.new(id: "c#{i}", name: "mcp__s__t", args: {}, session_id: "x"), ctx: ctx
+          )
+        end
+      end.map(&:wait)
+
+      assert_equal 1, fake.reconnects, "exactly one heal must win the race"
+      assert results.any? { |r| r.error.nil? }, "the winning caller succeeds"
+    end
+  end
+```
+
 - [ ] **Step 2: Run and verify failure** — first call errors (good) but `fake.reconnects` stays 0.
 
 - [ ] **Step 3: Implement**
@@ -1125,20 +1176,36 @@ In `service.rb`, track poisoning per entry. In `call_remote`, on the timeout pat
 ```ruby
       def call_remote(name, entry, remote, call_args, timeout)
         if entry[:poisoned]
-          entry[:client].reconnect!
+          # claim the heal before reconnecting (reconnect! yields): a second
+          # fiber arriving mid-heal proceeds against the reconnecting client
+          # and at worst gets a transport error that re-poisons. A waiting
+          # latch would be race-free; that arrives with the M6 lifecycle work.
           entry[:poisoned] = false
+          begin
+            entry[:client].reconnect!
+          rescue StandardError
+            entry[:poisoned] = true
+            raise Terret::Tools::Failure, "mcp #{name}: reconnect failed"
+          end
         end
         result = with_timeout(timeout) { entry[:client].call_tool(remote, **call_args) }
         error = Translate.result_error(result)
         raise Terret::Tools::Failure, error if error
 
         Translate.result_content(result)
-      rescue Async::TimeoutError
+      rescue *timeout_errors
         entry[:poisoned] = true
         raise Terret::Tools::Failure, "mcp timeout after #{timeout}s"
       rescue *transport_errors => e
         entry[:poisoned] = true
         raise Terret::Tools::Failure, "mcp #{name}: #{e.class}: #{e.message}"
+      end
+
+      # Async is optional for terret-mcp; a rescue clause must not name a
+      # constant the host may never load. Evaluated at exception time, so a
+      # late `require "async"` still matches.
+      def timeout_errors
+        defined?(Async::TimeoutError) ? [Async::TimeoutError] : []
       end
 ```
 
