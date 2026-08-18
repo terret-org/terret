@@ -26,6 +26,8 @@ module Terret
       module_function
 
       def decode(text)
+        raise BadFrame, "frame must be a string" unless text.is_a?(String)
+
         h = begin
           JSON.parse(text, symbolize_names: true)
         rescue JSON::ParserError
@@ -45,7 +47,7 @@ module Terret
         %i[text call_id role model reason].each do |k|
           next unless h.key?(k)
 
-          raise BadFrame, "#{k} must be a string" unless h[k].is_a?(String)
+          raise BadFrame, "#{k} must be a UTF-8 string" unless h[k].is_a?(String) && h[k].valid_encoding?
         end
         if h.key?(:wake) && ![true, false].include?(h[:wake])
           raise BadFrame, "wake must be true or false"

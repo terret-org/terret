@@ -35,6 +35,12 @@ class FramesTest < Minitest::Test
     assert_raises(F::BadFrame) { F.decode(%({"type":"cancel","reason":42})) }
   end
 
+  def test_rejects_non_string_input_and_invalid_utf8_values
+    assert_raises(F::BadFrame) { F.decode(nil) }
+    assert_raises(F::BadFrame) { F.decode(42) }
+    assert_raises(F::BadFrame) { F.decode(%({"type":"inject","text":"\xFF\xFE"})) }
+  end
+
   def test_serializes_the_event_envelope_as_is
     ev = Struct.new(:id, :session_id, :seq, :at, :type, :payload)
              .new("e1", "s1", 4, Time.utc(2026, 8, 18, 4, 10, 11, 123_456), "user/message", { text: "hi" })
