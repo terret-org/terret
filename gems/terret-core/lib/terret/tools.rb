@@ -61,5 +61,25 @@ module Terret
     end
 
     Veto = Data.define(:reason)
+
+    # Deny-by-default allow list (plan §6.3): a tools/pre_execute listener,
+    # not a registry special case, so a per-agent list rides the agent's
+    # forked context (Registry#execute dispatches on the caller's ctx).
+    # Patterns are File.fnmatch globs, e.g. "mcp__nexus__*". Returns the
+    # listener's disposer.
+    # Note fnmatch defaults: matching is case-sensitive, and a bare "*" does
+    # not match names starting with "." (no FNM_DOTMATCH) — both fail closed.
+    module AllowList
+      def self.install(ctx, patterns)
+        patterns = Array(patterns).map(&:to_s)
+        ctx.on("tools/pre_execute") do |call, next_|
+          if patterns.any? { |p| File.fnmatch(p, call.name) }
+            next_.(call)
+          else
+            Veto.new(reason: "#{call.name} is not on the allow list")
+          end
+        end
+      end
+    end
   end
 end

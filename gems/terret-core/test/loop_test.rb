@@ -437,6 +437,49 @@ class TurnFlowTest < Minitest::Test
     end
   end
 
+  def test_the_allow_list_denies_unlisted_tools_and_globs_namespaces
+    ctx, = boot(script: two_step_script)
+    register_weather(ctx)
+    agent, session = spawn(ctx)
+    Terret::Tools::AllowList.install(agent.ctx, ["mcp__nexus__*"])
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "weather?")
+    denied = session.events.find { |e| e.type == "tool/result" }
+    assert_equal "weather is not on the allow list", denied.payload[:error]
+  end
+
+  def test_the_allow_list_admits_matching_tools_and_is_reversible
+    ctx, = boot(script: two_step_script)
+    register_weather(ctx)
+    agent, session = spawn(ctx)
+    disposer = Terret::Tools::AllowList.install(agent.ctx, %w[weather])
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "weather?")
+    fine = session.events.find { |e| e.type == "tool/result" }
+    assert_equal "22C in CDMX", fine.payload[:content]
+
+    disposer.call # removing the list removes the gate entirely
+    assert_kind_of Proc, disposer
+  end
+
+  def test_the_allow_list_wildcard_is_load_bearing
+    ctx, = boot(script: [{ text: "hi" }])
+    ctx.with_owner("mcp-ish") do
+      ctx[:tools].register(name: "mcp__nexus__search", description: "namespaced",
+                           params: {}) { "found" }
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    Terret::Tools::AllowList.install(agent.ctx, ["mcp__nexus__*"])
+
+    result = ctx[:tools].execute(
+      Terret::Tools::Call.new(id: "t", name: "mcp__nexus__search", args: {}, session_id: session.id),
+      ctx: agent.ctx
+    )
+    assert_nil result.error, "a name matching only via the glob must be admitted"
+    assert_equal "found", result.content
+  end
+
   class WeatherPlugin < Hames::Service
     inject :tools
     def start(ctx)
