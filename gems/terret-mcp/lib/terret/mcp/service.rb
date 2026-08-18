@@ -45,8 +45,8 @@ module Terret
         entry[:disposers].reverse_each(&:call)
         begin
           entry[:client].disconnect
-        rescue StandardError
-          nil
+        rescue StandardError => e
+          warn "terret-mcp: #{name}: disconnect failed: #{e.class}: #{e.message}"
         end
       end
 
@@ -61,8 +61,18 @@ module Terret
         client = @factory.call(name, cfg)
         client.connect
         entry = { client: client, disposers: [], tool_names: [] }
+        begin
+          sync_tools(name, entry, cfg)
+        rescue StandardError
+          entry[:disposers].reverse_each(&:call)
+          begin
+            client.disconnect
+          rescue StandardError => e
+            warn "terret-mcp: #{name}: disconnect after failed mount: #{e.class}: #{e.message}"
+          end
+          raise
+        end
         @mounted[name] = entry
-        sync_tools(name, entry, cfg)
         entry
       end
 
@@ -73,15 +83,15 @@ module Terret
         entry[:disposers].clear
         entry[:tool_names].clear
 
-        entry[:client].tools.each do |tool|
-          args = Translate.definition_args(server: name, tool: tool, approval: approval)
-          remote = tool.name
-          @ctx.with_owner("mcp:#{name}") do
+        @ctx.with_owner("mcp:#{name}") do
+          entry[:client].tools.each do |tool|
+            args = Translate.definition_args(server: name, tool: tool, approval: approval)
+            remote = tool.name
             entry[:disposers] << @ctx[:tools].register(**args) do |**call_args|
               call_remote(name, entry, remote, call_args, timeout)
             end
+            entry[:tool_names] << args[:name]
           end
-          entry[:tool_names] << args[:name]
         end
       end
 

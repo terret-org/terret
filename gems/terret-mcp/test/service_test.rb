@@ -42,6 +42,20 @@ class MCPServiceTest < Minitest::Test
     end
   end
 
+  class FlakyClient < FakeClient
+    def initialize(**)
+      super
+      @attempts = 0
+    end
+
+    def tools(*)
+      @attempts += 1
+      raise "network blip" if @attempts == 1
+
+      super
+    end
+  end
+
   def boot(servers:, strict: false, factory:)
     Hames.reset_events!
     Terret.declare_events!
@@ -124,5 +138,19 @@ class MCPServiceTest < Minitest::Test
     assert_raises(ArgumentError) do
       boot(servers: { "s" => { approval: :policy } }, factory: ->(*) { FakeClient.new(tools: []) })
     end
+  end
+
+  def test_a_failed_discovery_leaves_no_half_mounted_server
+    fake = FlakyClient.new(tools: [FakeTool.new("a", "", {})])
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+
+    assert_raises(RuntimeError) { ctx[:mcp].mount! }
+    assert_empty ctx[:mcp].mounted
+    assert fake.disconnected, "the connected client must not leak"
+    assert_equal 0, ctx[:tools].schemas.size
+
+    ctx[:mcp].mount! # a retry must actually retry, not silently no-op
+    assert_equal ["s"], ctx[:mcp].mounted
+    assert_equal 1, ctx[:tools].schemas.size
   end
 end
