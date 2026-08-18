@@ -156,6 +156,25 @@ class TurnFlowTest < Minitest::Test
                  user_events.map { |e| e.payload[:text] }
   end
 
+  def test_usage_reported_by_the_adapter_lands_in_the_step_end_payload
+    ctx, = boot(script: [{ text: "hi", usage: { prompt_tokens: 12, completion_tokens: 3, cost: 0.0001 } }])
+    agent, session = spawn(ctx)
+    ctx[:loop].run_turn(agent, "hello")
+
+    step_end = session.events.find { |e| e.type == "step/end" }
+    assert_equal({ prompt_tokens: 12, completion_tokens: 3, cost: 0.0001 },
+                 step_end.payload[:usage])
+  end
+
+  def test_step_end_payload_omits_usage_when_the_adapter_reports_none
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, session = spawn(ctx)
+    ctx[:loop].run_turn(agent, "hello")
+
+    step_end = session.events.find { |e| e.type == "step/end" }
+    refute step_end.payload.key?(:usage)
+  end
+
   def test_prompt_sections_render_in_priority_order_and_dispose
     ctx, = boot(script: [{ text: "hi" }])
     d = nil

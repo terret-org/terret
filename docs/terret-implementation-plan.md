@@ -2,8 +2,8 @@
 
 **A Ruby-native, model-agnostic agent harness, informed by DeepSeek Harness (`dsh`)**
 
-Version 0.3, August 2026
-Status: Design document. M0 and M1 are shipped; see §12 for what is actually built.
+Version 0.4, August 2026
+Status: Design document. M0–M2 are shipped; see §12 for what is actually built.
 
 ---
 
@@ -452,7 +452,7 @@ Each phase ends with demoable acceptance criteria. No estimates are given; seque
 
 **M1. Kernel and boot. SHIPPED.** Full Hames: services, inject-driven boot, fork, event contracts, patch layering. *Accepted:* Cordis primer semantics reproduced in tests, events catalog generation working.
 
-**M2. Log, loop, and the OpenRouter adapter. PARTIALLY SHIPPED.** Session log with the invariant, `derive_messages`, prompt assembly, tool registry and pipeline, the default loop, and in-memory plus JSONL stores are all built and tested against `FakeAdapter`. What remains is the OpenRouter adapter itself and `async-http` streaming. *Accept:* a multi-step tool turn completes against a real model, golden event-order tests stay green, and the invariant survives an injected-context property test.
+**M2. Log, loop, and the OpenRouter adapter. SHIPPED.** Session log with the invariant, `derive_messages`, prompt assembly, tool registry and pipeline, the default loop, in-memory plus JSONL stores, and the `terret-openrouter` gem: SSE streaming over `async-http` with tool calling, usage accounting on `step/end`, mid-stream error surfacing, and retry with jittered backoff in a shared `AdapterBase`. The transport is injectable, so the adapter's unit tests run without the network; a loopback-socket test covers the real transport and an opt-in live lane (`TERRET_LIVE=1`) covers a real model. *Accepted:* a multi-step tool turn completed live against a real model with golden event order and the invariant asserted on every request. The generative log-invariant property test from §11 remains open.
 
 **M3. Durable sessions.** SQLite store, `read(session_id, from_seq:)`, load-and-replay resume, session fork. Nothing user-visible ships here, which is why it is easy to skip and why skipping it would be a mistake: every guarantee in §9.3 rests on this being exact. *Accept:* a session survives a process restart and resumes with byte-identical derived context, and a replay from an arbitrary `seq` yields the same events as a live tail from that point.
 
@@ -499,9 +499,9 @@ Each of these follows from two disciplines: everything is a plugin, and model-vi
 
 ## 16. Immediate Next Actions
 
-1. Finish M2: the OpenRouter adapter over `async-http`, replacing `FakeAdapter` in the demo path.
+1. Decide the compaction event now rather than at M6, since §14 makes it an invariant question rather than a feature.
 2. Write `docs/protocol.md` capturing the §9 frame set and the reconnect contract precisely, then the socket protocol tests from §11, both before the M4 implementation. Primer-first is one of dsh's better exports.
-3. Decide the compaction event now rather than at M6, since §14 makes it an invariant question rather than a feature.
+3. Implement M3 durable sessions: SQLite store, `read(session_id, from_seq:)`, load-and-replay resume, session fork.
 4. Write `docs/hames-primer.md`, still outstanding from the original plan.
 5. Run the trademark search (§1 Naming), the last unchecked item from the original launch list.
 

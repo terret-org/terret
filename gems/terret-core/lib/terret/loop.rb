@@ -79,17 +79,21 @@ module Terret
         request = ctx.waterfall("agent/request", request)
         sessions.assert_log_invariant!(sid, request.messages)
 
+        usage = nil
         message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
           case ev
           when LLM::TextDelta
             sessions.append(sid, "assistant/chunk", { text: ev.text })
+          when LLM::Usage
+            usage = ev
           end
         end
         sessions.append(sid, "assistant/message", { parts: message.parts })
+        step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
 
         calls = message.tool_calls
         if calls.empty?
-          sessions.append(sid, "step/end", { n: steps })
+          sessions.append(sid, "step/end", step_end)
           break # nothing owed
         end
 
@@ -101,7 +105,7 @@ module Terret
           sessions.append(sid, "tool/result",
                           { id: result.id, content: result.content, error: result.error })
         end
-        sessions.append(sid, "step/end", { n: steps })
+        sessions.append(sid, "step/end", step_end)
         # tools owe another request -> next step
       end
 

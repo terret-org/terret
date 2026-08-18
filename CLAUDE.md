@@ -1,21 +1,25 @@
 # Terret
 
-Ruby-native, model-agnostic agent harness where everything is a plugin. Three gems in one
+Ruby-native, model-agnostic agent harness where everything is a plugin. Four gems in one
 repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible effects,
   dependency-driven boot. It knows nothing about LLMs and is reusable for any
   plugin-composed application.
 - `gems/terret-core` is the harness built on it. Session log, tools pipeline, agent loop,
-  LLM seam.
-- `gems/terret` is a placeholder holding the name. It will carry the `trt` CLI, profiles,
-  and boot. None of that is written. Do not add real behaviour here without reading §5
-  and §9 of the plan first.
+  LLM seam (vocabulary, `AdapterBase` retry policy, `FakeAdapter`).
+- `gems/terret-openrouter` is the one real adapter (plan §6.5): OpenRouter's
+  OpenAI-compatible API behind `ctx.llm`, streaming SSE with tool calling and usage
+  accounting. The transport is injectable, so its unit tests need no network and no
+  gems; only the default `AsyncTransport` requires `async-http`.
+- `gems/terret` is a placeholder holding the name. It will carry profiles and boot.
+  None of that is written. Do not add real behaviour here without reading §5 and §9 of
+  the plan first.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
-here covers M0 and M1 in full, plus the subsystems of M2 that need no network. M2 is not
-actually complete: it also calls for the Anthropic adapter and a working `trt run`, and
-neither exists. The only adapter is `LLM::FakeAdapter`, which replays a canned script.
+here covers M0–M2: kernel, session log with the invariant, tools pipeline, loop, and the
+OpenRouter adapter. `LLM::FakeAdapter` (canned script replay) remains the test/demo
+default; the OpenRouter path is proven by canned-wire tests plus a live smoke lane.
 
 Note the plan has drifted from the code in places. It specifies RSpec (this uses minitest),
 Ruby 3.4+ (this targets 4.0.6), and a separate `terret-llm` gem (the vocabulary lives in
@@ -24,14 +28,17 @@ terret-core). Treat the code as current and the plan as intent.
 ## Commands
 
 ```bash
-rake test              # both suites, plain minitest, no bundler needed
+rake test              # all suites, plain minitest, no bundler needed
 rake events:catalog    # regenerates docs/events.md
 ruby examples/headless_demo.rb
+OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 ```
 
-Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. Zero runtime dependencies beyond
-stdlib, and that is a design constraint rather than a coincidence. Think hard before adding
-a gem to either gemspec.
+Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and `terret-core` have zero
+runtime dependencies beyond stdlib, and that is a design constraint rather than a
+coincidence. Think hard before adding a gem to any gemspec; network-touching dependencies
+belong in adapter/interface gems (`terret-openrouter` carries `async-http`), never in the
+kernel or core.
 
 ## Invariants worth protecting
 
