@@ -48,8 +48,13 @@ module Terret
       end
 
       # Queue an error and stop; the writer drains first so the client sees
-      # why it was dropped (superseded, lagged).
+      # why it was dropped (superseded, lagged). Idempotent: the tail is
+      # disposed so later appends cannot re-enter and wipe the error frame.
       def shutdown(code:)
+        @tail&.call
+        @tail = nil
+        return if @queue.closed?
+
         @queue.clear
         @queue.push(Frames.error(code: code))
         @queue.close
@@ -59,6 +64,8 @@ module Terret
 
       def sessions = @ctx[:sessions]
 
+      # Precondition: the session is resolved (Sessions#create/resume) before
+      # a Connection is built — fetch here never sees an unknown sid.
       def hello
         last = sessions.fetch(@sid).events.last&.seq || -1
         @queue.push(Frames.hello(session_id: @sid, last_seq: last))

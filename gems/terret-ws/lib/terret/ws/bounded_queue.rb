@@ -37,6 +37,8 @@ module Terret
 
       def clear = @items.clear
 
+      def closed? = @closed
+
       def close
         @closed = true
         @waiting.signal

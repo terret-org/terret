@@ -22,13 +22,13 @@ class ProtocolTest < Minitest::Test
 
   # -- harness ---------------------------------------------------------------
 
-  def boot(script:, extra_rows: [])
+  def boot(script:, extra_rows: [], store: Terret::Store::Memory)
     Hames.reset_events!
     Terret.declare_events!
 
     loader = Hames::Loader.new
     loader.layer([
-      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "session_store", plugin: store },
       { id: "sessions", plugin: Terret::Sessions },
       { id: "prompt",   plugin: Terret::Prompt },
       { id: "tools",    plugin: Terret::Tools::Registry },
@@ -91,6 +91,27 @@ class ProtocolTest < Minitest::Test
       chunkless ? t.reject { |x| x == "assistant/chunk" } : t
     end
     def protocol_frames = @written.reject { |f| f.key?(:seq) }
+  end
+
+  # Terret::Store::Memory#read never yields, so the shipped tests never
+  # actually exercise handle_subscribe's buffer-while-replaying branch
+  # concurrently -- `buffered` is always empty at flush time. This forces a
+  # real fiber yield mid-replay-read (as a JSONL/SQLite backend genuinely
+  # would). Signaling exactly when the read begins -- rather than just
+  # sleeping and hoping a concurrent task lands inside the window -- is what
+  # makes the race deterministic: `task.async` runs its block immediately up
+  # to its first yield, so an unsignaled append would complete before the
+  # reader fiber is even scheduled to dispatch the subscribe frame.
+  class SlowStore < Terret::Store::Memory
+    class << self
+      attr_accessor :reading_notification
+    end
+
+    def read(session_id, from_seq: 0)
+      self.class.reading_notification&.signal
+      sleep 0.01
+      super
+    end
   end
 
   # Turn tasks hang off the given task (the test root), never the connection —
@@ -250,6 +271,53 @@ class ProtocolTest < Minitest::Test
       assert_equal (first_count..new_frames.last[:seq]).to_a, new_frames.map { |f| f[:seq] },
                    "replay-then-tail must be gapless and duplicate-free from from_seq"
       assert_equal session.id, new_frames.first[:session_id]
+      sock.client_close
+    end
+  end
+
+  def test_repeated_overflow_still_delivers_exactly_one_lagged_error
+    ctx = boot(script: [{ text: "a reply long enough to spill many chunk frames" }])
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task, queue_limit: 3)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "hi", wake: true)
+      await { sock.closed? }
+
+      lagged = sock.written.select { |f| f[:code] == "lagged" }
+      assert_equal 1, lagged.size, "exactly one lagged error frame must survive repeated overflows"
+      assert_equal "lagged", sock.written.last[:code], "the drop reason must be the last thing written"
+      # the loop finished untouched: the log has the whole turn
+      assert_equal "turn/end", session.events.last.type
+      assert_equal "completed", session.events.last.payload[:status]
+    end
+  end
+
+  def test_replay_then_tail_stays_gapless_when_the_store_read_yields
+    SlowStore.reading_notification = Async::Notification.new
+    ctx = boot(script: [{ text: "hi" }], store: SlowStore)
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      # Wait for handle_subscribe's sessions.read to actually be inside
+      # SlowStore's forced yield before appending, so the append lands
+      # strictly during the replay read -- the interleaving
+      # Terret::Store::Memory can never produce on its own, and exactly what
+      # the buffer-then-flip dance in handle_subscribe exists to survive
+      # without a gap or a duplicate.
+      task.async do
+        SlowStore.reading_notification.wait
+        ctx[:sessions].append(session.id, "context/injected", { text: "concurrent" })
+      end
+
+      await { sock.events.any? { |f| f[:type] == "context/injected" } }
+
+      seqs = sock.events.map { |f| f[:seq] }
+      assert_equal seqs.uniq, seqs, "duplicate seq delivered"
+      assert_equal (0..seqs.max).to_a, seqs.sort, "gap in delivered seqs"
       sock.client_close
     end
   end
