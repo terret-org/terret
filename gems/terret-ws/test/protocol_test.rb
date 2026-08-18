@@ -211,6 +211,63 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  def test_a_steer_injected_mid_turn_lands_in_the_next_step
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) do |city:|
+      gate.dequeue # hold the turn mid-tool so the steer provably lands mid-turn
+      "22C in #{city}"
+    end
+    agent, = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "weather?", wake: true)
+      await { sock.event_types(chunkless: false).include?("tool/call") }
+
+      sock.client_send(type: "inject", text: "actually, celsius please", wake: false)
+      await { !agent.inbox_empty? } # the frame has landed in the inbox
+      gate.enqueue(nil)
+      await { sock.event_types.include?("turn/end") }
+
+      assert_equal %w[
+        session/created
+        turn/start
+        step/start user/message assistant/message
+        tool/call tool/result step/end
+        step/start user/message assistant/message step/end
+        turn/end
+      ], sock.event_types
+      steer = sock.events.select { |f| f[:type] == "user/message" }.last
+      assert_equal "actually, celsius please", steer[:payload][:text]
+      sock.client_close
+    end
+  end
+
+  def test_a_waking_inject_on_a_busy_agent_queues_instead_of_double_running
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) { |city:| gate.dequeue; "22C in #{city}" }
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "weather?", wake: true)
+      await { sock.event_types(chunkless: false).include?("tool/call") }
+
+      sock.client_send(type: "inject", text: "and bring an umbrella", wake: true)
+      await { !agent.inbox_empty? }
+      gate.enqueue(nil)
+      await { sock.event_types.include?("turn/end") }
+
+      assert_equal 1, session.events.count { |e| e.type == "turn/start" },
+                   "a waking inject during a turn steers; it must not start a second turn"
+      sock.client_close
+    end
+  end
+
   def test_a_denied_tool_surfaces_as_an_error_result_in_the_stream
     ctx = boot(script: two_step_script)
     register_weather(ctx)
