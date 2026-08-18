@@ -342,6 +342,24 @@ Plan §6.3: a deny-by-default allow list with wildcards (`mcp__nexus__*`), imple
     disposer.call # removing the list removes the gate entirely
     assert_kind_of Proc, disposer
   end
+
+  def test_the_allow_list_wildcard_is_load_bearing
+    ctx, = boot(script: [{ text: "hi" }])
+    ctx.with_owner("mcp-ish") do
+      ctx[:tools].register(name: "mcp__nexus__search", description: "namespaced",
+                           params: {}) { "found" }
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    Terret::Tools::AllowList.install(agent.ctx, ["mcp__nexus__*"])
+
+    result = ctx[:tools].execute(
+      Terret::Tools::Call.new(id: "t", name: "mcp__nexus__search", args: {}, session_id: session.id),
+      ctx: agent.ctx
+    )
+    assert_nil result.error, "a name matching only via the glob must be admitted"
+    assert_equal "found", result.content
+  end
 ```
 
 - [ ] **Step 2: Run and verify failure** — `NameError: uninitialized constant Terret::Tools::AllowList`.
@@ -356,6 +374,8 @@ Add inside `module Tools` in `gems/terret-core/lib/terret/tools.rb` (after `Veto
     # forked context (Registry#execute dispatches on the caller's ctx).
     # Patterns are File.fnmatch globs, e.g. "mcp__nexus__*". Returns the
     # listener's disposer.
+    # Note fnmatch defaults: matching is case-sensitive, and a bare "*" does
+    # not match names starting with "." (no FNM_DOTMATCH) — both fail closed.
     module AllowList
       def self.install(ctx, patterns)
         patterns = Array(patterns).map(&:to_s)
