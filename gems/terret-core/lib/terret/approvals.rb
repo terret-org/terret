@@ -97,8 +97,10 @@ module Terret
         # the gap between the append's fan-out and the waiter existing
         @waiting[key] = q
         agent = @ctx[:loop].agent_for_session(call.session_id)
-        @ctx[:sessions].append(call.session_id, "approval/requested",
-                               { call_id: call.id, name: call.name, args: call.args })
+        unless pending?(call.session_id, call.id) # a resume re-parks on the standing request
+          @ctx[:sessions].append(call.session_id, "approval/requested",
+                                 { call_id: call.id, name: call.name, args: call.args })
+        end
         agent&.status = :waiting_approval
         # cooperative under the fiber scheduler (parks the fiber); blocks the
         # thread under plain minitest, where tests resolve from another thread

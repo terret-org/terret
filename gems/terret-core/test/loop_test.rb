@@ -634,3 +634,122 @@ class AgentLifecycleTest < Minitest::Test
     [ctx, loader]
   end
 end
+
+class ResumeTurnTest < Minitest::Test
+  include TerretTestHarness
+
+  DEPLOY_CALL = Terret::LLM::ToolCall.new(id: "tc9", name: "deploy", args: { env: "prod" })
+
+  def register_deploy(ctx, approval: :always)
+    ctx.with_owner("deploy-plugin") do
+      ctx[:tools].register(name: "deploy", description: "Ship it",
+                           params: { env: "string" }, mutating: true,
+                           approval: approval) { |env:| "deployed to #{env}" }
+    end
+  end
+
+  # What a kill -9 leaves behind: an open turn, an assistant message owing a
+  # tool result, the call and the approval request logged, no resolution.
+  def craft_dangling_log(ctx, session)
+    sid = session.id
+    sessions = ctx[:sessions]
+    sessions.append(sid, "turn/start", { agent: "agent-#{sid}" })
+    sessions.append(sid, "step/start", { n: 1 })
+    sessions.append(sid, "user/message", { text: "ship it" })
+    sessions.append(sid, "assistant/message",
+                    { parts: [Terret::LLM.encode_part(Terret::LLM::Text.new(text: "Deploying.")),
+                              Terret::LLM.encode_part(DEPLOY_CALL)] })
+    sessions.append(sid, "tool/call", { id: "tc9", name: "deploy", args: { env: "prod" } })
+    sessions.append(sid, "approval/requested", { call_id: "tc9", name: "deploy", args: { env: "prod" } })
+  end
+
+  def boot_with_approvals(script)
+    boot(script: script, extra_rows: [{ id: "approvals", plugin: Terret::Tools::Approvals }])
+  end
+
+  def test_resumable_reads_the_open_turn_from_the_log
+    ctx, = boot_with_approvals([])
+    session = ctx[:sessions].create
+    refute ctx[:loop].resumable?(session.id)
+    craft_dangling_log(ctx, session)
+    assert ctx[:loop].resumable?(session.id)
+  end
+
+  def test_resume_with_a_recorded_approval_completes_the_turn
+    # the model owes one more step after the tool result: script has one entry
+    ctx, = boot_with_approvals([{ text: "Deployed." }])
+    register_deploy(ctx)
+    session = ctx[:sessions].create
+    craft_dangling_log(ctx, session)
+    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc9", verdict: "approved" })
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :completed, ctx[:loop].resume_turn(agent)
+
+    types = session.events.map(&:type)
+    assert_equal 1, types.count("turn/start"), "resume must not open a second turn"
+    assert_equal 1, types.count("turn/end")
+    result = session.events.find { |e| e.type == "tool/result" }
+    assert_equal "deployed to prod", result.payload[:content]
+    # the crashed step closes without usage (it died with the process)
+    step_end = session.events.find { |e| e.type == "step/end" }
+    assert_equal({ n: 1 }, step_end.payload)
+    # and the turn continued: the scripted "Deployed." landed as step 2
+    assert_equal "Deployed.",
+                 Terret::LLM.decode_part(session.events.select { |e| e.type == "assistant/message" }
+                                                       .last.payload[:parts].first).text
+  end
+
+  def test_resume_with_no_verdict_parks_again
+    ctx, = boot_with_approvals([{ text: "Deployed." }])
+    register_deploy(ctx)
+    session = ctx[:sessions].create
+    craft_dangling_log(ctx, session)
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    t = Thread.new { ctx[:loop].resume_turn(agent) }
+    deadline = Time.now + 5
+    until agent.status == :waiting_approval
+      raise "never re-parked" if Time.now > deadline
+
+      sleep 0.005
+    end
+    # no SECOND approval/requested: the pending one still stands
+    assert_equal 1, session.events.count { |e| e.type == "approval/requested" }
+
+    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc9", verdict: "approved" })
+    assert_equal :completed, t.value
+  end
+
+  def test_resume_after_a_crash_before_the_model_replied_re_requests
+    ctx, = boot_with_approvals([{ text: "Here you go." }])
+    session = ctx[:sessions].create
+    sid = session.id
+    ctx[:sessions].append(sid, "turn/start", { agent: "agent-#{sid}" })
+    ctx[:sessions].append(sid, "step/start", { n: 1 })
+    ctx[:sessions].append(sid, "user/message", { text: "hello?" })
+    agent = ctx[:loop].spawn_agent(session_id: sid)
+
+    assert_equal :completed, ctx[:loop].resume_turn(agent)
+    # the dead step/start stays unclosed; stepping continued at n=2
+    assert_equal [1, 2], session.events.select { |e| e.type == "step/start" }.map { |e| e.payload[:n] }
+  end
+
+  def test_resume_refuses_when_nothing_is_open
+    ctx, = boot_with_approvals([{ text: "hi" }])
+    agent, = spawn(ctx)
+    ctx[:loop].run_turn(agent, "hello")
+    assert_raises(ArgumentError) { ctx[:loop].resume_turn(agent) }
+  end
+
+  def test_the_invariant_holds_across_a_resume
+    ctx, = boot_with_approvals([{ text: "Deployed." }])
+    register_deploy(ctx)
+    session = ctx[:sessions].create
+    craft_dangling_log(ctx, session)
+    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc9", verdict: "approved" })
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    ctx[:loop].resume_turn(agent) # assert_log_invariant! runs inside every step; no raise = held
+    ctx[:sessions].assert_log_invariant!(session.id, ctx[:sessions].derive_messages(session.id))
+  end
+end

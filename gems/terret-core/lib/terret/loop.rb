@@ -123,116 +123,205 @@ module Terret
       agent
     end
 
+    TurnState = Struct.new(:status, :steered)
+
     # Runs one turn for `input`. Returns the turn status symbol.
     def run_turn(agent, input)
-      raise TurnAlreadyRunning, "agent #{agent.id} is mid-turn" if agent.status == :running
+      turning(agent) do |state, sessions, sid|
+        sessions.append(sid, "turn/start", { agent: agent.id })
+        step_loop(agent, state, pending: input.nil? ? [] : [["user/message", input]], steps: 0)
+      end
+    end
+
+    # Continue a turn the log left open (a process death mid-park, plan
+    # §6.3/§12 M6). No second turn/start — the open one is already durable.
+    # The open step completes first: tool calls owed by the last assistant
+    # message that lack a tool/result re-execute through the pipeline, where
+    # the approvals gate reads verdicts from the log — an approved call runs,
+    # an unresolved one parks again on its standing request. Then stepping
+    # continues as normal.
+    def resume_turn(agent)
+      raise ArgumentError, "session #{agent.session_id} has no open turn" unless resumable?(agent.session_id)
+
+      turning(agent) do |state, _sessions, _sid|
+        step_loop(agent, state, pending: [], steps: complete_dangling(agent))
+      end
+    end
+
+    # The log has a turn/start after its last turn/end.
+    def resumable?(session_id)
+      events = @ctx[:sessions].fetch(session_id).events
+      opened = events.rindex { |e| e.type == "turn/start" }
+      return false unless opened
+
+      events[opened..].none? { |e| e.type == "turn/end" }
+    end
+
+    private
+
+    # Shared turn envelope: the status guard, the failure rescue, and the
+    # turn/end ensure. Both entry points run their body inside it.
+    def turning(agent)
+      unless agent.status == :idle
+        raise TurnAlreadyRunning, "agent #{agent.id} is #{agent.status}"
+      end
 
       ctx      = agent.ctx
       sessions = ctx[:sessions]
       sid      = agent.session_id
       agent.status = :running
-
-      status = :completed
-      steps = 0
-      steered = []
-
-      pending = input.nil? ? [] : [["user/message", input]]
+      state = TurnState.new(:completed, [])
 
       begin
-        sessions.append(sid, "turn/start", { agent: agent.id })
-        loop do
-          if agent.cancelled?
-            status = :cancelled
-            break
-          end
-
-          # anything injected since the last step rides along with this one
-          steered = agent.drain_inbox
-          pending.concat(steered.map { |t| ["context/injected", t] })
-
-          claim = ctx.waterfall("agent/pre_step", Claim.of(pending)) { |c| c }
-          if claim.rejected || (steps.zero? && claim.messages.empty? && pending.empty?)
-            # a rejected or empty first claim still closes a durable turn that
-            # spent no step, so the log records the attempt
-            agent.requeue(steered) if claim.rejected
-            status = claim.rejected ? :rejected : :empty
-            break
-          end
-
-          steps += 1
-          raise "runaway turn" if steps > MAX_STEPS
-
-          sessions.append(sid, "step/start", { n: steps })
-          claim.messages.each { |(type, text)| sessions.append(sid, type, { text: text }) }
-          steered = [] # once logged, these must never requeue
-          pending = []
-
-          history = sessions.derive_messages(sid)
-          request = LLM::Request.new(model: nil, system: ctx[:prompt].render(agent:),
-                                     messages: history, tools: ctx[:tools].schemas)
-          request = ctx.waterfall("agent/request", request)
-          sessions.assert_log_invariant!(sid, request.messages)
-
-          usage = nil
-          message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
-            case ev
-            when LLM::TextDelta
-              sessions.append(sid, "assistant/chunk", { text: ev.text })
-            when LLM::Usage
-              usage = ev
-            end
-          end
-          sessions.append(sid, "assistant/message",
-                          { parts: message.parts.map { |p| LLM.encode_part(p) } })
-          step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
-
-          calls = message.tool_calls
-          if calls.empty?
-            sessions.append(sid, "step/end", step_end)
-            status = :cancelled if agent.cancelled?
-            break # nothing owed
-          end
-
-          calls.each do |tc|
-            sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
-            if agent.cancelled?
-              sessions.append(sid, "tool/result",
-                              { id: tc.id, content: nil, error: "cancelled before execution" })
-              next
-            end
-
-            result = ctx[:tools].execute(
-              Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid),
-              ctx: ctx
-            )
-            sessions.append(sid, "tool/result",
-                            { id: result.id, content: result.content, error: result.error })
-          end
-          sessions.append(sid, "step/end", step_end)
-          # redundant under the sync driver (the next iteration's top check
-          # would catch it); becomes load-bearing once tools can yield (§8)
-          if agent.cancelled?
-            status = :cancelled
-            break
-          end
-          # tools owe another request -> next step
-        end
+        yield state, sessions, sid
       rescue Exception
-        status = :failed
-        agent.requeue(steered) unless steered.empty?
+        state.status = :failed
+        agent.requeue(state.steered) unless state.steered.empty?
         raise
       ensure
         begin
           ctx.serial("agent/turn_stopping", agent)
-          payload = { status: status }
-          payload[:reason] = agent.cancel_reason if status == :cancelled && agent.cancel_reason
+          payload = { status: state.status }
+          payload[:reason] = agent.cancel_reason if state.status == :cancelled && agent.cancel_reason
           sessions.append(sid, "turn/end", payload)
         ensure
           agent.clear_cancel!
           agent.status = :idle
         end
       end
-      status
+      state.status
+    end
+
+    # The step cycle run_turn always had, extracted so resume_turn can enter
+    # it mid-turn. `pending` holds [type, text] pairs (Task 5); `steps` is
+    # how many step/starts the turn has already logged.
+    def step_loop(agent, state, pending:, steps:)
+      ctx      = agent.ctx
+      sessions = ctx[:sessions]
+      sid      = agent.session_id
+
+      loop do
+        if agent.cancelled?
+          state.status = :cancelled
+          return
+        end
+
+        # anything injected since the last step rides along with this one
+        state.steered = agent.drain_inbox
+        pending.concat(state.steered.map { |t| ["context/injected", t] })
+
+        claim = ctx.waterfall("agent/pre_step", Claim.of(pending)) { |c| c }
+        if claim.rejected || (steps.zero? && claim.messages.empty? && pending.empty?)
+          # a rejected or empty first claim still closes a durable turn that
+          # spent no step, so the log records the attempt
+          agent.requeue(state.steered) if claim.rejected
+          state.status = claim.rejected ? :rejected : :empty
+          return
+        end
+
+        steps += 1
+        raise "runaway turn" if steps > MAX_STEPS
+
+        sessions.append(sid, "step/start", { n: steps })
+        claim.messages.each { |(type, text)| sessions.append(sid, type, { text: text }) }
+        state.steered = [] # once logged, these must never requeue
+        pending = []
+
+        history = sessions.derive_messages(sid)
+        request = LLM::Request.new(model: nil, system: ctx[:prompt].render(agent:),
+                                   messages: history, tools: ctx[:tools].schemas)
+        request = ctx.waterfall("agent/request", request)
+        sessions.assert_log_invariant!(sid, request.messages)
+
+        usage = nil
+        message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
+          case ev
+          when LLM::TextDelta
+            sessions.append(sid, "assistant/chunk", { text: ev.text })
+          when LLM::Usage
+            usage = ev
+          end
+        end
+        sessions.append(sid, "assistant/message",
+                        { parts: message.parts.map { |p| LLM.encode_part(p) } })
+        step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
+
+        calls = message.tool_calls
+        if calls.empty?
+          sessions.append(sid, "step/end", step_end)
+          state.status = :cancelled if agent.cancelled?
+          return # nothing owed
+        end
+
+        calls.each do |tc|
+          sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
+          if agent.cancelled?
+            sessions.append(sid, "tool/result",
+                            { id: tc.id, content: nil, error: "cancelled before execution" })
+            next
+          end
+
+          execute_and_record(ctx, sessions, sid, tc)
+        end
+        sessions.append(sid, "step/end", step_end)
+        # redundant under the sync driver (the next iteration's top check
+        # would catch it); becomes load-bearing once tools can yield (§8)
+        if agent.cancelled?
+          state.status = :cancelled
+          return
+        end
+        # tools owe another request -> next step
+      end
+    end
+
+    def execute_and_record(ctx, sessions, sid, tc)
+      result = ctx[:tools].execute(
+        Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid),
+        ctx: ctx
+      )
+      sessions.append(sid, "tool/result",
+                      { id: result.id, content: result.content, error: result.error })
+    end
+
+    # Close the crash-opened step: execute tool calls the last assistant
+    # message owes that have no tool/result yet (the projection is the truth
+    # — a tool/call event may itself have died unwritten), append the missing
+    # tool/call events, results, and the step's step/end (without usage: the
+    # original step's usage died with the process). Returns the step count so
+    # step_loop numbers onward from it. Honest edges: an unclosed step/start
+    # with no owed calls stays unclosed and stepping just continues; a turn
+    # that crashed after a final no-tool assistant message resumes with one
+    # extra model request (the model sees its history and wraps up).
+    def complete_dangling(agent)
+      ctx      = agent.ctx
+      sessions = ctx[:sessions]
+      sid      = agent.session_id
+      events   = sessions.fetch(sid).events
+      turn     = events[events.rindex { |e| e.type == "turn/start" }..]
+      steps    = turn.count { |e| e.type == "step/start" }
+
+      resolved = turn.filter_map { |e| e.payload[:id] if e.type == "tool/result" }
+      owed = last_assistant_tool_calls(sessions.derive_messages(sid))
+             .reject { |tc| resolved.include?(tc.id) }
+      return steps if owed.empty?
+
+      logged = turn.filter_map { |e| e.payload[:id] if e.type == "tool/call" }
+      owed.each do |tc|
+        unless logged.include?(tc.id)
+          sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
+        end
+        execute_and_record(ctx, sessions, sid, tc)
+      end
+      sessions.append(sid, "step/end", { n: steps })
+      steps
+    end
+
+    def last_assistant_tool_calls(msgs)
+      msgs.reverse_each do |m|
+        next if m.role == :tool
+        return m.role == :assistant ? m.tool_calls : []
+      end
+      []
     end
   end
 
