@@ -7,3 +7,5 @@ rescue LoadError
 end
 
 require_relative "ws/frames"
+require_relative "ws/bounded_queue"
+require_relative "ws/connection"
