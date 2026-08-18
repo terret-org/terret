@@ -156,6 +156,7 @@ def page_html(model)
         body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
         header { display: flex; justify-content: space-between; align-items: baseline; color: #666; }
         .msg { padding: .5rem .75rem; border-radius: .5rem; margin: .5rem 0; white-space: pre-wrap; }
+        .msg:empty { display: none; } /* a tool-only step never fills its bubble */
         .user { background: #e8f0fe; margin-left: 20%; }
         .assistant { background: #f5f5f5; margin-right: 20%; }
         .tool { color: #666; font-family: ui-monospace, monospace; font-size: .85em; margin: .25rem 0; }
