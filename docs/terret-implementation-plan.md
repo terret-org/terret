@@ -456,7 +456,7 @@ Each phase ends with demoable acceptance criteria. No estimates are given; seque
 
 **M3. Durable sessions. SHIPPED.** Payloads became primitives at the append boundary (typed parts encode through the LLM codec), a `ctx[:session_store]` seam landed with memory, JSONL, and SQLite providers, `read(session_id, from_seq:)` and resume rebuilt sessions exactly, and `session/compacted` was declared with its projection ahead of the M6 compactor. The web chat's session sidebar is the first consumer. *Accepted:* a session survives a process restart and resumes with byte-identical derived context, and a replay from an arbitrary `seq` yields the same events as a live tail from that point.
 
-**M4. The socket.** `terret-ws`: one connection per agent bound to a forked context, durable events out, the five client frames in §9.2 in, `from_seq` replay-then-tail, bounded-queue backpressure, heartbeat, bearer auth. *Accept:* the socket protocol tests pass, including the connection-drop cases; an agent survives a client disconnect mid-turn and the reconnecting client sees no gap.
+**M4. The socket. SHIPPED.** `terret-ws`: one connection per agent, durable session events out, the five §9.2 client frames plus subscribe in, exact replay-then-tail reconnect with flow-controlled replay, bounded-queue backpressure with an idempotent lagged-drop, bearer auth per agent with connection supersede, and heartbeat pings. Cooperative cancel is honored at step boundaries; mid-stream abort waits on the §8 async work. Approval events are declared, with resolution machinery deferred to M6. A cross-model adversarial review (Codex) plus two-stage per-task reviews drove several hardening fixes during implementation; accepted-but-deferred findings from that review are recorded in §14. *Accepted:* the socket protocol tests pass, including the connection-drop cases; an agent survives a client disconnect mid-turn and the reconnecting client sees no gap.
 
 **M5. MCP client.** stdio and streamable-HTTP servers mounted as tool sources under a namespace, with per-server policy and a strict mode that ignores ambient config, plus the declarative per-agent allow list. *Accept:* an agent whose entire tool roster arrives from MCP servers works under policy, driven over the socket.
 
@@ -518,7 +518,7 @@ Each of these follows from two disciplines: everything is a plugin, and model-vi
 
 ## 16. Immediate Next Actions
 
-1. Write `docs/protocol.md` capturing the §9 frame set and the reconnect contract precisely, then the socket protocol tests from §11, both before the M4 implementation. Primer-first is one of dsh's better exports.
+1. Write `docs/protocol.md` capturing the §9 frame set and the reconnect contract precisely, then the socket protocol tests from §11, both before the M4 implementation. Primer-first is one of dsh's better exports. *Done in M4.*
 2. Write `docs/hames-primer.md`, still outstanding from the original plan.
 3. Run the trademark search (§1 Naming), the last unchecked item from the original launch list.
 

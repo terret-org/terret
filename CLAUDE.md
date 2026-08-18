@@ -15,15 +15,18 @@ repo:
 - `gems/terret-store-sqlite` is the durable session store (M3): the append-only log
   one event per row in SQLite (WAL) behind the `ctx[:session_store]` seam. Memory and
   JSONL providers live in terret-core; the store row is explicit in every boot.
+- `gems/terret-ws` is the v1 interface (M4): one WebSocket per agent behind `ctx[:ws]`,
+  the §9.2 frames, exact replay-then-tail on the session log; wire contract in
+  `docs/protocol.md`; only the real endpoint requires `async-websocket`.
 - `gems/terret` is a placeholder holding the name. It will carry profiles and boot.
   None of that is written. Do not add real behaviour here without reading §5 and §9 of
   the plan first.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
-here covers M0–M3: kernel, session log with the invariant, tools pipeline, loop, and the
-OpenRouter adapter. `LLM::FakeAdapter` (canned script replay) remains the test/demo
-default; the OpenRouter path is proven by canned-wire tests plus a live smoke lane.
-Session payloads are primitives at the append boundary; typed parts encode through
+here covers M0–M4: kernel, session log with the invariant, tools pipeline, loop, the
+OpenRouter adapter, and the socket. `LLM::FakeAdapter` (canned script replay) remains the
+test/demo default; the OpenRouter path is proven by canned-wire tests plus a live smoke
+lane. Session payloads are primitives at the append boundary; typed parts encode through
 `LLM.encode_part`.
 
 Note the plan has drifted from the code in places. It specifies RSpec (this uses minitest),
@@ -37,6 +40,7 @@ rake test              # all suites, plain minitest, no bundler needed
 rake events:catalog    # regenerates docs/events.md
 ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
+bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and `terret-core` have zero
