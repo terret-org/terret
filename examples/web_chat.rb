@@ -189,3 +189,101 @@ def page_html(model)
     </html>
   HTML
 end
+
+# Snapshot the log and subscribe with no await in between, so the stream has
+# no gap and no duplicate; then replay through a fresh Renderer and tail.
+def sse_response(hub, host)
+  body = Protocol::HTTP::Body::Writable.new
+  Async do
+    queue = nil
+    replay = Renderer.new
+    events = host.session.events.dup
+    queue = hub.subscribe
+    events.each do |ev|
+      html = replay.render(ev)
+      body.write(sse_frame(html)) if html
+    end
+    loop { body.write(sse_frame(queue.dequeue)) }
+  rescue StandardError
+    # any write failure means the browser went away; drop the connection
+  ensure
+    hub.unsubscribe(queue) if queue
+    body.close
+  end
+  Protocol::HTTP::Response[200, { "content-type" => "text/event-stream",
+                                  "cache-control" => "no-cache" }, body]
+end
+
+model = ENV.fetch("TERRET_MODEL", "openai/gpt-5-mini")
+
+loader = Hames::Loader.new
+loader.layer([
+  { id: "sessions",   plugin: Terret::Sessions },
+  { id: "prompt",     plugin: Terret::Prompt },
+  { id: "tools",      plugin: Terret::Tools::Registry },
+  { id: "llm",        plugin: Terret::LLM::Service, config: { roles: { main: "openrouter/#{model}" } } },
+  { id: "loop",       plugin: Terret::Loop },
+  { id: "openrouter", plugin: Terret::OpenRouter::Plugin,
+    config: { title: "Terret web chat", referer: "https://terret.org" } }
+])
+ctx = loader.boot!
+
+ctx.with_owner("web-chat-tools") do
+  ctx[:tools].register(
+    name: "weather", description: "Current weather for a city",
+    params: { type: "object", properties: { city: { type: "string" } },
+              required: ["city"] }
+  ) { |city:| "22C, clear skies in #{city}" }
+  ctx[:prompt].register_section("identity", priority: 1) do
+    "You are a terse assistant. Use the weather tool when asked about weather."
+  end
+end
+
+hub = Hub.new
+host = AgentHost.new(ctx, hub)
+live = Renderer.new
+
+ctx.with_owner("web-chat") do
+  # No session filter here: Sessions#create appends session/created before
+  # AgentHost's @session assignment lands, and abandoned sessions never emit
+  # again anyway (reset is refused while a turn runs).
+  ctx.on("session/event") do |ev|
+    html = live.render(ev)
+    hub.broadcast(html) if html
+  end
+end
+
+port = ENV.fetch("PORT", "9292").to_i
+endpoint = Async::HTTP::Endpoint.parse("http://localhost:#{port}")
+
+Sync do
+  server = Async::HTTP::Server.for(endpoint) do |request|
+    case [request.method, request.path]
+    when ["GET", "/"]
+      Protocol::HTTP::Response[200, { "content-type" => "text/html; charset=utf-8" },
+                               [page_html(model)]]
+    when ["GET", "/events"]
+      sse_response(hub, host)
+    when ["POST", "/messages"]
+      text = URI.decode_www_form(request.read.to_s).to_h["text"].to_s.strip
+      if text.empty?
+        Protocol::HTTP::Response[422, {}, ["missing text"]]
+      elsif host.run(text)
+        Protocol::HTTP::Response[204, {}, []]
+      else
+        Protocol::HTTP::Response[409, {}, ["a turn is already running"]]
+      end
+    when ["POST", "/session"]
+      if host.busy?
+        Protocol::HTTP::Response[409, {}, ["a turn is already running"]]
+      else
+        host.reset!
+        Protocol::HTTP::Response[204, {}, []]
+      end
+    else
+      Protocol::HTTP::Response[404, {}, ["not found"]]
+    end
+  end
+  puts "terret web chat on http://localhost:#{port} (model: #{model})"
+  server.run
+end
