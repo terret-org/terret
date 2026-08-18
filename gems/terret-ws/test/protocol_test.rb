@@ -522,4 +522,55 @@ class ProtocolTest < Minitest::Test
       assert_equal "internal", sock.written.last[:code]
     end
   end
+
+  def test_a_client_drop_mid_turn_never_cancels_the_turn
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) { |city:| gate.dequeue; "22C in #{city}" }
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, _conn, conn_task = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "weather?", wake: true)
+      await { sock.event_types(chunkless: false).include?("tool/call") }
+
+      sock.client_close # the network blips; the turn task is rooted on the server
+      conn_task.wait
+      gate.enqueue(nil)
+      await { session.events.any? { |e| e.type == "turn/end" } }
+
+      assert_equal "completed", session.events.last.payload[:status]
+    end
+  end
+
+  def test_reconnect_with_from_seq_sees_no_gap_and_no_duplicate
+    ctx = boot(script: [{ text: "one" }, { text: "two" }])
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      sock1, _c1, task1 = connect(ctx, agent, task)
+      sock1.client_send(type: "subscribe", from_seq: 0)
+      sock1.client_send(type: "inject", text: "first", wake: true)
+      await { sock1.event_types.include?("turn/end") }
+      recorded = sock1.events.map { |f| f[:seq] }.max
+      sock1.client_close
+      task1.wait
+
+      # a whole turn happens while nobody is connected
+      ctx[:loop].run_turn(agent, "second")
+
+      sock2, = connect(ctx, agent, task)
+      sock2.client_send(type: "subscribe", from_seq: recorded + 1)
+      await { sock2.event_types.include?("turn/end") }
+
+      seqs = sock2.events.map { |f| f[:seq] }
+      assert_equal ((recorded + 1)..seqs.max).to_a, seqs,
+                   "the reconnecting client must see exactly the events it missed"
+      total = session.events.map(&:seq)
+      assert_equal total, (sock1.events.map { |f| f[:seq] } + seqs),
+                   "old stream plus new stream must equal the whole log with no overlap"
+      sock2.client_close
+    end
+  end
 end
