@@ -3,7 +3,7 @@
 **A Ruby-native, model-agnostic agent harness, informed by DeepSeek Harness (`dsh`)**
 
 Version 0.5, August 2026
-Status: Design document. M0–M3 are shipped; see §12 for what is actually built.
+Status: Design document. M0–M4 are shipped; see §12 for what is actually built.
 
 ---
 
