@@ -74,7 +74,7 @@ class Renderer
     when "step/end"
       usage = ev.payload[:usage]
       usage && turbo_tag("append", "transcript",
-                         %(<div class="meta">#{usage[:prompt_tokens]}+#{usage[:completion_tokens]} tokens · $#{usage[:cost]}</div>))
+                         %(<div class="meta">#{h(usage[:prompt_tokens])}+#{h(usage[:completion_tokens])} tokens · $#{h(usage[:cost])}</div>))
     when "turn/start"
       turbo_tag("replace", "composer", composer_html(disabled: true))
     when "turn/end"
