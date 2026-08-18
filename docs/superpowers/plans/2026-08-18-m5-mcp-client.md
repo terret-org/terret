@@ -62,7 +62,7 @@ M4 debt item 1 (plan §14): `Context#effect` records `[owner, disposer]` in `@ef
 - Modify: `gems/hames/lib/hames/context.rb` (the `effect` method)
 - Test: `gems/hames/test/hames_test.rb`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add a test class at the bottom of `gems/hames/test/hames_test.rb`:
 
@@ -145,12 +145,12 @@ and the undeclared-event `ContractError`, returning the wrapped disposer).
 The M4 Codex finding behind this debt was specifically about LISTENER
 disposers, so Task 1 is not done until `on` has the same hygiene.
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 Run: `mise exec -- ruby gems/hames/test/hames_test.rb`
 Expected: FAIL — `effects_count` stays 1 after disposal; the idempotence test double-runs.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `gems/hames/lib/hames/context.rb`, replace the `effect` method:
 
@@ -190,11 +190,11 @@ Note the frame is now a 3-element array `[owner, wrapped_disposer, done]`; `disp
     end
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 `mise exec -- ruby gems/hames/test/hames_test.rb` green, then full `mise exec -- rake test` green (the terret-ws suites exercise disposers heavily — they must all still pass).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/hames
@@ -212,7 +212,7 @@ Per-agent policy is currently impossible: `Registry#execute` waterfalls on the R
 - Modify: `gems/terret-core/lib/terret/loop.rb` (the `ctx[:tools].execute` call site)
 - Test: `gems/terret-core/test/loop_test.rb`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `gems/terret-core/test/loop_test.rb`:
 
@@ -250,12 +250,12 @@ Add to `gems/terret-core/test/loop_test.rb`:
   end
 ```
 
-- [ ] **Step 2: Run and verify failure**
+- [x] **Step 2: Run and verify failure**
 
 `mise exec -- ruby gems/terret-core/test/loop_test.rb`
 Expected: FAIL — agent A's tool executes normally (`22C in CDMX`), because the fork-registered veto never fires.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `gems/terret-core/lib/terret/tools.rb`, change `execute`'s signature and every internal waterfall to use the passed context:
 
@@ -294,11 +294,11 @@ In `gems/terret-core/lib/terret/loop.rb`, the call site inside `run_turn`'s `cal
 
 (`ctx` there is already `agent.ctx` — first line of `run_turn`'s body.)
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Target file green (including the pre-existing veto/replacement/unload tool tests — root-registered listeners must keep working), then full `mise exec -- rake test`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-core
@@ -315,7 +315,7 @@ Plan §6.3: a deny-by-default allow list with wildcards (`mcp__nexus__*`), imple
 - Modify: `gems/terret-core/lib/terret/tools.rb` (add `AllowList` inside `module Tools`)
 - Test: `gems/terret-core/test/loop_test.rb`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ruby
   def test_the_allow_list_denies_unlisted_tools_and_globs_namespaces
@@ -362,9 +362,9 @@ Plan §6.3: a deny-by-default allow list with wildcards (`mcp__nexus__*`), imple
   end
 ```
 
-- [ ] **Step 2: Run and verify failure** — `NameError: uninitialized constant Terret::Tools::AllowList`.
+- [x] **Step 2: Run and verify failure** — `NameError: uninitialized constant Terret::Tools::AllowList`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add inside `module Tools` in `gems/terret-core/lib/terret/tools.rb` (after `Veto`):
 
@@ -390,9 +390,9 @@ Add inside `module Tools` in `gems/terret-core/lib/terret/tools.rb` (after `Veto
     end
 ```
 
-- [ ] **Step 4: Run tests** — file, then full gate, green.
+- [x] **Step 4: Run tests** — file, then full gate, green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-core
@@ -507,7 +507,7 @@ effect — disposing unregisters). Live refresh on `resources/updated` is
 deferred until a consumer needs it.
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/mcp.md
@@ -524,7 +524,7 @@ The gem shell plus `Translate` — stdlib-only, duck-typed against manceps' valu
 - Create: `gems/terret-mcp/terret-mcp.gemspec`, `gems/terret-mcp/lib/terret/mcp.rb`, `gems/terret-mcp/lib/terret/mcp/translate.rb`, `gems/terret-mcp/test/translate_test.rb`
 - Modify: `Gemfile` (add `gem "terret-mcp", path: "gems/terret-mcp"` after the terret-ws line; then `mise exec -- bundle install` — resolves manceps 1.0.1 from RubyGems; report BLOCKED with the error if resolution fails; never commit Gemfile.lock)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `gems/terret-mcp/test/translate_test.rb`:
 
@@ -602,9 +602,9 @@ class TranslateTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run and verify failure** — `cannot load such file .../translate`.
+- [x] **Step 2: Run and verify failure** — `cannot load such file .../translate`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `gems/terret-mcp/lib/terret/mcp/translate.rb`:
 
@@ -715,9 +715,9 @@ Gem::Specification.new do |s|
 end
 ```
 
-- [ ] **Step 4: Run tests** — translate_test green; `mise exec -- bundle install` resolves manceps; both full gates green.
+- [x] **Step 4: Run tests** — translate_test green; `mise exec -- bundle install` resolves manceps; both full gates green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-mcp Gemfile
@@ -735,7 +735,7 @@ git commit -m "Add the terret-mcp gem with the translation layer"
 - Modify: `gems/terret-core/lib/terret/tools.rb` (`Registry#register` returns its disposer)
 - Create: `gems/terret-mcp/test/service_test.rb`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `gems/terret-mcp/test/service_test.rb`:
 
@@ -898,9 +898,9 @@ class MCPServiceTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run and verify failure** — `NoMethodError`/`NameError` on `Terret::MCP::Service`.
+- [x] **Step 2: Run and verify failure** — `NoMethodError`/`NameError` on `Terret::MCP::Service`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace `gems/terret-mcp/lib/terret/mcp/service.rb`:
 
@@ -1048,9 +1048,9 @@ end
 - This task includes a one-line core change: `Registry#register` in `gems/terret-core/lib/terret/tools.rb` currently ends with a trailing `d`, discarding the effect's disposer. Delete that trailing `d` so `register` RETURNS the disposer (which Task 1 made self-removing and idempotent), and add a comment line above the method: `# Returns the registration's disposer.` No existing caller uses the old return value (verify with a grep and say so in your report); the service's `sync_tools` relies on the new one.
 - If a test fails against this code, report the analysis; where this sketch conflicts with the real seams, the seams win.
 
-- [ ] **Step 4: Run tests** — service_test green (6 runs), translate_test still green, both full gates green.
+- [x] **Step 4: Run tests** — service_test green (6 runs), translate_test still green, both full gates green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-mcp gems/terret-core
@@ -1067,7 +1067,7 @@ The stdio transport correlates responses by ordering, not ids — a late reply t
 - Modify: `gems/terret-mcp/lib/terret/mcp/service.rb`
 - Test: `gems/terret-mcp/test/service_test.rb`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
   class SleepyClient < FakeClient
@@ -1167,9 +1167,9 @@ Also add the concurrent-heal race test (review fallout — proves exactly one he
   end
 ```
 
-- [ ] **Step 2: Run and verify failure** — first call errors (good) but `fake.reconnects` stays 0.
+- [x] **Step 2: Run and verify failure** — first call errors (good) but `fake.reconnects` stays 0.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `service.rb`, track poisoning per entry. In `call_remote`, on the timeout path mark `entry[:poisoned] = true` before raising; at the top of `call_remote`, heal first:
 
@@ -1222,9 +1222,9 @@ and simplify `with_timeout` to NOT rescue (let `Async::TimeoutError` reach `call
 
 (Transport errors poison too — a dead subprocess or dropped socket needs the same reconnect-on-next-use.)
 
-- [ ] **Step 4: Run tests** — file green, full gates green.
+- [x] **Step 4: Run tests** — file green, full gates green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-mcp
@@ -1258,7 +1258,7 @@ git commit -m "Poison a timed-out MCP connection and reconnect on next use"
 - Modify: `gems/terret-core/lib/terret/tools.rb` (fetch inside the rescue)
 - Test: `gems/terret-mcp/test/service_test.rb`, `gems/terret-core/test/loop_test.rb`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
   def test_list_changed_reconciles_the_registered_tools
@@ -1290,9 +1290,9 @@ git commit -m "Poison a timed-out MCP connection and reconnect on next use"
   end
 ```
 
-- [ ] **Step 2: Run and verify failure** — `KeyError` (no handler registered) or stale roster.
+- [x] **Step 2: Run and verify failure** — `KeyError` (no handler registered) or stale roster.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `mount_one`, after the sync-success point, PUBLISH the entry first, then subscribe and start the listener (publishing first means the guard's `equal?` check always has the right entry by the time any notification could be dispatched — subscribing first would drop a legitimate first-mount reconcile if buffered data dispatched before publication):
 
@@ -1328,9 +1328,9 @@ In `mount_one`, after the sync-success point, PUBLISH the entry first, then subs
 
 and in `unmount!`, stop it: `entry[:listener]&.stop` before disconnecting. Note `sync_tools` was written in Task 6 to be re-entrant (it disposes and re-registers) — verify that holds; the FakeClient's `notify!` invokes the handler synchronously in the test, no reactor needed for the reconcile itself.
 
-- [ ] **Step 4: Run tests** — file green (the unmount test must still pass with the listener line), full gates green.
+- [x] **Step 4: Run tests** — file green (the unmount test must still pass with the listener line), full gates green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-mcp
@@ -1345,7 +1345,7 @@ git commit -m "Reconcile the tool roster when a server announces changes"
 - Modify: `gems/terret-mcp/lib/terret/mcp/service.rb`
 - Test: `gems/terret-mcp/test/service_test.rb`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ruby
   def test_a_resource_registers_as_a_prompt_section
@@ -1364,9 +1364,9 @@ git commit -m "Reconcile the tool roster when a server announces changes"
   end
 ```
 
-- [ ] **Step 2: Run and verify failure** — `NoMethodError: register_resource_section`.
+- [x] **Step 2: Run and verify failure** — `NoMethodError: register_resource_section`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ruby
       # Reads the resource once and registers its text as a prompt section
@@ -1383,9 +1383,9 @@ git commit -m "Reconcile the tool roster when a server announces changes"
 
 (Check what `Prompt#register_section` returns — it returns the effect disposer via `@ctx.effect`; confirm and rely on it. If it doesn't return the disposer, fix `register_section` to return it — one line in terret-core, reported as a deviation with its own test assertion.)
 
-- [ ] **Step 4: Run tests** — file, then full gates, green.
+- [x] **Step 4: Run tests** — file, then full gates, green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add gems/terret-mcp gems/terret-core
@@ -1401,7 +1401,7 @@ A minimal legacy-wire MCP server as a plain Ruby script — the integration subs
 **Files:**
 - Create: `gems/terret-mcp/test/fixtures/stdio_server.rb`
 
-- [ ] **Step 1: Write the fixture (no TDD — it IS test infrastructure; Task 11 proves it)**
+- [x] **Step 1: Write the fixture (no TDD — it IS test infrastructure; Task 11 proves it)**
 
 ```ruby
 # frozen_string_literal: true
@@ -1454,7 +1454,7 @@ while (line = $stdin.gets)
 end
 ```
 
-- [ ] **Step 2: Sanity-run it by hand**
+- [x] **Step 2: Sanity-run it by hand**
 
 ```bash
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | mise exec -- ruby gems/terret-mcp/test/fixtures/stdio_server.rb
@@ -1462,7 +1462,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 
 Expect two JSON lines: the initialize result echoing `2025-11-25`, then the two-tool list.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add gems/terret-mcp
@@ -1478,7 +1478,7 @@ Prove the whole stack against a real subprocess through real manceps — and pin
 **Files:**
 - Create: `gems/terret-mcp/test/integration_test.rb`
 
-- [ ] **Step 1: Write the tests** (skip-guarded like the terret-ws suites)
+- [x] **Step 1: Write the tests** (skip-guarded like the terret-ws suites)
 
 ```ruby
 # frozen_string_literal: true
@@ -1564,9 +1564,9 @@ class MCPIntegrationTest < Minitest::Test
 end
 ```
 
-- [ ] **Step 2: Run** — `mise exec -- bundle exec ruby gems/terret-mcp/test/integration_test.rb`. These may pass immediately (Tasks 6-7 shipped the behavior) or surface real seams-vs-manceps mismatches (e.g. `Manceps::Client.new` signature drift, connect semantics). Fix the SERVICE (or report NEEDS_CONTEXT), never weaken the tests. Note: after the timeout test, the fixture subprocess from the poisoned connection may linger sleeping — verify `reconnect!` respawns (manceps `Stdio#open` respawns on reconnect) and that `unmount!` reaps; if orphans persist, kill them in the test's ensure and report it as a manceps gap.
-- [ ] **Step 3: Run across seeds 1-3, then both full gates.**
-- [ ] **Step 4: Commit**
+- [x] **Step 2: Run** — `mise exec -- bundle exec ruby gems/terret-mcp/test/integration_test.rb`. These may pass immediately (Tasks 6-7 shipped the behavior) or surface real seams-vs-manceps mismatches (e.g. `Manceps::Client.new` signature drift, connect semantics). Fix the SERVICE (or report NEEDS_CONTEXT), never weaken the tests. Note: after the timeout test, the fixture subprocess from the poisoned connection may linger sleeping — verify `reconnect!` respawns (manceps `Stdio#open` respawns on reconnect) and that `unmount!` reaps; if orphans persist, kill them in the test's ensure and report it as a manceps gap.
+- [x] **Step 3: Run across seeds 1-3, then both full gates.**
+- [x] **Step 4: Commit**
 
 ```bash
 git add gems/terret-mcp
@@ -1582,7 +1582,7 @@ Plan §12 M5 accept: "an agent whose entire tool roster arrives from MCP servers
 **Files:**
 - Test: `gems/terret-ws/test/protocol_test.rb`
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 Add to `ProtocolTest` (its `boot` already takes `extra_rows:`; requires terret-mcp via `require_relative "../../terret-mcp/lib/terret/mcp"` at the top of the file, guarded by the existing ASYNC_AVAILABLE constant):
 
@@ -1641,9 +1641,9 @@ Add to `ProtocolTest` (its `boot` already takes `extra_rows:`; requires terret-m
 
 Note on the `lookup.payload[:content]` assertion: the structured content `{ "did" => ..., "args" => {...} }` passes through `normalize_payload`, which symbolizes string KEYS — hence the symbol-keyed expectation. If the actual round-trip differs (e.g. nested arg keys), adjust the ASSERTION to the observed normalized form and explain the normalization chain in your report — the invariant that matters is lossless primitives, not the exact key class.
 
-- [ ] **Step 2: Run** — may pass immediately; failures here are integration truth, investigate rather than patch the test. Seeds 1-3.
-- [ ] **Step 3: Both full gates.**
-- [ ] **Step 4: Commit**
+- [x] **Step 2: Run** — may pass immediately; failures here are integration truth, investigate rather than patch the test. Seeds 1-3.
+- [x] **Step 3: Both full gates.**
+- [x] **Step 4: Commit**
 
 ```bash
 git add gems/terret-ws
@@ -1658,22 +1658,22 @@ git commit -m "Prove the M5 acceptance: an all-MCP roster under policy over the 
 - Create: `examples/mcp_demo.rb`
 - Modify: `CLAUDE.md`, `docs/terret-implementation-plan.md`
 
-- [ ] **Step 1: The demo** — `examples/mcp_demo.rb`: boots the harness with the FakeAdapter scripting two calls against the FIXTURE stdio server (real manceps, real subprocess), an allow list admitting only `mcp__fix__echo`, prints the event stream showing one admitted call round-tripping and one denied. Structure it like `examples/ws_demo.rb` (self-contained, `Warning[:experimental] = false`, requires via monorepo paths, runs under `bundle exec`). Keep it under ~80 lines; the fixture path is `gems/terret-mcp/test/fixtures/stdio_server.rb`. Run it and paste its output in your report.
+- [x] **Step 1: The demo** — `examples/mcp_demo.rb`: boots the harness with the FakeAdapter scripting two calls against the FIXTURE stdio server (real manceps, real subprocess), an allow list admitting only `mcp__fix__echo`, prints the event stream showing one admitted call round-tripping and one denied. Structure it like `examples/ws_demo.rb` (self-contained, `Warning[:experimental] = false`, requires via monorepo paths, runs under `bundle exec`). Keep it under ~80 lines; the fixture path is `gems/terret-mcp/test/fixtures/stdio_server.rb`. Run it and paste its output in your report.
 
-- [ ] **Step 2: Docs**
+- [x] **Step 2: Docs**
 - `CLAUDE.md`: add the `gems/terret-mcp` bullet ("the MCP client (M5): manceps-backed stdio and streamable-HTTP servers mounted as `mcp__<server>__<tool>` sources behind `ctx[:tools]`, per-server approval, per-call timeouts, the allow list in terret-core; mapping in `docs/mcp.md`"), update "covers M0–M4" → "M0–M5" (tail gains "and the MCP client"), add `bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture` to Commands.
 - `docs/terret-implementation-plan.md` §12: M5 → SHIPPED in the M0-M4 voice: what landed (manceps-backed client, both transports with the legacy wire target, namespaced registration with per-server approval metadata, timeout-poison-reconnect policy, list_changed reconciliation, resources as prompt sections, the allow list + caller-ctx waterfall dispatch in core, kernel disposer hygiene) and what deferred (approval machinery M6; the 2026-07-28 stateless wire until deployment exists).
 - `docs/terret-implementation-plan.md` §14: mark Codex-debt item 1 (disposer leak) paid; add one line noting the modern-MCP-wire deferral and that fiber-safety of manceps is pinned by our canary, not upstream contract.
 - Status line (line 6): "M0–M5 are shipped".
 
-- [ ] **Step 3: The full gate**
+- [x] **Step 3: The full gate**
 
 ```bash
 mise exec -- rake test && mise exec -- bundle exec rake test
 mise exec -- bundle exec rake events:catalog && git diff --exit-code docs/events.md
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add examples/mcp_demo.rb CLAUDE.md docs/terret-implementation-plan.md
@@ -1684,8 +1684,8 @@ git commit -m "Mark M5 shipped with a live MCP demo"
 
 ## Acceptance (M5, from plan §12)
 
-- [ ] stdio and streamable-HTTP servers mount as namespaced tool sources (Tasks 6, 11 — HTTP path exercised via fake client + manceps' own webmock-tested transport; stdio proven live).
-- [ ] Per-server policy (approval metadata) and strict mode (Task 6).
-- [ ] Declarative per-agent allow list with wildcards (Task 3, proven per-agent by Task 2's dispatch fix).
-- [ ] An agent whose entire tool roster arrives from MCP servers works under policy, driven over the socket (Task 12).
-- [ ] Both gates green, events catalog current, no invariant relaxed.
+- [x] stdio and streamable-HTTP servers mount as namespaced tool sources (Tasks 6, 11 — HTTP path exercised via fake client + manceps' own webmock-tested transport; stdio proven live).
+- [x] Per-server policy (approval metadata) and strict mode (Task 6).
+- [x] Declarative per-agent allow list with wildcards (Task 3, proven per-agent by Task 2's dispatch fix).
+- [x] An agent whose entire tool roster arrives from MCP servers works under policy, driven over the socket (Task 12).
+- [x] Both gates green, events catalog current, no invariant relaxed.
