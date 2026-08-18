@@ -20,6 +20,29 @@ module Terret
     StreamError = Data.define(:message, :code) # surfaced mid-stream, then raised
     MessageStop = Data.define(:stop_reason) # :end_turn | :tool_use
 
+    # Storage codec for message parts. Durable logs hold only these primitive,
+    # storage-named hashes ("text", never Terret::LLM::Text), so a class
+    # rename can never invalidate stored sessions. decode(encode(p)) == p.
+    module_function
+
+    def encode_part(part)
+      case part
+      when Text       then { type: "text", text: part.text }
+      when ToolCall   then { type: "tool_call", id: part.id, name: part.name, args: part.args }
+      when ToolResult then { type: "tool_result", id: part.id, content: part.content, error: part.error }
+      else raise ArgumentError, "cannot encode #{part.class} as a message part"
+      end
+    end
+
+    def decode_part(hash)
+      case hash[:type]
+      when "text"        then Text.new(text: hash[:text])
+      when "tool_call"   then ToolCall.new(id: hash[:id], name: hash[:name], args: hash[:args])
+      when "tool_result" then ToolResult.new(id: hash[:id], content: hash[:content], error: hash[:error])
+      else raise ArgumentError, "unknown part tag #{hash[:type].inspect}"
+      end
+    end
+
     # Adapter failures. Retryable covers 429/overload/5xx and transport drops
     # before any bytes streamed; everything else raises through immediately.
     class AdapterError < StandardError
