@@ -1128,9 +1128,26 @@ git commit -m "Poison a timed-out MCP connection and reconnect on next use"
 
 `notifications/tools/list_changed` → re-list and reconcile. The listener runs in a per-server Async task when a reactor is present; without one, notifications are skipped (documented).
 
+**Also in this task (spec-review fallout):** once rosters reconcile live, a model can call a tool that just vanished — and today `Registry#execute`'s `d = fetch(c.name)` sits OUTSIDE the rescue, so a missing name raises an uncaught `KeyError` and fails the whole turn. Move the `fetch` inside the `begin` block (first line, before the handler call) so an unknown tool renders as a class-prefixed error `Result` ("KeyError: ...") the model can recover from. TDD it in `gems/terret-core/test/loop_test.rb`:
+
+```ruby
+  def test_calling_an_unknown_tool_is_an_error_result_not_a_failed_turn
+    ctx, = boot(script: [
+      { text: "Trying.", tool_calls: [Terret::LLM::ToolCall.new(id: "t1", name: "vanished", args: {})] },
+      { text: "Recovered." }
+    ])
+    agent, session = spawn(ctx)
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "go")
+    result = session.events.find { |e| e.type == "tool/result" }
+    assert_match(/\AKeyError: /, result.payload[:error])
+  end
+```
+
 **Files:**
 - Modify: `gems/terret-mcp/lib/terret/mcp/service.rb`
-- Test: `gems/terret-mcp/test/service_test.rb`
+- Modify: `gems/terret-core/lib/terret/tools.rb` (fetch inside the rescue)
+- Test: `gems/terret-mcp/test/service_test.rb`, `gems/terret-core/test/loop_test.rb`
 
 - [ ] **Step 1: Write the failing test**
 
