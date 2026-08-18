@@ -98,6 +98,17 @@ class TurnFlowTest < Minitest::Test
     assert_raises(Terret::LogInvariantViolation) { ctx[:loop].run_turn(agent, "hello") }
   end
 
+  def test_a_failed_turn_still_closes_with_a_durable_turn_end
+    ctx, = boot(script: [])
+    agent, session = spawn(ctx)
+
+    assert_raises(RuntimeError) { ctx[:loop].run_turn(agent, "hello") }
+
+    assert_equal "turn/end", session.events.last.type
+    assert_equal :failed, session.events.last.payload[:status]
+    assert_equal :idle, agent.status
+  end
+
   def test_pre_step_rejection_closes_a_durable_zero_step_turn
     ctx, = boot(script: [{ text: "unused" }])
     agent, session = spawn(ctx)

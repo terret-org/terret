@@ -57,61 +57,66 @@ module Terret
       # claim next-step input plus anything waiting in the inbox
       pending = [input, *agent.drain_inbox].compact
 
-      loop do
-        claim = ctx.waterfall("agent/pre_step", Claim.of(pending)) { |c| c }
-        if claim.rejected || (steps.zero? && claim.messages.empty? && pending.empty?)
-          # a rejected or empty first claim still closes a durable turn that
-          # spent no step, so the log records the attempt
-          status = claim.rejected ? :rejected : :empty
-          break
-        end
-
-        steps += 1
-        raise "runaway turn" if steps > MAX_STEPS
-
-        sessions.append(sid, "step/start", { n: steps })
-        claim.messages.each { |t| sessions.append(sid, "user/message", { text: t }) }
-        pending = []
-
-        history = sessions.derive_messages(sid)
-        request = LLM::Request.new(model: nil, system: ctx[:prompt].render(agent:),
-                                   messages: history, tools: ctx[:tools].schemas)
-        request = ctx.waterfall("agent/request", request)
-        sessions.assert_log_invariant!(sid, request.messages)
-
-        usage = nil
-        message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
-          case ev
-          when LLM::TextDelta
-            sessions.append(sid, "assistant/chunk", { text: ev.text })
-          when LLM::Usage
-            usage = ev
+      begin
+        loop do
+          claim = ctx.waterfall("agent/pre_step", Claim.of(pending)) { |c| c }
+          if claim.rejected || (steps.zero? && claim.messages.empty? && pending.empty?)
+            # a rejected or empty first claim still closes a durable turn that
+            # spent no step, so the log records the attempt
+            status = claim.rejected ? :rejected : :empty
+            break
           end
-        end
-        sessions.append(sid, "assistant/message", { parts: message.parts })
-        step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
 
-        calls = message.tool_calls
-        if calls.empty?
+          steps += 1
+          raise "runaway turn" if steps > MAX_STEPS
+
+          sessions.append(sid, "step/start", { n: steps })
+          claim.messages.each { |t| sessions.append(sid, "user/message", { text: t }) }
+          pending = []
+
+          history = sessions.derive_messages(sid)
+          request = LLM::Request.new(model: nil, system: ctx[:prompt].render(agent:),
+                                     messages: history, tools: ctx[:tools].schemas)
+          request = ctx.waterfall("agent/request", request)
+          sessions.assert_log_invariant!(sid, request.messages)
+
+          usage = nil
+          message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
+            case ev
+            when LLM::TextDelta
+              sessions.append(sid, "assistant/chunk", { text: ev.text })
+            when LLM::Usage
+              usage = ev
+            end
+          end
+          sessions.append(sid, "assistant/message", { parts: message.parts })
+          step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
+
+          calls = message.tool_calls
+          if calls.empty?
+            sessions.append(sid, "step/end", step_end)
+            break # nothing owed
+          end
+
+          calls.each do |tc|
+            sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
+            result = ctx[:tools].execute(
+              Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid)
+            )
+            sessions.append(sid, "tool/result",
+                            { id: result.id, content: result.content, error: result.error })
+          end
           sessions.append(sid, "step/end", step_end)
-          break # nothing owed
+          # tools owe another request -> next step
         end
-
-        calls.each do |tc|
-          sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
-          result = ctx[:tools].execute(
-            Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid)
-          )
-          sessions.append(sid, "tool/result",
-                          { id: result.id, content: result.content, error: result.error })
-        end
-        sessions.append(sid, "step/end", step_end)
-        # tools owe another request -> next step
+      rescue Exception
+        status = :failed
+        raise
+      ensure
+        ctx.serial("agent/turn_stopping", agent)
+        sessions.append(sid, "turn/end", { status: status })
+        agent.status = :idle
       end
-
-      ctx.serial("agent/turn_stopping", agent)
-      sessions.append(sid, "turn/end", { status: status })
-      agent.status = :idle
       status
     end
   end
