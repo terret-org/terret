@@ -615,6 +615,17 @@ class AgentLifecycleTest < Minitest::Test
     assert_match(/max_agents/, err.message)
   end
 
+  def test_max_agents_hot_reloads
+    ctx, loader = boot_with_cap(1)
+    a = ctx[:sessions].create
+    b = ctx[:sessions].create
+    ctx[:loop].spawn_agent(session_id: a.id)
+    assert_raises(Terret::AgentCapExceeded) { ctx[:loop].spawn_agent(session_id: b.id) }
+
+    loader.reconfigure!("loop", { max_agents: 2 })
+    ctx[:loop].spawn_agent(session_id: b.id) # the raised spawn now succeeds, no restart
+  end
+
   private
 
   def boot_with_cap(n)

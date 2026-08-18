@@ -85,6 +85,10 @@ module Terret
       @max_agents = config[:max_agents] || 128
     end
 
+    def reconfigure(config)
+      @max_agents = config[:max_agents] || 128
+    end
+
     def spawn_agent(session_id:, id: "agent-#{session_id}")
       raise AgentExists, "agent #{id} already exists" if @agents.key?(id)
       if (live = @by_session[session_id])

@@ -632,6 +632,31 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  def test_bearer_tokens_hot_reload
+    # The harness `boot` helper only returns ctx, and its ~20 call sites make
+    # extending it non-mechanical to review under TDD; booted locally here
+    # instead, mirroring the harness's own row list plus the ws row.
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions },
+      { id: "prompt",   plugin: Terret::Prompt },
+      { id: "tools",    plugin: Terret::Tools::Registry },
+      { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
+      { id: "loop",     plugin: Terret::Loop },
+      { id: "ws",       plugin: Terret::WS::Service, config: { tokens: { "s1" => "old" } } }
+    ])
+    ctx = loader.boot!
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new([]))
+
+    assert ctx[:ws].authorized?("s1", "old")
+    loader.reconfigure!("ws", { tokens: { "s1" => "new" } })
+    refute ctx[:ws].authorized?("s1", "old"), "rotated-out token must stop authorizing"
+    assert ctx[:ws].authorized?("s1", "new")
+  end
+
   def test_an_unexpected_dispatch_error_surfaces_as_internal
     ctx = boot(script: [])
     agent, = spawn_agent(ctx)

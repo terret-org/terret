@@ -21,6 +21,12 @@ module Terret
         @connections = {}
       end
 
+      def reconfigure(config)
+        @tokens = config[:tokens] || {}
+        @queue_limit = config[:queue_limit] || 256
+        @heartbeat = config[:heartbeat] || 20
+      end
+
       attr_reader :heartbeat
 
       # Constant-time bearer check, per agent id, before the agent exists.

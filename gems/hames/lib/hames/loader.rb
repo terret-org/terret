@@ -38,6 +38,18 @@ module Hames
 
     def start(ctx); end
     def stop(ctx); end
+
+    # Hot-reload hook (plan §M6): the loader replaces config wholesale, then
+    # calls this. Override to re-derive whatever start captured. The default
+    # warns — a service running on stale knobs should say so, not hide it.
+    def reconfigure(_config)
+      warn "hames: #{self.class} does not support hot-reconfigure; remount the row to apply"
+    end
+
+    # Loader-only: swap the config object under the reader.
+    def replace_config!(config)
+      @config = config
+    end
   end
 
   Row = Data.define(:id, :plugin, :config, :disabled) do
@@ -92,6 +104,21 @@ module Hames
         ready.each { |(r, pl)| mount(r, pl) }
       end
       ctx
+    end
+
+    # Hot config swap — wholesale, like layering, never a merge. Replaces the
+    # row's config, swaps the mounted service's, invokes its reconfigure hook,
+    # and emits config/updated when the app vocabulary declares it (hames
+    # itself declares no events and stays app-agnostic).
+    def reconfigure!(id, config)
+      id = id.to_s
+      row = @rows.fetch(id) { raise KeyError, "no row #{id.inspect}" }
+      service = @mounted.fetch(id) { raise KeyError, "no mounted plugin #{id.inspect}" }
+      @rows[id] = Hames::Row.new(id: row.id, plugin: row.plugin, config: config, disabled: row.disabled)
+      service.replace_config!(config)
+      service.reconfigure(config)
+      ctx.emit("config/updated", id, config) if Hames.declared?("config/updated")
+      config
     end
 
     def unload!(id)

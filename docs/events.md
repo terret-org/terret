@@ -12,6 +12,7 @@ event's public contract; the bus enforces it at runtime.
 | `approval/resolved` | emit | yes | parked call decided (approve/deny) |
 | `assistant/chunk` | emit | yes | raw stream delta (replay/UI fidelity) |
 | `assistant/message` | emit | yes | completed assistant message |
+| `config/updated` | emit |  | a row's config was hot-swapped (id, config) |
 | `context/injected` | emit | yes | agent.inject landed in a request |
 | `llm/stream` | waterfall |  | wrap/replace the adapter stream |
 | `session/compacted` | emit | yes | history up to upto_seq replaced by summary (still model-visible) |

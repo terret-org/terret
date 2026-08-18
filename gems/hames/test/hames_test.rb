@@ -316,6 +316,82 @@ class HamesEffectHygieneTest < Minitest::Test
   end
 end
 
+class HamesReconfigureTest < Minitest::Test
+  class Knobbed < Hames::Service
+    service_key :knobbed
+    attr_reader :knob, :seen
+
+    def start(_ctx)
+      @knob = config[:knob]
+      @seen = []
+    end
+
+    def reconfigure(config)
+      @knob = config[:knob]
+    end
+  end
+
+  class Stubborn < Hames::Service
+    service_key :stubborn
+    def start(_ctx); end
+    # no reconfigure override
+  end
+
+  def setup
+    Hames.reset_events!
+  end
+
+  def boot(rows)
+    loader = Hames::Loader.new
+    loader.layer(rows)
+    [loader.boot!, loader]
+  end
+
+  def test_reconfigure_swaps_config_wholesale_and_invokes_the_hook
+    ctx, loader = boot([{ id: "knobbed", plugin: Knobbed, config: { knob: 1, extra: true } }])
+    loader.reconfigure!("knobbed", { knob: 2 })
+    assert_equal 2, ctx[:knobbed].knob
+    assert_equal({ knob: 2 }, ctx[:knobbed].config, "wholesale replace: :extra must be gone")
+  end
+
+  def test_reconfigure_emits_config_updated_when_declared
+    Hames.event("config/updated", mode: :emit)
+    ctx, loader = boot([{ id: "knobbed", plugin: Knobbed, config: { knob: 1 } }])
+    seen = []
+    ctx.on("config/updated") { |id, cfg| seen << [id, cfg] }
+    loader.reconfigure!("knobbed", { knob: 3 })
+    assert_equal [["knobbed", { knob: 3 }]], seen
+  end
+
+  def test_reconfigure_without_the_declaration_does_not_raise
+    ctx, loader = boot([{ id: "knobbed", plugin: Knobbed, config: { knob: 1 } }])
+    loader.reconfigure!("knobbed", { knob: 4 }) # no config/updated declared: no emit, no raise
+    assert_equal 4, ctx[:knobbed].knob
+  end
+
+  def test_a_service_without_the_hook_warns_and_keeps_running
+    _ctx, loader = boot([{ id: "stubborn", plugin: Stubborn, config: {} }])
+    warned = capture_warn { loader.reconfigure!("stubborn", { x: 1 }) }
+    assert_match(/does not support hot-reconfigure/, warned)
+  end
+
+  def test_reconfiguring_an_unknown_row_raises
+    _ctx, loader = boot([])
+    assert_raises(KeyError) { loader.reconfigure!("ghost", {}) }
+  end
+
+  private
+
+  def capture_warn
+    old = $stderr
+    $stderr = StringIO.new
+    yield
+    $stderr.string
+  ensure
+    $stderr = old
+  end
+end
+
 class HamesEmitIsolationTest < Minitest::Test
   def setup
     Hames.reset_events!
