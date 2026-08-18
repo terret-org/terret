@@ -22,7 +22,8 @@ module Terret
         "cancel"    => [],
         "approve"   => [:call_id],
         "deny"      => [:call_id],
-        "set_model" => %i[role model]
+        "set_model" => %i[role model],
+        "set_policy" => [:patterns]
       }.freeze
 
       module_function

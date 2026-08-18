@@ -94,6 +94,7 @@ module Terret
         when "approve" then handle_resolution(frame[:call_id], "approved", nil)
         when "deny"    then handle_resolution(frame[:call_id], "denied", frame[:reason])
         when "set_model" then handle_set_model(frame[:role], frame[:model])
+        when "set_policy" then handle_set_policy(frame[:patterns])
         else
           raise Frames::BadFrame, "#{frame[:type]} is not supported yet"
         end
@@ -185,6 +186,15 @@ module Terret
         @ctx[:llm].set_role(role, model)
       rescue ArgumentError => e
         push_frame(Frames.error(code: "bad_frame", message: e.message))
+      end
+
+      def handle_set_policy(patterns)
+        unless patterns.is_a?(Array) && patterns.all? { |p| p.is_a?(String) }
+          return push_frame(Frames.error(code: "bad_frame",
+                                         message: "patterns must be an array of strings"))
+        end
+
+        Tools::AllowList.update(@ctx, @sid, patterns)
       end
 
       def push_event(ev)

@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require "json"
+require "tmpdir"
 require_relative "../lib/terret"
 
 module TerretTestHarness
@@ -796,5 +797,90 @@ class ResumeTurnTest < Minitest::Test
     agent = ctx[:loop].spawn_agent(session_id: session.id)
     ctx[:loop].resume_turn(agent) # assert_log_invariant! runs inside every step; no raise = held
     ctx[:sessions].assert_log_invariant!(session.id, ctx[:sessions].derive_messages(session.id))
+  end
+end
+
+class HotPolicyTest < Minitest::Test
+  include TerretTestHarness
+
+  PING = Terret::LLM::ToolCall.new(id: "tp1", name: "ping", args: {})
+
+  def register_ping(ctx)
+    ctx.with_owner("ping-plugin") do
+      ctx[:tools].register(name: "ping", description: "Pong", params: {}) { "pong" }
+    end
+  end
+
+  def test_policy_updates_take_effect_without_reinstall
+    ctx, = boot(script: [{ text: "Pinging.", tool_calls: [PING] }, { text: "done" },
+                         { text: "Pinging.", tool_calls: [PING.with(id: "tp2")] }, { text: "done" }])
+    register_ping(ctx)
+    agent, session = spawn(ctx)
+    Terret::Tools::AllowList.install(agent.ctx, ["nothing"]) # floor denies
+
+    ctx[:loop].run_turn(agent, "ping please")
+    first = session.events.find { |e| e.type == "tool/result" }
+    assert_match(/allow list/, first.payload[:error])
+
+    Terret::Tools::AllowList.update(ctx, session.id, ["ping"])
+    ctx[:loop].run_turn(agent, "again")
+    last = session.events.select { |e| e.type == "tool/result" }.last
+    assert_equal "pong", last.payload[:content]
+  end
+
+  def test_the_last_policy_update_wins
+    ctx, = boot(script: [])
+    _, session = spawn(ctx)
+    Terret::Tools::AllowList.update(ctx, session.id, ["a"])
+    Terret::Tools::AllowList.update(ctx, session.id, ["b"])
+    ev = session.events.select { |e| e.type == "policy/updated" }
+    assert_equal 2, ev.length
+    assert_equal ["b"], ev.last.payload[:patterns]
+  end
+
+  def test_a_hot_policy_survives_a_restart_by_replay
+    dir = File.join(Dir.mktmpdir("terret-policy"), "store")
+    # life A: JSONL store, floor allows ping, hot update denies everything
+    ctx, = boot_jsonl(dir, script: [])
+    session = ctx[:sessions].create(id: "p1")
+    Terret::Tools::AllowList.update(ctx, "p1", ["nothing"])
+
+    # life B: fresh boot, same dir; the embedder reinstalls only the BOOT floor
+    ctx2, = boot_jsonl(dir, script: [{ text: "Pinging.", tool_calls: [PING] }, { text: "done" }])
+    register_ping(ctx2)
+    ctx2[:sessions].resume("p1")
+    agent = ctx2[:loop].spawn_agent(session_id: "p1")
+    Terret::Tools::AllowList.install(agent.ctx, ["ping"]) # boot floor says yes...
+
+    ctx2[:loop].run_turn(agent, "ping?")
+    result = ctx2[:sessions].fetch("p1").events.find { |e| e.type == "tool/result" }
+    assert_match(/allow list/, result.payload[:error],
+                 "...but the logged policy says no, and the log wins")
+  end
+
+  def test_policy_is_projection_invisible
+    ctx, = boot(script: [])
+    _, session = spawn(ctx)
+    Terret::Tools::AllowList.update(ctx, session.id, ["x"])
+    assert_empty ctx[:sessions].derive_messages(session.id)
+  end
+
+  private
+
+  def boot_jsonl(dir, script:)
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::JSONL, config: { dir: dir } },
+      { id: "sessions", plugin: Terret::Sessions },
+      { id: "prompt",   plugin: Terret::Prompt },
+      { id: "tools",    plugin: Terret::Tools::Registry },
+      { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
+      { id: "loop",     plugin: Terret::Loop }
+    ])
+    ctx = loader.boot!
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(script))
+    [ctx, loader]
   end
 end

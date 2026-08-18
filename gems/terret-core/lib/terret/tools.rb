@@ -70,23 +70,39 @@ module Terret
     # crash's class is diagnostics, not noise.
     Failure = Class.new(StandardError)
 
-    # Deny-by-default allow list (plan §6.3): a tools/pre_execute listener,
-    # not a registry special case, so a per-agent list rides the agent's
-    # forked context (Registry#execute dispatches on the caller's ctx).
-    # Patterns are File.fnmatch globs, e.g. "mcp__nexus__*". Returns the
-    # listener's disposer.
-    # Note fnmatch defaults: matching is case-sensitive, and a bare "*" does
-    # not match names starting with "." (no FNM_DOTMATCH) — both fail closed.
+    # Deny-by-default allow list (plan §6.3), hot-reloadable (§12 M6): the
+    # ACTIVE pattern set is the last durable policy/updated event in the
+    # call's session, falling back to the install-time patterns as the floor.
+    # update is an ordinary durable append — it takes effect on the very next
+    # call with no reinstall, and replay rebuilds it, so a hot-reloaded
+    # policy survives a restart while the floor only governs sessions that
+    # never updated. Patterns are File.fnmatch globs; matching is
+    # case-sensitive and "*" does not match dotfiles — both fail closed.
     module AllowList
       def self.install(ctx, patterns)
-        patterns = Array(patterns).map(&:to_s)
+        floor = Array(patterns).map(&:to_s)
         ctx.on("tools/pre_execute") do |call, next_|
-          if patterns.any? { |p| File.fnmatch(p, call.name) }
+          active = current_patterns(ctx, call.session_id) || floor
+          if active.any? { |p| File.fnmatch(p, call.name) }
             next_.(call)
           else
             Veto.new(reason: "#{call.name} is not on the allow list")
           end
         end
+      end
+
+      # Hot update: durable, per-session, last one wins.
+      def self.update(ctx, session_id, patterns)
+        ctx[:sessions].append(session_id, "policy/updated",
+                              { patterns: Array(patterns).map(&:to_s) })
+      end
+
+      def self.current_patterns(ctx, session_id)
+        ctx[:sessions].fetch(session_id).events.reverse_each
+                      .find { |e| e.type == "policy/updated" }
+                      &.payload&.[](:patterns)
+      rescue KeyError
+        nil # session unknown to this context: the floor applies
       end
     end
   end

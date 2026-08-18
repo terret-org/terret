@@ -32,6 +32,8 @@ module Terret
        doc: "history up to upto_seq replaced by summary (still model-visible)")
     e.("approval/requested", :emit, durable: true, doc: "tool call parked awaiting a decision")
     e.("approval/resolved",  :emit, durable: true, doc: "parked call decided (approve/deny)")
+    e.("policy/updated",   :emit, durable: true,
+       doc: "agent allow-list replaced (metadata; projection-invisible)")
     # live extension points
     e.("config/updated",    :emit,      doc: "a row's config was hot-swapped (id, config)")
     e.("session/event",     :emit,      doc: "fan-out of every durable append")

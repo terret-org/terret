@@ -48,7 +48,10 @@ The gate lives on `tools/execute`, not `tools/pre_execute`. Waterfalls
 dispatch parent-first, so a `tools/pre_execute` veto — the per-agent
 `AllowList` (docs/mcp.md) — always settles a call before a human is asked;
 putting the approvals gate at `pre_execute` on the root context would have
-it run ahead of that per-agent veto instead.
+it run ahead of that per-agent veto instead. Durable approvals are an
+opt-in row (a tool's `approval:` field), and Terret's primary workload —
+autonomous agentic systems — mostly skips them in favor of the
+policy-as-code allow list below.
 
 Parking a call appends durable `approval/requested {call_id, name, args}`.
 Resolving one appends durable `approval/resolved {call_id, verdict,
@@ -158,6 +161,32 @@ registry. Only an idle agent can be disposed; disposing a running or
 parked one would tear down the fiber a turn is depending on. `agent_for_session(session_id)`
 is the session-to-agent index: the approvals service uses it to find the
 right agent to flip to `:waiting_approval` and back.
+
+## Hot-reloadable permissions
+
+`Terret::Tools::AllowList` (plan §6.3) is a per-agent `tools/pre_execute`
+listener installed on the agent's forked context, but the pattern set it
+enforces is not frozen in that listener's closure. The **active** set is a
+log projection: the patterns from the last durable `policy/updated` event
+in the call's session, falling back to the patterns `install` was called
+with — the install-time set is a floor, not a ceiling, and it only governs
+sessions that have never hot-updated.
+
+`AllowList.update(ctx, session_id, patterns)` is an ordinary durable
+append. It takes effect on the very next tool call — no reinstall, no
+listener churn — and because it is only a log projection, replaying the
+session on a fresh process rebuilds it exactly: a hot-reloaded policy
+survives a restart for free, the same way compaction and titling do. The
+last `policy/updated` event in the log always wins; superseded ones simply
+stop being the one `current_patterns` finds.
+
+The socket drives it with the `set_policy` frame (docs/protocol.md), which
+appends `policy/updated` the same way `set_model` repoints a model role —
+seam-first, no bespoke wiring. Deny-by-default is unchanged: a call that
+matches no active pattern is a `Veto`, which surfaces to the model as an
+ordinary tool-result error rather than stopping the turn. Like an approval
+or a title, `policy/updated` is metadata — `derive_messages` never projects
+it into what the model sees.
 
 ## Wake-on-stimulus
 

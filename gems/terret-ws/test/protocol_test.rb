@@ -506,6 +506,39 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  def test_set_policy_flips_permissions_mid_session
+    Sync do |task|
+      ping = Terret::LLM::ToolCall.new(id: "tp9", name: "ping", args: {})
+      ctx = boot(script: [{ text: "Pinging.", tool_calls: [ping] }, { text: "done" }])
+      ctx.with_owner("ping-plugin") do
+        ctx[:tools].register(name: "ping", description: "Pong", params: {}) { "pong" }
+      end
+      agent, session = spawn_agent(ctx)
+      Terret::Tools::AllowList.install(agent.ctx, ["nothing"])
+      sock, = connect(ctx, agent, task)
+
+      sock.client_send({ type: "set_policy", patterns: ["ping"] })
+      await { session.events.any? { |e| e.type == "policy/updated" } }
+
+      sock.client_send({ type: "inject", text: "go", wake: true })
+      await { session.events.any? { |e| e.type == "turn/end" } }
+      assert_equal "pong", session.events.find { |e| e.type == "tool/result" }.payload[:content]
+      sock.client_close
+    end
+  end
+
+  def test_set_policy_rejects_non_string_patterns
+    Sync do |task|
+      ctx = boot(script: [])
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "set_policy", patterns: [1, 2] })
+      await { sock.protocol_frames.any? { |f| f[:code] == "bad_frame" } }
+      refute session.events.map(&:type).include?("policy/updated")
+      sock.client_close
+    end
+  end
+
   # Before the M6 boundary (Task 3), invalid UTF-8 appended durably and blew up
   # in the socket's JSON serializer, dropping the connection. Now the boundary
   # refuses it before any consumer can see it: the log stays untouched and the

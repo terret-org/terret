@@ -66,6 +66,7 @@ Frames larger than 1 MiB are rejected as `bad_frame`.
 | `approve` | `call_id` (required) | durable `approval/resolved` |
 | `deny` | `call_id` (required), `reason` (optional) | durable `approval/resolved` |
 | `set_model` | `role` (required), `model` ("provider/model", required) | the live model-role table |
+| `set_policy` | `patterns` (array of strings, required) | durable `policy/updated` (§6.3 AllowList) |
 
 ### subscribe — replay-then-tail
 
@@ -113,6 +114,15 @@ and subscribers see it like any other durable event.
 
 Repoints a model role (`main`, `titler`, ...) at a `provider/model` spec on
 the live service. Takes effect at the next step. Invalid specs get `bad_frame`.
+
+### set_policy
+
+Replaces the agent's active tool allow list with `patterns` (a list of
+`File.fnmatch` globs). Appends durable `policy/updated {patterns}` — the
+last one appended wins, it is effective on the very next tool call with no
+reinstall, and it survives a restart because replay rebuilds it (see
+docs/lifecycle.md, "Hot-reloadable permissions"). `patterns` must be an
+array of strings; anything else gets `bad_frame` and nothing is appended.
 
 ## Liveness
 
