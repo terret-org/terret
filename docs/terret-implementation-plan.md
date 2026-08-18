@@ -494,7 +494,20 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   not inherited by subclasses, so a test double subclassing a keyed provider silently
   fails to mount; and `Hames.event` on an undeclared name raises a bare `KeyError` from
   `Hash#fetch` rather than a `ContractError` naming the event. Neither blocks anything;
-  both are worth fixing together in a small kernel pass.
+  both are worth fixing together in a small kernel pass. *Paid down during M4.*
+- **Debt from the M4 cross-model (Codex) review.** Four accepted-but-deferred findings,
+  none blocking M4's acceptance: (1) a disposed `Context#on` listener's effect entry
+  stays in `@effects` forever — long-lived contexts retain every disposed disposer and
+  whatever its closure captures (each socket subscription, for one); the fix belongs in
+  `Context#effect` making disposers self-removing, a kernel pass. (2) `Hames::Context#emit`
+  runs listeners inline and unrescued, so any listener error surfaces to the producer
+  after a durable append has committed — decide whether fire-and-forget should isolate
+  listener failures (the socket rescues its own listener as a workaround). (3) the JSONL
+  and SQLite stores `JSON.generate` payloads that `normalize_payload` admits without an
+  encoding check, so an invalid-UTF-8 string in a tool result can fail an append at the
+  store instead of at the boundary — tighten `normalize_payload`. (4) `Loop`'s agent
+  registry is unbounded, never disposes a replaced agent's forked context, and allows
+  silent id replacement — needs a lifecycle story before M6's long-lived agents.
 - **Open:** should `hames` move to its own repo, for a cleaner story at the cost of more overhead? Should the meta-gem vendor a pinned bundle version map?
 
 ## 15. What "Cutting Edge" Means Here, Concretely
