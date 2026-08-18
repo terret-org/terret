@@ -283,9 +283,11 @@ module Terret
                       { id: result.id, content: result.content, error: result.error })
     end
 
-    # Close the crash-opened step: execute tool calls the last assistant
-    # message owes that have no tool/result yet (the projection is the truth
-    # — a tool/call event may itself have died unwritten), append the missing
+    # Close the crash-opened step: execute tool calls the open turn's own last
+    # assistant message owes that have no tool/result yet (that event is the
+    # truth — a tool/call event may itself have died unwritten; and scoping to
+    # the open turn is what keeps a mutation an earlier, closed turn already
+    # resolved from running twice), append the missing
     # tool/call events, results, and the step's step/end (without usage: the
     # original step's usage died with the process). Returns the step count so
     # step_loop numbers onward from it. Honest edges: an unclosed step/start
@@ -301,8 +303,15 @@ module Terret
       steps    = turn.count { |e| e.type == "step/start" }
 
       resolved = turn.filter_map { |e| e.payload[:id] if e.type == "tool/result" }
-      owed = last_assistant_tool_calls(sessions.derive_messages(sid))
-             .reject { |tc| resolved.include?(tc.id) }
+      last_assistant = turn.reverse_each.find { |e| e.type == "assistant/message" }
+      owed = if last_assistant
+               last_assistant.payload[:parts]
+                             .map { |p| LLM.decode_part(p) }
+                             .grep(LLM::ToolCall)
+                             .reject { |tc| resolved.include?(tc.id) }
+             else
+               [] # the open turn never got a model reply; nothing is owed
+             end
       return steps if owed.empty?
 
       logged = turn.filter_map { |e| e.payload[:id] if e.type == "tool/call" }
@@ -314,14 +323,6 @@ module Terret
       end
       sessions.append(sid, "step/end", { n: steps })
       steps
-    end
-
-    def last_assistant_tool_calls(msgs)
-      msgs.reverse_each do |m|
-        next if m.role == :tool
-        return m.role == :assistant ? m.tool_calls : []
-      end
-      []
     end
   end
 

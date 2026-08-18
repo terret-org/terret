@@ -91,6 +91,9 @@ Two edges are left visible rather than papered over:
   resumes by making one extra model request — the model sees its own
   prior message in its history and is asked to continue, which in practice
   means wrapping up.
+- A turn that crashed before its first step logged anything closes as
+  `:empty` on resume: the input that triggered it was never durably logged,
+  so there is nothing to recover.
 
 ## Compaction
 

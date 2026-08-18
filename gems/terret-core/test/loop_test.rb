@@ -742,6 +742,40 @@ class ResumeTurnTest < Minitest::Test
     assert_raises(ArgumentError) { ctx[:loop].resume_turn(agent) }
   end
 
+  # Turn 1 ends the moment its tool runs (the handler cancels), so the session's
+  # last assistant message carries a tool call that turn already resolved. Turn 2
+  # then dies with nothing but its turn/start on disk. Owed calls are the OPEN
+  # turn's business only: read across the whole projection, a closed turn's
+  # settled mutation would run a second time off one crash.
+  def test_resume_never_reexecutes_a_previous_turns_resolved_calls
+    ctx, = boot_with_approvals([{ text: "Deploying.", tool_calls: [DEPLOY_CALL] }])
+    runs = 0
+    agent = nil
+    ctx.with_owner("deploy-plugin") do
+      ctx[:tools].register(name: "deploy", description: "Ship it",
+                           params: { env: "string" }, mutating: true) do |env:|
+        runs += 1
+        agent.cancel("user hit stop")
+        "deployed to #{env}"
+      end
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "ship it")
+    assert_equal 1, runs
+
+    ctx[:sessions].append(session.id, "turn/start", { agent: agent.id }) # the crash
+    status = ctx[:loop].resume_turn(agent)
+
+    assert_equal 1, runs, "a call resolved inside a closed turn must never re-execute"
+    assert_equal 1, session.events.count { |e| e.type == "tool/call" && e.payload[:id] == "tc9" }
+    assert_equal 1, session.events.count { |e| e.type == "tool/result" }
+    # nothing was owed and nothing new arrived: the crashed turn closes empty
+    assert_equal :empty, status
+    assert_equal "turn/end", session.events.last.type
+  end
+
   def test_the_invariant_holds_across_a_resume
     ctx, = boot_with_approvals([{ text: "Deployed." }])
     register_deploy(ctx)
