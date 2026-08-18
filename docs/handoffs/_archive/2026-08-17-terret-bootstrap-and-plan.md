@@ -2,7 +2,8 @@
 created: 2026-08-17T23:35:28Z
 branch: main
 trigger: manual
-restored: false
+restored: true
+restored_at: 2026-08-18T00:23:26Z
 topic: terret-bootstrap-and-plan
 ---
 
