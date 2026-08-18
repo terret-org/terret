@@ -112,8 +112,38 @@ class HamesEffectHygieneTest < Minitest::Test
     @ctx.dispose_owner!("me")
     assert_equal 1, calls
   end
+
+  def test_a_disposed_listener_leaves_no_effect_entry
+    Hames.event "tick", mode: :emit
+    seen = []
+    disposer = @ctx.on("tick") { seen << 1 }
+    assert_equal 1, effects_count
+
+    disposer.call
+    @ctx.emit("tick")
+    assert_empty seen, "a disposed listener must not fire"
+    assert_equal 0, effects_count, "a disposed listener must not stay pinned in @effects"
+  end
+
+  def test_a_listener_disposer_is_idempotent_across_owner_disposal
+    Hames.event "tock", mode: :emit
+    disposer = nil
+    @ctx.with_owner("me") { disposer = @ctx.on("tock") { } }
+    disposer.call
+    @ctx.dispose_owner!("me") # must not double-run or raise
+    disposer.call             # nor this
+    assert_equal 0, effects_count
+  end
 end
 ```
+
+Note: `Context#on` records its disposal by pushing a raw frame into `@effects`
+directly, bypassing `effect` — the listener tests above fail until `on` is
+refactored to route through `effect` (build the listener entry, then
+`effect { <insertion>; -> { <removal> } }`, preserving `prepend:` semantics
+and the undeclared-event `ContractError`, returning the wrapped disposer).
+The M4 Codex finding behind this debt was specifically about LISTENER
+disposers, so Task 1 is not done until `on` has the same hygiene.
 
 - [ ] **Step 2: Run and verify failure**
 
