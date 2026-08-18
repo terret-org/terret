@@ -967,11 +967,11 @@ module Terret
       def call_remote(name, entry, remote, call_args, timeout)
         result = with_timeout(timeout) { entry[:client].call_tool(remote, **call_args) }
         error = Translate.result_error(result)
-        raise error if error
+        raise Terret::Tools::Failure, error if error
 
         Translate.result_content(result)
       rescue *transport_errors => e
-        raise "mcp #{name}: #{e.class}: #{e.message}"
+        raise Terret::Tools::Failure, "mcp #{name}: #{e.class}: #{e.message}"
       end
 
       def with_timeout(seconds, &block)
@@ -1002,11 +1002,11 @@ end
 ```
 
 **Design notes for the implementer (do not skip):**
-- Tool errors surface by RAISING inside the handler — `Registry#execute`'s base block already rescues handler exceptions into an error `Result`, so a raise IS the error channel. That is why `call_remote` raises the translated error string.
+- Tool errors surface by RAISING inside the handler — `Registry#execute`'s base block rescues handler exceptions into an error `Result`, so a raise IS the error channel. Domain failures raise `Terret::Tools::Failure` (added in terret-core during this task: rendered message-only by `execute`'s two-tier rescue), while any other exception class keeps its `"#{e.class}: #{e.message}"` rendering — a crash's class is diagnostics, not noise. `call_remote` raises `Terret::Tools::Failure` at both its raise sites.
 - This task includes a one-line core change: `Registry#register` in `gems/terret-core/lib/terret/tools.rb` currently ends with a trailing `d`, discarding the effect's disposer. Delete that trailing `d` so `register` RETURNS the disposer (which Task 1 made self-removing and idempotent), and add a comment line above the method: `# Returns the registration's disposer.` No existing caller uses the old return value (verify with a grep and say so in your report); the service's `sync_tools` relies on the new one.
 - If a test fails against this code, report the analysis; where this sketch conflicts with the real seams, the seams win.
 
-- [ ] **Step 4: Run tests** — service_test green (7 runs), translate_test still green, both full gates green.
+- [ ] **Step 4: Run tests** — service_test green (6 runs), translate_test still green, both full gates green.
 
 - [ ] **Step 5: Commit**
 
@@ -1088,15 +1088,15 @@ In `service.rb`, track poisoning per entry. In `call_remote`, on the timeout pat
         end
         result = with_timeout(timeout) { entry[:client].call_tool(remote, **call_args) }
         error = Translate.result_error(result)
-        raise error if error
+        raise Terret::Tools::Failure, error if error
 
         Translate.result_content(result)
       rescue Async::TimeoutError
         entry[:poisoned] = true
-        raise "mcp timeout after #{timeout}s"
+        raise Terret::Tools::Failure, "mcp timeout after #{timeout}s"
       rescue *transport_errors => e
         entry[:poisoned] = true
-        raise "mcp #{name}: #{e.class}: #{e.message}"
+        raise Terret::Tools::Failure, "mcp #{name}: #{e.class}: #{e.message}"
       end
 ```
 
