@@ -51,6 +51,17 @@ module Terret
         end
       end
 
+      # Reads the resource once and registers its text as a prompt section
+      # (docs/mcp.md); live refresh on resources/updated is deferred until a
+      # consumer needs it. Returns the section's disposer.
+      def register_resource_section(server, uri, name:, priority: 100)
+        entry = @mounted.fetch(server.to_s) { raise ArgumentError, "server #{server.inspect} is not mounted" }
+        body = entry[:client].read_resource(uri).text.to_s
+        @ctx.with_owner("mcp:#{server}") do
+          @ctx[:prompt].register_section(name, priority: priority) { body }
+        end
+      end
+
       private
 
       def mount_one(name)

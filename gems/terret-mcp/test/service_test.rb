@@ -284,4 +284,19 @@ class MCPServiceTest < Minitest::Test
     assert_equal 0, ctx[:tools].schemas.size, "an unmounted server must stay unmounted"
     assert_empty ctx[:mcp].mounted
   end
+
+  def test_a_resource_registers_as_a_prompt_section
+    fake = FakeClient.new(tools: [])
+    def fake.read_resource(uri)
+      Struct.new(:text).new("resource body for #{uri}")
+    end
+    ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+    ctx[:mcp].mount!
+
+    disposer = ctx[:mcp].register_resource_section("s", "doc://guide", name: "guide", priority: 5)
+    assert_includes ctx[:prompt].render, "resource body for doc://guide"
+
+    disposer.call
+    refute_includes ctx[:prompt].render, "resource body"
+  end
 end
