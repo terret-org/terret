@@ -8,6 +8,7 @@ require_relative "../gems/terret-core/lib/terret"
 
 loader = Hames::Loader.new
 loader.layer([
+  { id: "session_store", plugin: Terret::Store::Memory },
   { id: "sessions", plugin: Terret::Sessions },
   { id: "prompt",   plugin: Terret::Prompt },
   { id: "tools",    plugin: Terret::Tools::Registry },

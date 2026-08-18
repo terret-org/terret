@@ -16,23 +16,24 @@ module Terret
   # exactly what replaying the log yields ("model-visible means logged").
   class Sessions < Hames::Service
     service_key :sessions
+    inject :session_store
 
     Session = Struct.new(:id, :events, :parent_id, keyword_init: true)
 
     def start(ctx)
       @ctx = ctx
-      @store = {}
-      @dir = config[:jsonl_dir] # optional persistence
+      @store = ctx[:session_store]
+      @cache = {}
     end
 
     def create(id: SecureRandom.hex(6), parent_id: nil)
       s = Session.new(id:, events: [], parent_id:)
-      @store[id] = s
+      @cache[id] = s
       append(id, "session/created", { parent_id: })
       s
     end
 
-    def fetch(id) = @store.fetch(id)
+    def fetch(id) = @cache.fetch(id)
 
     def append(session_id, type, payload = {})
       decl = Hames.event(type)
@@ -44,7 +45,7 @@ module Terret
         at: Time.now.utc, type: type.to_s, payload: normalize_payload(payload)
       )
       s.events << ev
-      persist(ev)
+      @store.append(ev)
       @ctx.emit("session/event", ev)
       ev
     end
@@ -83,12 +84,20 @@ module Terret
     def fork(source_id, boundary: nil, child_id: SecureRandom.hex(6))
       src = fetch(source_id)
       child = Session.new(id: child_id, events: [], parent_id: source_id)
-      @store[child_id] = child
+      @cache[child_id] = child
       events = boundary ? src.events.take(boundary) : src.events.dup
-      events.each { |ev| child.events << ev.with(session_id: child_id) }
+      events.each do |ev|
+        copy = ev.with(session_id: child_id)
+        child.events << copy
+        @store.append(copy)
+      end
       append(child_id, "session/forked", { from: source_id, boundary: boundary })
       child
     end
+
+    def read(session_id, from_seq: 0) = @store.read(session_id, from_seq: from_seq)
+
+    def session_ids = @store.session_ids
 
     private
 
@@ -123,15 +132,6 @@ module Terret
 
     def digest(messages)
       Digest::SHA256.hexdigest(messages.map(&:inspect).join("\x1e"))
-    end
-
-    def persist(ev)
-      return unless @dir
-
-      File.open(File.join(@dir, "#{ev.session_id}.jsonl"), "a") do |f|
-        f.puts JSON.generate(type: ev.type, seq: ev.seq, at: ev.at.iso8601,
-                             payload: ev.payload.inspect)
-      end
     end
   end
 end

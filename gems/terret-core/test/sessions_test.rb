@@ -9,7 +9,10 @@ class SessionsPrimitivesTest < Minitest::Test
     Hames.reset_events!
     Terret.declare_events!
     loader = Hames::Loader.new
-    loader.layer([{ id: "sessions", plugin: Terret::Sessions }])
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions }
+    ])
     loader.boot!
   end
 

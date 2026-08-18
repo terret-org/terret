@@ -344,6 +344,7 @@ class PluginTest < Minitest::Test
     Terret.declare_events!
     loader = Hames::Loader.new
     loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
       { id: "sessions", plugin: Terret::Sessions },
       { id: "prompt",   plugin: Terret::Prompt },
       { id: "tools",    plugin: Terret::Tools::Registry },
@@ -483,6 +484,7 @@ class LiveSmokeTest < Minitest::Test
     Terret.declare_events!
     loader = Hames::Loader.new
     loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
       { id: "sessions", plugin: Terret::Sessions },
       { id: "prompt",   plugin: Terret::Prompt },
       { id: "tools",    plugin: Terret::Tools::Registry },
