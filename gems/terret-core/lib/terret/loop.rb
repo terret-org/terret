@@ -16,6 +16,8 @@ module Terret
       @ctx = ctx           # a forked, agent-scoped context
       @inbox = []          # injected context waits here until a waking message
       @status = :idle
+      @cancelled = false
+      @cancel_reason = nil
     end
 
     def inject(text)
@@ -29,6 +31,25 @@ module Terret
     # Steers drained for a step that never happened go back to the front of
     # the queue, so a rejected claim cannot silently eat an inject.
     def requeue(items) = @inbox.unshift(*items)
+
+    attr_reader :cancel_reason
+
+    # Cooperative stop: the loop honors it at step boundaries. Mid-stream
+    # abort arrives with the async task-tree work (plan §8); until then this
+    # is the honest synchronous form. A cancel is per-turn and best-effort:
+    # if the turn rejects, fails, or completes before a boundary honors it,
+    # the cancel dies with that turn rather than haunting the next one.
+    def cancel(reason = nil)
+      @cancel_reason = reason
+      @cancelled = true
+    end
+
+    def cancelled? = !!@cancelled
+
+    def clear_cancel!
+      @cancelled = false
+      @cancel_reason = nil
+    end
   end
 
   # ctx.loop — the default driver. A step is one model request plus the tool
@@ -68,6 +89,11 @@ module Terret
 
       begin
         loop do
+          if agent.cancelled?
+            status = :cancelled
+            break
+          end
+
           # anything injected since the last step rides along with this one
           steered = agent.drain_inbox
           pending.concat(steered)
@@ -122,6 +148,12 @@ module Terret
                             { id: result.id, content: result.content, error: result.error })
           end
           sessions.append(sid, "step/end", step_end)
+          # redundant under the sync driver (the next iteration's top check
+          # would catch it); becomes load-bearing once tools can yield (§8)
+          if agent.cancelled?
+            status = :cancelled
+            break
+          end
           # tools owe another request -> next step
         end
       rescue Exception
@@ -129,7 +161,10 @@ module Terret
         raise
       ensure
         ctx.serial("agent/turn_stopping", agent)
-        sessions.append(sid, "turn/end", { status: status })
+        payload = { status: status }
+        payload[:reason] = agent.cancel_reason if status == :cancelled && agent.cancel_reason
+        sessions.append(sid, "turn/end", payload)
+        agent.clear_cancel!
         agent.status = :idle
       end
       status

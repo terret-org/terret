@@ -211,6 +211,57 @@ class TurnFlowTest < Minitest::Test
     assert agent.inbox_empty?
   end
 
+  def test_cancel_during_a_tool_records_the_result_then_closes_the_turn
+    ctx, = boot(script: two_step_script)
+    agent = nil
+    ctx.with_owner("cancelling-tool") do
+      ctx[:tools].register(name: "weather", description: "Weather lookup",
+                           params: { city: "string" }) do |city:|
+        agent.cancel("user hit stop") # deterministic stand-in for a racing cancel frame
+        "22C in #{city}"
+      end
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "What's the weather in CDMX?")
+
+    chunkless = session.events.map(&:type).reject { |t| t == "assistant/chunk" }
+    assert_equal %w[
+      session/created
+      turn/start
+      step/start user/message assistant/message
+      tool/call tool/result step/end
+      turn/end
+    ], chunkless
+
+    turn_end = session.events.last
+    assert_equal "cancelled", turn_end.payload[:status]
+    assert_equal "user hit stop", turn_end.payload[:reason]
+    assert_equal :idle, agent.status
+    refute agent.cancelled? # the flag does not leak into the next turn
+  end
+
+  def test_cancel_set_before_the_turn_closes_it_with_no_step
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, session = spawn(ctx)
+    agent.cancel(nil)
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "hello?")
+    assert_equal %w[session/created turn/start turn/end], session.events.map(&:type)
+    assert_nil session.events.last.payload[:reason]
+  end
+
+  def test_a_cancelled_turn_leaves_queued_steers_for_the_next_turn
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, = spawn(ctx)
+    agent.cancel(nil)
+    agent.inject("still relevant later")
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "hello?")
+    refute agent.inbox_empty?, "a cancelled turn must not consume the inbox"
+  end
+
   def test_a_rejected_claim_requeues_the_drained_steer_for_the_next_turn
     ctx, = boot(script: [{ text: "ok" }])
     reject_once = true
