@@ -76,6 +76,13 @@ no gap and no duplicate — exact, not best-effort, because seq is gapless and
 the log is append-only. Subscribing again replaces the previous subscription
 (the tail is re-established from the new `from_seq`).
 
+Resubscribing mid-stream replaces the subscription server-side, but frames
+from the replaced subscription that were already queued or in flight may
+still arrive before the new replay's first event — that is inherent to a
+full-duplex transport, not a server defect. A client that resubscribes
+mid-stream should discard incoming events until it sees `seq == from_seq`
+(the first event of its new replay).
+
 ### inject
 
 `wake: true` on an idle agent starts a turn with `text` as its input. On a

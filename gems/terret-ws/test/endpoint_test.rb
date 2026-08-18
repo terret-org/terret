@@ -103,4 +103,48 @@ class EndpointTest < Minitest::Test
       server.stop
     end
   end
+
+  def test_a_binary_frame_gets_bad_frame_and_the_connection_survives
+    ctx = boot(script: [{ text: "hi" }], tokens: { "s1" => "secret" })
+    port = free_port
+
+    Sync do |task|
+      server = task.async { ctx[:ws].serve(port: port) }
+      sleep 0.2
+
+      endpoint = Async::HTTP::Endpoint.parse("http://127.0.0.1:#{port}/agents/s1/ws")
+      frames = []
+      Async::WebSocket::Client.connect(endpoint,
+                                       headers: [["authorization", "Bearer secret"]]) do |conn|
+        # The wire contract is JSON text frames only -- a binary frame with
+        # otherwise-valid JSON payload must still be rejected as bad_frame.
+        conn.send_binary(JSON.generate(type: "subscribe", from_seq: 0))
+        frames << JSON.parse(conn.read.to_str, symbolize_names: true) # hello
+        frames << JSON.parse(conn.read.to_str, symbolize_names: true) # bad_frame
+
+        # the connection must still work normally afterward
+        conn.write(JSON.generate(type: "subscribe", from_seq: 0))
+        conn.write(JSON.generate(type: "inject", text: "hi", wake: true))
+        while (msg = conn.read)
+          frame = JSON.parse(msg.to_str, symbolize_names: true)
+          frames << frame
+          break if frame[:type] == "turn/end"
+        end
+      end
+
+      assert_equal "hello", frames[0][:type]
+      assert_equal "error", frames[1][:type]
+      assert_equal "bad_frame", frames[1][:code]
+
+      chunkless = frames.select { |f| f.key?(:seq) }.map { |f| f[:type] }
+                        .reject { |t| t == "assistant/chunk" }
+      assert_equal %w[
+        session/created
+        turn/start
+        step/start user/message assistant/message step/end
+        turn/end
+      ], chunkless
+      server.stop
+    end
+  end
 end

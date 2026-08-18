@@ -63,7 +63,14 @@ module Terret
         def initialize(ws) = @ws = ws
 
         def read
-          @ws.read&.to_str
+          message = @ws.read
+          return nil if message.nil?
+          # The wire contract is JSON text frames only (docs/protocol.md). A
+          # binary frame degrades to an invalid frame so the client gets a
+          # bad_frame answer instead of being silently interpreted as text.
+          return "\x00" unless message.is_a?(Protocol::WebSocket::TextMessage)
+
+          message.to_str
         rescue EOFError, Errno::ECONNRESET, Protocol::WebSocket::ClosedError
           nil
         end
