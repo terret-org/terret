@@ -23,6 +23,12 @@ module Terret
     end
 
     def drain_inbox = @inbox.slice!(0..)
+
+    def inbox_empty? = @inbox.empty?
+
+    # Steers drained for a step that never happened go back to the front of
+    # the queue, so a rejected claim cannot silently eat an inject.
+    def requeue(items) = @inbox.unshift(*items)
   end
 
   # ctx.loop — the default driver. A step is one model request plus the tool
@@ -58,15 +64,19 @@ module Terret
       status = :completed
       steps = 0
 
-      # claim next-step input plus anything waiting in the inbox
-      pending = [input, *agent.drain_inbox].compact
+      pending = [input].compact
 
       begin
         loop do
+          # anything injected since the last step rides along with this one
+          steered = agent.drain_inbox
+          pending.concat(steered)
+
           claim = ctx.waterfall("agent/pre_step", Claim.of(pending)) { |c| c }
           if claim.rejected || (steps.zero? && claim.messages.empty? && pending.empty?)
             # a rejected or empty first claim still closes a durable turn that
             # spent no step, so the log records the attempt
+            agent.requeue(steered) if claim.rejected
             status = claim.rejected ? :rejected : :empty
             break
           end

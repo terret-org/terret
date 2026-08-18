@@ -181,6 +181,61 @@ class TurnFlowTest < Minitest::Test
                  user_events.map { |e| e.payload[:text] }
   end
 
+  def test_a_mid_turn_inject_lands_in_the_next_step
+    ctx, = boot(script: two_step_script)
+    agent = nil
+    ctx.with_owner("steering-tool") do
+      ctx[:tools].register(name: "weather", description: "Weather lookup",
+                           params: { city: "string" }) do |city:|
+        agent.inject("actually, celsius please")
+        "22C in #{city}"
+      end
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "What's the weather in CDMX?")
+
+    chunkless = session.events.map(&:type).reject { |t| t == "assistant/chunk" }
+    assert_equal %w[
+      session/created
+      turn/start
+      step/start user/message assistant/message
+      tool/call tool/result step/end
+      step/start user/message assistant/message step/end
+      turn/end
+    ], chunkless
+
+    steer = session.events.select { |e| e.type == "user/message" }.last
+    assert_equal "actually, celsius please", steer.payload[:text]
+    assert agent.inbox_empty?
+  end
+
+  def test_a_rejected_claim_requeues_the_drained_steer_for_the_next_turn
+    ctx, = boot(script: [{ text: "ok" }])
+    reject_once = true
+    ctx.with_owner("budget-guard") do
+      ctx.on("agent/pre_step") do |claim, next_|
+        if reject_once
+          reject_once = false
+          Terret::Claim.reject(reason: "over budget")
+        else
+          next_.(claim)
+        end
+      end
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    agent.inject("remember the umbrella")
+
+    assert_equal :rejected, ctx[:loop].run_turn(agent, "weather?")
+    refute agent.inbox_empty?, "a rejected claim must not eat the steer"
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "second try")
+    texts = session.events.select { |e| e.type == "user/message" }.map { |e| e.payload[:text] }
+    assert_equal ["second try", "remember the umbrella"], texts
+  end
+
   def test_usage_reported_by_the_adapter_lands_in_the_step_end_payload
     ctx, = boot(script: [{ text: "hi", usage: { prompt_tokens: 12, completion_tokens: 3, cost: 0.0001 } }])
     agent, session = spawn(ctx)
