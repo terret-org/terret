@@ -18,7 +18,11 @@ module Hames
     #   Hames.event "tools/pre_execute", mode: :waterfall, payload: Tools::Call
     def event(name, mode: nil, durable: false, payload: nil, doc: nil)
       name = name.to_s
-      return events.fetch(name) if mode.nil?
+      if mode.nil?
+        return events.fetch(name) do
+          raise Hames::ContractError, "lookup of undeclared event #{name}"
+        end
+      end
 
       raise ArgumentError, "unknown dispatch mode #{mode.inspect}" unless MODES.include?(mode)
       if (existing = events[name]) && existing.mode != mode

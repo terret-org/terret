@@ -5,15 +5,21 @@ module Hames
   # responds to apply(ctx) (the functional form), with optional #inject.
   class Service
     class << self
+      # Both class-level declarations are inherited: a subclass (a test
+      # double, a provider variant) mounts exactly like its parent unless it
+      # redeclares. inject accumulates down the chain; service_key overrides.
       def service_key(key = nil)
         @service_key = key.to_sym if key
-        @service_key
+        return @service_key if @service_key
+
+        superclass <= Hames::Service ? superclass.service_key : nil
       end
 
       def inject(*keys)
         @inject ||= []
         @inject.concat(keys.map(&:to_sym)) unless keys.empty?
-        @inject
+        inherited = superclass <= Hames::Service ? superclass.inject : []
+        inherited + @inject
       end
     end
 

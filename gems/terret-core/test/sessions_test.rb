@@ -6,8 +6,6 @@ require_relative "../lib/terret"
 
 class SessionsPrimitivesTest < Minitest::Test
   class ExplodingStore < Terret::Store::Memory
-    service_key :session_store
-
     def append(event)
       raise IOError, "disk full" if event.payload[:text] == "boom"
 

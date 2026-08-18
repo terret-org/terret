@@ -77,6 +77,11 @@ class HamesEventsTest < Minitest::Test
     @ctx.parallel("fan")
     assert_equal %i[a b], hits.sort
   end
+
+  def test_lookup_of_an_undeclared_event_raises_contract_error_naming_it
+    err = assert_raises(Hames::ContractError) { Hames.event("nope/nothing") }
+    assert_match %r{nope/nothing}, err.message
+  end
 end
 
 class HamesEffectsAndForkTest < Minitest::Test
@@ -190,5 +195,52 @@ class HamesLoaderTest < Minitest::Test
     assert ctx.service?(:store)
     loader.unload!("store")
     refute ctx.service?(:store)
+  end
+end
+
+class HamesServiceInheritanceTest < Minitest::Test
+  def test_service_key_and_inject_are_inherited_by_subclasses
+    parent = Class.new(Hames::Service) do
+      service_key :thing
+      inject :dep
+    end
+    child = Class.new(parent)
+
+    assert_equal :thing, child.service_key
+    assert_equal [:dep], child.inject
+  end
+
+  def test_subclass_declarations_extend_rather_than_shadow
+    parent = Class.new(Hames::Service) do
+      service_key :thing
+      inject :dep
+    end
+    child = Class.new(parent) do
+      service_key :other
+      inject :dep2
+    end
+
+    assert_equal :other, child.service_key
+    assert_equal %i[dep dep2], child.inject
+    # the parent is untouched
+    assert_equal :thing, parent.service_key
+    assert_equal [:dep], parent.inject
+  end
+
+  def test_the_base_service_class_has_no_key_and_no_deps
+    assert_nil Hames::Service.service_key
+    assert_equal [], Hames::Service.inject
+  end
+
+  def test_inheritance_walks_the_whole_chain_not_one_level
+    parent = Class.new(Hames::Service) do
+      service_key :thing
+      inject :dep
+    end
+    child = Class.new(parent) { inject :dep2 }
+    grandchild = Class.new(child)
+
+    assert_equal :thing, grandchild.service_key
+    assert_equal %i[dep dep2], grandchild.inject
   end
 end
