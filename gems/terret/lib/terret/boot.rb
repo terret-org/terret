@@ -7,10 +7,11 @@
 # makes for terret-core.
 gems_root = File.expand_path("../../..", __dir__)
 if File.directory?(File.join(gems_root, "terret-core", "lib"))
-  Dir.children(gems_root).sort.each do |gem_dir|
-    lib = File.join(gems_root, gem_dir, "lib")
-    $LOAD_PATH.unshift(lib) if File.directory?(lib) && !$LOAD_PATH.include?(lib)
-  end
+  # One unshift, so the sibling libs keep the order they are listed in rather
+  # than the reverse of it.
+  $LOAD_PATH.unshift(*Dir.children(gems_root).sort
+                        .map { |gem_dir| File.join(gems_root, gem_dir, "lib") }
+                        .select { |lib| File.directory?(lib) && !$LOAD_PATH.include?(lib) })
 end
 
 require "terret"

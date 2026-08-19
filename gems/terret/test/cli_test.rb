@@ -125,6 +125,23 @@ class CLITest < Minitest::Test
     assert_match(/- id: approvals.*\n.*plugin: Terret::Tools::Approvals\n\s+disabled: true/, out)
   end
 
+  # The swap that turns the sandbox off is the most consequential edit the
+  # format allows. Attributing it to the bundle that shipped the row would be
+  # the one piece of provenance nobody could afford to have wrong.
+  def test_dump_config_names_the_layer_that_swapped_a_plugin
+    profile_patch(demo_profile, "rows:\n  - id: sandbox\n    plugin: Terret::Exec::SandboxNone\n")
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    assert_match(%r{plugin: Terret::Exec::SandboxNone\s+# plugin: profiles/demo/patch\.yml}, out)
+    refute_match(/plugin: Terret::Sandbox::Docker\s+# plugin:/, out,
+                 "an unswapped row should not carry a plugin annotation at all")
+  end
+
+  def test_dump_config_renders_an_empty_list_as_a_list
+    profile_patch(demo_profile, "rows:\n  - id: fs\n    config: { workspace: [] }\n")
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    assert_includes out, "workspace: []"
+  end
+
   def test_dump_config_output_reparses_as_yaml_once_the_tags_are_declared
     _status, out, = run_cli("dump-config", "--profile", demo_profile)
     reparsed = Terret::Composition::Visitor.load(out, label: "dump")

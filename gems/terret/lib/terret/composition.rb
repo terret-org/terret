@@ -15,6 +15,41 @@ module Terret
     # The three tags that make config dynamic without making it code (§5).
     TAGS = %w[env setting ruby].freeze
 
+    # YAML's own types, which Psych's restricted schema handles safely and
+    # which a config is welcome to use. Anything outside these lists and TAGS
+    # is refused by name — including the ruby/* family, which the restricted
+    # class loader would also refuse, but later and less clearly.
+    #
+    # Split by node kind because Psych ignores a core tag that does not suit
+    # the node it is on (`!!map hello` is the string "hello") or dies inside
+    # its own schema handler (`!!str` on a mapping). Both are the silent drop
+    # this reader exists to refuse, one type system down.
+    CORE_SCALAR_TAGS = %w[null bool int float str binary].freeze
+    CORE_COLLECTION_TAGS = %w[map seq].freeze
+    CORE_TAGS = (CORE_SCALAR_TAGS + CORE_COLLECTION_TAGS).freeze
+
+    YAML_SCHEMA = "tag:yaml.org,2002:"
+
+    # One tag, four spellings. `!env`, `!!env`, `!<tag:yaml.org,2002:env>` and a
+    # `%TAG ! !!` directive over a plain `!env` all reach the visitor as
+    # different strings, and a reader that only recognises the first drops the
+    # other three on the floor — which is the silent-drop this whole visitor
+    # exists to prevent, reintroduced one spelling down. So every non-nil tag
+    # gets classified, and nothing falls through unclassified.
+    #
+    #   nil                -> untagged
+    #   [:local, "env"]    -> !env
+    #   [:core, "str"]     -> !!str, tag:yaml.org,2002:str
+    #   [:foreign, raw]    -> anything else, including bare "x-private:env"
+    def self.tag_kind(raw)
+      return nil if raw.nil?
+      return [:core, raw.delete_prefix(YAML_SCHEMA)] if raw.start_with?(YAML_SCHEMA)
+      return [:core, raw.delete_prefix("!!")] if raw.start_with?("!!")
+      return [:local, raw.delete_prefix("!")] if raw.start_with?("!")
+
+      [:foreign, raw]
+    end
+
     # A tag left standing. Resolution keeps these unevaluated so dump-config
     # can print `!env OPENROUTER_API_KEY` as written — the resolved value never
     # appears in that output at all. Boot materializes them; nothing else does.
@@ -25,13 +60,26 @@ module Terret
     # One resolved row plus the layers that answer for it. Provenance is per
     # row rather than per key, and that falls straight out of wholesale config
     # replacement: exactly one layer is responsible for what a service receives.
-    Row = Data.define(:id, :plugin, :config, :disabled, :row_layer, :config_layer)
+    #
+    # plugin_layer is tracked separately from config_layer because a patch may
+    # swap plugin: without touching config:, and that swap is the single most
+    # consequential edit the format allows — it is how the sandbox gets turned
+    # off. Attributing it to the bundle that shipped the row would hide it.
+    Row = Data.define(:id, :plugin, :config, :disabled, :row_layer, :plugin_layer, :config_layer)
 
     # A gem's config/bundle.yml, parsed. `requires` is this implementation's
     # answer to §2's "it has to make that code available": Bundler puts the
     # dependency on the load path, and these are the files that pull it in
     # before a row's constant has to resolve.
-    Bundle = Data.define(:name, :gem_name, :path, :requires, :rows)
+    #
+    # `error` is set instead of raising when discovery cannot parse the file:
+    # one third-party gem shipping a broken bundle must not break every profile
+    # on the machine, only the profiles that name it.
+    Bundle = Data.define(:name, :gem_name, :path, :requires, :rows, :error) do
+      def self.broken(gem_name:, path:, error:)
+        new(name: gem_name, gem_name: gem_name, path: path, requires: [], rows: [], error: error)
+      end
+    end
 
     Resolved = Data.define(:profile, :home, :rows, :settings, :plugins, :requires) do
       # Rows in the shape Hames::Loader#layer wants, tags evaluated. `plugin`
@@ -43,7 +91,8 @@ module Terret
         rows.map do |r|
           { id: r.id, plugin: r.plugin, disabled: r.disabled,
             config: Composition.materialize(r.config, settings: values,
-                                                      allow_config_ruby: allow_config_ruby) }
+                                                      allow_config_ruby: allow_config_ruby,
+                                                      where: "row #{r.id.inspect} (config from #{r.config_layer})") }
         end
       end
 
@@ -63,11 +112,23 @@ module Terret
     # intercepted before Psych can drop them. YAML.load appears nowhere.
     class Visitor < Psych::Visitors::ToRuby
       def self.load(text, label:)
-        node = Psych.parse(text)
-        return nil unless node
+        stream = Psych.parse_stream(text)
+        docs = stream.children
+        if docs.length > 1
+          raise Error, "#{label}: #{docs.length} YAML documents; a Terret config is one " \
+                       "document, and the rest would be dropped without saying so"
+        end
+        return nil if docs.empty?
 
-        new(label).accept(node)
-      rescue Psych::Exception => e
+        value = new(label).accept(docs.first)
+        Composition.assert_acyclic!(value, label)
+        value
+      rescue Error
+        raise
+      rescue StandardError => e
+        # Psych's own exceptions, and the ArgumentError/FrozenError/NoMethodError
+        # its schema handlers raise on input they cannot honour. Whatever it is,
+        # the operator needs the file name more than the class.
         raise Error, "#{label}: #{e.class}: #{e.message}"
       end
 
@@ -77,48 +138,72 @@ module Terret
         @label = label
       end
 
-      def visit_Psych_Nodes_Scalar(node) # rubocop:disable Naming/MethodName
-        tag = local_tag(node) or return super
+      def visit_Psych_Nodes_Scalar(node)
+        tag = terret_tag(node, CORE_SCALAR_TAGS) or return super
 
         register(node, Tagged.new(tag: tag, argument: node.value))
       end
 
-      # A collection carrying a local tag is refused rather than silently
+      # A collection carrying one of our tags is refused rather than silently
       # dropped, which is what the parent visitor does with one.
-      def visit_Psych_Nodes_Mapping(node) # rubocop:disable Naming/MethodName
+      def visit_Psych_Nodes_Mapping(node)
         refuse_collection_tag!(node)
         super
       end
 
-      def visit_Psych_Nodes_Sequence(node) # rubocop:disable Naming/MethodName
+      def visit_Psych_Nodes_Sequence(node)
         refuse_collection_tag!(node)
         super
       end
 
       private
 
-      # nil for "no tag of ours here, let Psych's safe schema have it"; the tag
-      # name for one of ours; an exception for anything else, including
-      # !ruby/object:Foo, which is refused by name before the class loader
-      # would have refused it by class.
-      def local_tag(node)
-        raw = node.tag
-        return nil if raw.nil? || !raw.start_with?("!") || raw.start_with?("!!")
+      # nil for "not ours, and safe to hand to Psych's schema"; the tag name for
+      # one of ours; an exception for everything else.
+      def terret_tag(node, core_allowed)
+        kind, name = Composition.tag_kind(node.tag)
+        return nil if kind.nil?
+        return name if kind == :local && TAGS.include?(name)
+        return nil if kind == :core && core_allowed.include?(name)
 
-        name = raw.delete_prefix("!")
-        return name if TAGS.include?(name)
-
-        raise Error, "#{@label}: unknown config tag !#{name}; a Terret config " \
-                     "may only use !env, !setting and !ruby"
+        raise Error, refusal(name, node.tag, core_allowed)
       end
 
       def refuse_collection_tag!(node)
-        raw = node.tag
-        return if raw.nil? || !raw.start_with?("!") || raw.start_with?("!!")
+        name = terret_tag(node, CORE_COLLECTION_TAGS) or return
 
-        name = raw.delete_prefix("!")
-        raise Error, "#{@label}: #{TAGS.include?(name) ? "!#{name} tags a scalar, not a collection" : "unknown config tag !#{name}"}"
+        raise Error, "#{@label}: !#{name} tags a scalar, not a collection"
       end
+
+      def refusal(name, raw, core_allowed)
+        hint =
+          if TAGS.include?(name) then " — !#{name} is the tag you want, and #{raw} is a different one"
+          elsif CORE_TAGS.include?(name) then " — !!#{name} does not describe this kind of node"
+          else ""
+          end
+        "#{@label}: unknown config tag #{raw}#{hint}. Here a Terret config may use " \
+          "!env, !setting and !ruby, and YAML's own #{core_allowed.join('/')}."
+      end
+    end
+
+    # An alias can point at a node that contains it, and Psych builds the
+    # self-referential Hash without complaint. Everything downstream walks the
+    # structure, so the first walk would be the last thing the process did.
+    #
+    # `path` is the ancestor chain, which is what makes this a cycle check
+    # rather than a sharing check — the same anchor twice as siblings is
+    # legitimate YAML. `cleared` is what keeps it linear: without it, an alias
+    # graph is walked once per PATH, and a two-dozen-line file whose aliases
+    # each reference the previous one twice has 2^24 paths through 24 nodes.
+    def self.assert_acyclic!(value, label, path = [], cleared = {}.compare_by_identity)
+      return unless value.is_a?(Hash) || value.is_a?(Array)
+      return if cleared.key?(value)
+      raise Error, "#{label}: an alias cycle — a node that contains itself" if path.any? { |seen| seen.equal?(value) }
+
+      path.push(value)
+      (value.is_a?(Hash) ? value.values : value).each { |child| assert_acyclic!(child, label, path, cleared) }
+      path.pop
+      cleared[value] = true
     end
 
     def self.parse_file(path, label: nil)
@@ -128,14 +213,36 @@ module Terret
       Visitor.load(File.read(path), label: label) || {}
     end
 
+    # Every file that carries rows carries them the same way. A patch that is a
+    # bare list looks reasonable and is not: `rows:` is what distinguishes a
+    # patch from the bundle format, which does accept one.
+    def self.rows_in(doc, label)
+      return [] if doc.nil?
+      raise Error, "#{label}: expected a mapping with a rows: list, got #{doc.class}" unless doc.is_a?(Hash)
+
+      rows = doc[:rows]
+      return [] if rows.nil?
+      raise Error, "#{label}: rows: must be a list, got #{rows.class}" unless rows.is_a?(Array)
+
+      rows
+    end
+
     # -- materialization -------------------------------------------------------
 
-    # Walks a resolved structure and evaluates the tags left standing.
-    def self.materialize(value, settings:, allow_config_ruby:)
+    # Walks a resolved structure and evaluates the tags left standing. `where`
+    # is the row and layer this value came from: a refusal that cannot say
+    # which of thirty rows it is about is a refusal an operator cannot act on,
+    # and the !ruby refusal in particular is a consent prompt.
+    def self.materialize(value, settings:, allow_config_ruby:, where: nil)
       case value
-      when Tagged then resolve_tag(value, settings: settings, allow_config_ruby: allow_config_ruby)
-      when Hash   then value.to_h { |k, v| [k, materialize(v, settings:, allow_config_ruby:)] }
-      when Array  then value.map { |v| materialize(v, settings:, allow_config_ruby:) }
+      when Tagged then resolve_tag(value, settings:, allow_config_ruby:, where:)
+      when Hash
+        value.to_h do |k, v|
+          raise Error, "#{where}: #{k} is a tag in key position, which is never resolved" if k.is_a?(Tagged)
+
+          [k, materialize(v, settings:, allow_config_ruby:, where:)]
+        end
+      when Array then value.map { |v| materialize(v, settings:, allow_config_ruby:, where:) }
       else value
       end
     end
@@ -144,41 +251,53 @@ module Terret
     # fair game inside it, but a !setting there would be reaching into the map
     # it is part of, so it is refused rather than half-defined.
     def self.materialize_settings(settings, allow_config_ruby:)
-      materialize(settings, settings: nil, allow_config_ruby: allow_config_ruby)
+      raise Error, "a profile's settings: must be a mapping, got #{settings.class}" unless settings.is_a?(Hash)
+
+      materialize(settings, settings: nil, allow_config_ruby: allow_config_ruby,
+                            where: "the profile's settings")
     end
 
-    def self.resolve_tag(tagged, settings:, allow_config_ruby:)
+    def self.resolve_tag(tagged, settings:, allow_config_ruby:, where: nil)
       case tagged.tag
-      when "env" then ENV[tagged.argument]
-      when "setting" then dig_setting(settings, tagged.argument)
-      when "ruby" then eval_ruby(tagged.argument, allow_config_ruby)
+      when "env" then read_env(tagged.argument, where)
+      when "setting" then dig_setting(settings, tagged.argument, where)
+      when "ruby" then eval_ruby(tagged.argument, allow_config_ruby, where)
       end
+    end
+
+    # nil rather than raising when unset, because "no key configured" is a
+    # state a service should be allowed to have an opinion about. A name the OS
+    # will not accept at all is a different thing and says so.
+    def self.read_env(name, where)
+      ENV[name]
+    rescue StandardError => e
+      raise Error, "#{where}: !env #{name.inspect}: #{e.message}"
     end
 
     # The asymmetry with !env is intentional (§5): an unset environment
     # variable is an ordinary deployment state, while a !setting pointing at
     # nothing is a typo in a file the profile author controls.
-    def self.dig_setting(settings, path)
-      raise Error, "!setting #{path} may not appear inside a profile's own settings:" if settings.nil?
+    def self.dig_setting(settings, path, where)
+      raise Error, "#{where}: !setting #{path} may not appear inside a profile's own settings:" if settings.nil?
 
       keys = path.to_s.split(".").map(&:to_sym)
-      raise Error, "!setting with an empty path" if keys.empty?
+      raise Error, "#{where}: !setting with an empty path" if keys.empty?
 
-      node = settings
-      keys.each do |k|
-        raise Error, "!setting #{path} resolves to nothing in the profile's settings" unless node.is_a?(Hash) && node.key?(k)
+      keys.reduce(settings) do |node, key|
+        unless node.is_a?(Hash) && node.key?(key)
+          raise Error, "#{where}: !setting #{path} resolves to nothing in the profile's settings"
+        end
 
-        node = node[k]
+        node[key]
       end
-      node
     end
 
     # Config that can execute arbitrary Ruby is code with a YAML extension, so
     # the flag is the consent. A clean binding, because a profile downloaded
     # from anywhere should not be reading this method's locals either.
-    def self.eval_ruby(source, allow_config_ruby)
+    def self.eval_ruby(source, allow_config_ruby, where)
       unless allow_config_ruby
-        raise Error, "!ruby #{source} is refused; pass allow_config_ruby: true " \
+        raise Error, "#{where}: !ruby #{source} is refused; pass allow_config_ruby: true " \
                      "(trt --allow-config-ruby) to let this profile run Ruby"
       end
 
@@ -195,7 +314,7 @@ module Terret
       raise Error, "#{gem_name}: #{path} must be a list of rows or a mapping with rows:" unless doc.is_a?(Hash)
 
       Bundle.new(name: (doc[:name] || gem_name).to_s, gem_name: gem_name, path: path,
-                 requires: Array(doc[:requires]).map(&:to_s), rows: Array(doc[:rows]))
+                 requires: Array(doc[:requires]).map(&:to_s), rows: rows_in(doc, gem_name), error: nil)
     end
 
     # Discovery scans loaded gemspecs for the metadata key and parses the
@@ -210,10 +329,26 @@ module Terret
       own = File.expand_path("../../config/bundle.yml", __dir__)
       found["terret"] = load_bundle(own, gem_name: "terret") if File.file?(own)
 
+      # Everything about a third-party gem is quarantined to that gem. A
+      # malformed bundle, an unreadable file, a metadata value of the wrong
+      # shape: each becomes a broken entry that only the profiles naming it
+      # ever see. One bad gem in the Gemfile must not take out every profile
+      # on the machine, which is the whole reason discovery does not raise.
       specs.each do |spec|
-        rel = bundle_metadata(spec) or next
-        file = File.expand_path(rel, spec.full_gem_path)
-        found[spec.name] = load_bundle(file, gem_name: spec.name) if File.file?(file)
+        file = nil
+        found[spec.name] = begin
+          rel = bundle_metadata(spec)
+          next unless rel.is_a?(String)
+
+          root = File.expand_path(spec.full_gem_path.to_s)
+          file = File.expand_path(rel, root)
+          # A gem describes its own bundle, not somebody else's file.
+          next unless file.start_with?("#{root}/") && File.file?(file)
+
+          load_bundle(file, gem_name: spec.name)
+        rescue StandardError => e
+          Bundle.broken(gem_name: spec.name, path: file || "(unresolved)", error: e)
+        end
       end
       found
     end
@@ -224,7 +359,12 @@ module Terret
     # path on its own, and the documented nested form is still accepted, both
     # as a real Hash (an in-memory spec) and as YAML in the string.
     def self.bundle_metadata(spec)
-      meta = spec.metadata["terret"]
+      meta = begin
+        spec.metadata["terret"]
+      rescue StandardError
+        nil # an unreadable gemspec is not a bundle; it is also not our problem
+      end
+
       case meta
       when Hash then meta["bundle"] || meta[:bundle]
       when String
@@ -235,8 +375,6 @@ module Terret
         end
         parsed.is_a?(Hash) ? parsed["bundle"] : meta
       end
-    rescue StandardError
-      nil
     end
 
     # -- resolution ------------------------------------------------------------
@@ -249,16 +387,27 @@ module Terret
       spec = load_profile(home, profile)
       catalog = bundles || discover_bundles
 
-      layers = []
-      requires = []
-      Array(spec[:bundles]).map(&:to_s).each do |name|
-        bundle = catalog[name] or raise Error, unknown_bundle_message(profile, name, catalog)
-        layers << [bundle.name, :bundle, bundle.rows]
-        requires.concat(bundle.requires)
+      named = Array(spec[:bundles]).map(&:to_s)
+      if (dupes = named.tally.select { |_, n| n > 1 }.keys).any?
+        raise Error, "profile #{profile.to_s.inspect} lists #{dupes.join(', ')} more than once; " \
+                     "a bundle is layered where it is named, and twice is not twice as much"
       end
 
-      patch_files(home, profile, spec, patches).each do |file, label|
-        layers << [label, :patch, Array(parse_file(file, label: label)[:rows])]
+      stacked = named.map do |name|
+        bundle = catalog[name] or raise Error, unknown_bundle_message(profile, name, catalog)
+        if bundle.error
+          raise Error, "profile #{profile.to_s.inspect} names #{name}, whose #{bundle.path} " \
+                       "could not be read: #{bundle.error.message}"
+        end
+
+        bundle
+      end
+
+      layers = stacked.map { |b| [bundle_label(b, stacked), :bundle, b.rows] }
+      requires = stacked.flat_map(&:requires)
+
+      patch_files(home, profile, patches).each do |file, label|
+        layers << [label, :patch, rows_in(parse_file(file, label: label), label)]
       end
 
       Resolved.new(profile: profile.to_s, home: home, rows: stack(layers),
@@ -266,7 +415,16 @@ module Terret
                    plugins: Array(spec[:plugins]).map(&:to_s), requires: requires.uniq)
     end
 
+    # A profile is a directory name under the home, not a path. Anything that
+    # would leave profiles/ is a typo at best.
+    PROFILE_NAME = /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+
     def self.load_profile(home, profile)
+      unless PROFILE_NAME.match?(profile.to_s)
+        raise Error, "#{profile.to_s.inspect} is not a profile name; a profile is a " \
+                     "directory under #{home.path}/profiles"
+      end
+
       config, = home.profile_files(profile)
       unless config
         raise Error, "no profile #{profile.to_s.inspect} in #{home.path} " \
@@ -277,10 +435,25 @@ module Terret
       doc = parse_file(config, label: home.label(config))
       raise Error, "#{home.label(config)}: a profile must be a mapping" unless doc.is_a?(Hash)
 
+      settings = doc[:settings]
+      unless settings.nil? || settings.is_a?(Hash)
+        raise Error, "#{home.label(config)}: settings: must be a mapping, got #{settings.class}"
+      end
+
       doc
     end
 
-    def self.patch_files(home, profile, _spec, patches)
+    # A bundle names itself, and dump-config prints that name — so two bundles
+    # in one stack claiming the same name would make provenance a guess. When
+    # that happens, both fall back to naming the gem, which is the part a gem
+    # author cannot claim on someone else's behalf.
+    def self.bundle_label(bundle, stacked)
+      return bundle.name if stacked.count { |b| b.name == bundle.name } == 1
+
+      "#{bundle.gem_name} (#{bundle.name})"
+    end
+
+    def self.patch_files(home, profile, patches)
       _, profile_patch = home.profile_files(profile)
       files = []
       files << [profile_patch, home.label(profile_patch)] if profile_patch
@@ -335,8 +508,9 @@ module Terret
 
       updated = existing.with(
         plugin: raw.key?(:plugin) ? raw[:plugin].to_s : existing.plugin,
-        config: raw.key?(:config) ? (raw[:config] || {}) : existing.config,
-        disabled: raw.key?(:disabled) ? !!raw[:disabled] : existing.disabled,
+        plugin_layer: raw.key?(:plugin) ? label : existing.plugin_layer,
+        config: raw.key?(:config) ? config_of(label, existing.id, raw) : existing.config,
+        disabled: raw.key?(:disabled) ? boolean(label, existing.id, raw[:disabled]) : existing.disabled,
         config_layer: raw.key?(:config) ? label : existing.config_layer
       )
       ordered[ordered.index(existing)] = updated
@@ -355,6 +529,10 @@ module Terret
     # that is not in the stack, fails closed rather than landing somewhere
     # plausible.
     def self.insert(ordered, index, label, id, raw)
+      if raw.key?(:after) && raw.key?(:before)
+        raise Error, "#{label}: row #{id.inspect} names both before: and after:; it goes in one place"
+      end
+
       anchor_id, offset = if raw.key?(:after) then [raw[:after].to_s, 1]
                           elsif raw.key?(:before) then [raw[:before].to_s, 0]
                           end
@@ -377,8 +555,27 @@ module Terret
     def self.build(label, id, raw)
       raise Error, "#{label}: row #{id.inspect} has no plugin:" unless raw[:plugin]
 
-      Row.new(id: id, plugin: raw[:plugin].to_s, config: raw[:config] || {},
-              disabled: !!raw[:disabled], row_layer: label, config_layer: label)
+      Row.new(id: id, plugin: raw[:plugin].to_s, config: config_of(label, id, raw),
+              disabled: boolean(label, id, raw[:disabled]), row_layer: label,
+              plugin_layer: label, config_layer: label)
+    end
+
+    def self.config_of(label, id, raw)
+      config = raw[:config]
+      return {} if config.nil?
+      raise Error, "#{label}: row #{id.inspect}: config: must be a mapping, got #{config.class}" unless config.is_a?(Hash)
+
+      config
+    end
+
+    # A real boolean, not any truthy scalar. `disabled: "false"` reads as off
+    # and would mean on, and this is the key that decides whether the approvals
+    # row mounts.
+    def self.boolean(label, id, value)
+      return false if value.nil?
+      return value if value == true || value == false
+
+      raise Error, "#{label}: row #{id.inspect}: disabled: must be true or false, got #{value.inspect}"
     end
   end
 end

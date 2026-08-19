@@ -2,6 +2,9 @@
 
 require "optparse"
 require "yaml"
+require_relative "version"
+require_relative "composition"
+require_relative "doctor"
 
 module Terret
   # The `trt` command line interface (docs/composition.md §8).
@@ -42,7 +45,10 @@ module Terret
       return opts if opts.is_a?(Integer)
 
       dispatch(opts, out: out, err: err)
-    rescue Composition::Error, Boot::Error => e
+    rescue Composition::Error => e
+      # Boot failures are caught in .boot, which is also the only command that
+      # needs boot.rb — this file must not name a constant from the file that
+      # requires it.
       err.puts "trt: #{e.message}"
       1
     rescue Interrupt
@@ -103,6 +109,7 @@ module Terret
     # -- boot ------------------------------------------------------------------
 
     def self.boot(opts, out:, err:)
+      require_relative "boot" # the one command that needs it; already loaded via exe/trt
       ctx = Terret.boot(profile: opts.profile, home: opts.home, patches: opts.patches,
                         allow_config_ruby: opts.allow_config_ruby)
       out.puts "trt: profile #{opts.profile.inspect} is up. Interrupt to stop."
@@ -143,9 +150,12 @@ module Terret
 
       resolved.rows.each do |row|
         lines << ["  - id: #{row.id}", "row: #{row.row_layer}"]
-        lines << ["    plugin: #{row.plugin}", nil]
+        # Annotated only when a later layer swapped it, so the annotation means
+        # "somebody changed this" rather than being visual noise on every row.
+        swapped = row.plugin_layer unless row.plugin_layer == row.row_layer
+        lines << ["    plugin: #{row.plugin}", swapped && "plugin: #{swapped}"]
         lines << ["    disabled: true", nil] if row.disabled
-        if row.config.nil? || (row.config.respond_to?(:empty?) && row.config.empty?)
+        if row.config.empty?
           lines << ["    config: {}", "config: #{row.config_layer}"]
         else
           lines << ["    config:", "config: #{row.config_layer}"]

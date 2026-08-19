@@ -48,10 +48,17 @@ module Terret
     # The pair of files a profile resolves to, home first and the shipped
     # template as the floor. Either may be nil; a profile with neither does
     # not exist.
+    #
+    # The two files are found independently on purpose. A home holding only a
+    # patch.yml is an operator who edited the one file the template told them
+    # to edit, and tying the patch's fate to a sibling profile.yml would drop
+    # it in silence — including when what it drops is a tightening of policy.
     def profile_files(name)
       config = [profile_config(name), shipped_profile_config(name)].find { |f| File.file?(f) }
-      patch  = config == shipped_profile_config(name) ? shipped_profile_patch(name) : profile_patch(name)
-      [config, (patch if File.file?(patch))]
+      shipped = config && config == shipped_profile_config(name)
+      patch = [profile_patch(name), (shipped_profile_patch(name) if shipped)]
+              .compact.find { |f| File.file?(f) }
+      [config, patch]
     end
 
     # Profile names offered by this home and by the shipped templates.
@@ -74,8 +81,5 @@ module Terret
     end
 
     def to_s = path
-    def ==(other) = other.is_a?(Home) && other.path == path
-    alias eql? ==
-    def hash = path.hash
   end
 end

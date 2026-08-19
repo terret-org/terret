@@ -284,6 +284,18 @@ class CompositionTest < Minitest::Test
     refute C.discover_bundles(specs: [spec]).key?("plain-gem")
   end
 
+  # Whatever a third-party gemspec does to itself stays in that gemspec. One
+  # bad gem in the Gemfile must not take out every profile on the machine.
+  def test_a_gemspec_that_makes_no_sense_is_not_a_bundle_and_not_a_crash
+    ["bundle:\n  path: config/bundle.yml\n", "bundle: 7\n", "config/bun\0dle.yml", ""].each do |meta|
+      found = C.discover_bundles(specs: [fixture_spec("odd-gem", @gems_dir, meta)])
+      assert found.key?("terret"), "discovery must survive #{meta.inspect}"
+      refute found["odd-gem"]&.error.nil? && found.key?("odd-gem"),
+             "a gem that names no readable bundle is either absent or marked broken"
+    end
+    assert C.discover_bundles(specs: [fixture_spec("no-path", nil, "config/bundle.yml")]).key?("terret")
+  end
+
   def fixture_spec(name, dir, bundle_path)
     spec = Gem::Specification.new do |g|
       g.name = name
@@ -310,5 +322,223 @@ class CompositionTest < Minitest::Test
     err = assert_raises(C::Error) { resolve("nosuch") }
     assert_includes err.message, "nosuch"
     assert_includes err.message, @home_dir
+  end
+
+  def test_a_profile_name_may_not_climb_out_of_the_profiles_directory
+    write(File.join(@home_dir, "elsewhere", "profile.yml"), "bundles: []\n")
+    err = assert_raises(C::Error) { resolve("../elsewhere") }
+    assert_includes err.message, "profile name"
+  end
+
+  # -- the tag reader, adversarially -----------------------------------------
+  #
+  # Everything below is a way of writing !env that is NOT `!env`. Each one used
+  # to reach Psych's fall-through and come back as the bare string "DEMO_KEY",
+  # which is the exact silent-drop docs/composition.md §5 says this visitor
+  # exists to prevent.
+
+  def tagged(text)
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", text)
+    resolve.rows.find { |r| r.id == "llm" }.config[:model]
+  end
+
+  def assert_refused(text, *fragments)
+    err = assert_raises(C::Error) { tagged(text) }
+    fragments.each { |f| assert_includes err.message, f }
+    err
+  end
+
+  def test_the_secondary_handle_spelling_of_a_local_tag_is_refused_not_dropped
+    err = assert_refused("rows:\n  - id: llm\n    config: { model: !!env DEMO_KEY }\n", "env")
+    assert_includes err.message, "!env", "the refusal should name the tag they meant"
+  end
+
+  def test_a_tag_directive_cannot_smuggle_a_local_tag_past_the_reader
+    assert_refused("%TAG ! !!\n---\nrows:\n  - id: llm\n    config: { model: !env DEMO_KEY }\n", "env")
+  end
+
+  def test_a_verbatim_tag_is_refused_in_both_the_schema_and_private_forms
+    assert_refused("rows:\n  - id: llm\n    config: { model: !<tag:yaml.org,2002:env> X }\n", "env")
+    assert_refused("rows:\n  - id: llm\n    config: { model: !<x-private:env> X }\n", "x-private:env")
+  end
+
+  def test_a_tag_directive_cannot_smuggle_a_ruby_object_tag_either
+    assert_refused("%TAG ! !!\n---\nrows:\n  - id: llm\n    config: { model: !ruby/object:Gem::Requirement {} }\n",
+                   "ruby/object")
+    assert_refused("rows:\n  - id: llm\n    config: { model: !!ruby/object:Gem::Requirement {} }\n",
+                   "ruby/object")
+  end
+
+  def test_a_yaml_core_type_tag_still_works_because_psych_handles_it_safely
+    assert_equal "5", tagged("rows:\n  - id: llm\n    config: { model: !!str 5 }\n")
+    assert_equal 5, tagged("rows:\n  - id: llm\n    config: { model: !!int \"5\" }\n")
+    assert_equal({ k: 1 }, tagged("rows:\n  - id: llm\n    config: { model: !!map { k: 1 } }\n"))
+  end
+
+  # Psych ignores a core tag that does not suit its node — `!!map hello` is the
+  # string "hello" — which is the same silent drop, one type system down.
+  def test_a_core_type_tag_on_the_wrong_kind_of_node_is_refused
+    assert_refused("rows:\n  - id: llm\n    config: { model: !!map hello }\n", "map")
+    assert_refused("rows:\n  - id: llm\n    config: { model: !!seq hello }\n", "seq")
+    assert_refused("rows:\n  - id: llm\n    config: !!str\n      k: v\n", "str")
+  end
+
+  def test_a_core_type_tag_psych_cannot_honour_fails_with_the_file_named
+    assert_refused("rows:\n  - id: llm\n    config: { model: !!omap [] }\n", "omap")
+    assert_refused("rows:\n  - id: llm\n    config: { model: !!float x }\n", "profiles/demo/patch.yml")
+  end
+
+  def test_a_tag_in_key_position_is_refused_rather_than_used_as_a_key
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config: { !setting a.b: 1 }\n")
+    err = assert_raises(C::Error) { materialize(resolve) }
+    assert_includes err.message, "key"
+  end
+
+  def test_an_alias_cycle_is_refused_rather_than_overflowing_the_stack
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config: &c\n      self: *c\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "cycle"
+  end
+
+  def test_an_alias_cycle_through_a_sequence_is_caught_too
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config:\n      list: &c\n        - *c\n")
+    assert_includes assert_raises(C::Error) { resolve }.message, "cycle"
+  end
+
+  def test_the_same_anchor_used_twice_is_sharing_and_not_a_cycle
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config:\n      a: &s { k: 1 }\n      b: *s\n      c: { d: *s }\n")
+    assert_equal({ k: 1 }, resolve.rows.find { |r| r.id == "llm" }.config[:b])
+  end
+
+  # A YAML billion-laughs: 24 lines, under 600 bytes, and an alias graph whose
+  # PATHS number 2^24 though its NODES number 24. A cycle check that walks
+  # paths rather than nodes turns this file into a hang, which is a denial of
+  # service any bundle, patch or profile on the machine could hand you.
+  def test_a_shared_alias_graph_is_walked_once_per_node_not_once_per_path
+    require "timeout"
+    lines = ["rows:", "  - id: llm", "    config:", "      l0: &l0 [x]"]
+    (1..24).each { |i| lines << "      l#{i}: &l#{i} [*l#{i - 1}, *l#{i - 1}]" }
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "#{lines.join("\n")}\n")
+
+    Timeout.timeout(10) { resolve }
+  end
+
+  def test_a_second_yaml_document_is_refused_rather_than_silently_dropped
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows: []\n---\nrows:\n  - id: llm\n    config: { model: sneaky }\n")
+    assert_raises(C::Error) { resolve }
+  end
+
+  def test_an_env_name_yaml_allows_but_the_os_does_not_names_the_file
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: llm\n    config: { model: !env "X\\u0000Y" }\n))
+    err = assert_raises(C::Error) { materialize(resolve) }
+    assert_includes err.message, "llm"
+  end
+
+  # -- shapes ----------------------------------------------------------------
+
+  def test_a_patch_file_that_is_not_a_rows_mapping_says_so_instead_of_crashing
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "- id: llm\n  config: {}\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "rows:"
+
+    profile_patch("demo", "just a scalar\n")
+    assert_raises(C::Error) { resolve }
+  end
+
+  def test_a_row_config_that_is_not_a_mapping_is_refused_at_the_layer
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config: a string\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "llm"
+  end
+
+  def test_settings_that_is_not_a_mapping_is_refused_by_name
+    profile("demo", "bundles: [terret]\nsettings: nope\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "settings"
+  end
+
+  def test_disabled_must_be_a_real_boolean_not_any_truthy_scalar
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: tools\n    disabled: "false"\n))
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "disabled"
+  end
+
+  def test_a_row_may_not_anchor_both_before_and_after
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: audit\n    plugin: A\n    before: tools\n    after: tools\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "audit"
+  end
+
+  # -- provenance, harder ----------------------------------------------------
+
+  def test_a_plugin_swap_records_the_layer_that_swapped_it
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    plugin: Demo::Fake\n")
+    row = resolve.rows.find { |r| r.id == "llm" }
+    assert_equal "terret-base", row.row_layer
+    assert_equal "profiles/demo/patch.yml", row.plugin_layer,
+                 "turning the sandbox off must not be attributed to the base bundle"
+    assert_equal "terret-base", row.config_layer
+  end
+
+  def test_a_bundle_cannot_borrow_another_bundles_name_for_its_provenance
+    liar = bundle("terret-liar", "name: terret-base\nrows:\n  - id: liar\n    plugin: L\n")
+    profile("demo", "bundles: [terret, terret-liar]\n")
+    row = resolve(catalog: base_catalog("terret-liar" => liar)).rows.find { |r| r.id == "liar" }
+    assert_includes row.row_layer, "terret-liar", "the gem name is the part nobody can forge"
+  end
+
+  def test_a_materialize_failure_names_the_row_and_the_layer_that_wrote_it
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: llm\n    config: { model: !ruby "1" }\n))
+    err = assert_raises(C::Error) { materialize(resolve) }
+    assert_includes err.message, "llm"
+    assert_includes err.message, "profiles/demo/patch.yml"
+  end
+
+  # -- discovery, harder -----------------------------------------------------
+
+  def test_a_bundle_may_not_point_at_a_file_outside_its_own_gem
+    dir = File.join(@gems_dir, "terret-sneaky")
+    write(File.join(@gems_dir, "outside.yml"), "rows:\n  - id: x\n    plugin: X\n")
+    FileUtils.mkdir_p(dir)
+    refute C.discover_bundles(specs: [fixture_spec("terret-sneaky", dir, "../outside.yml")])
+            .key?("terret-sneaky")
+  end
+
+  def test_one_broken_bundle_does_not_break_a_profile_that_never_names_it
+    broken = File.join(@gems_dir, "terret-broken")
+    write(File.join(broken, "config", "bundle.yml"), "rows: [ this is not: valid: yaml\n")
+    profile("demo", "bundles: [terret]\n")
+    catalog = C.discover_bundles(specs: [fixture_spec("terret-broken", broken, "config/bundle.yml")])
+
+    # The real terret-base, resolved beside a bundle that cannot parse.
+    assert_includes C.resolve(profile: "demo", bundles: catalog).rows.map(&:id), "sandbox"
+
+    profile("greedy", "bundles: [terret-broken]\n")
+    err = assert_raises(C::Error) { C.resolve(profile: "greedy", bundles: catalog) }
+    assert_includes err.message, "terret-broken"
+  end
+
+  # -- home ------------------------------------------------------------------
+
+  def test_a_home_patch_applies_even_when_the_profile_comes_from_the_template
+    write(File.join(@home_dir, "profiles", "headless", "patch.yml"),
+          "rows:\n  - id: sandbox\n    plugin: Terret::Exec::SandboxNone\n    config: {}\n")
+    row = C.resolve(profile: "headless").rows.find { |r| r.id == "sandbox" }
+    assert_equal "Terret::Exec::SandboxNone", row.plugin,
+                 "an operator's patch.yml must not be dropped for lacking a sibling profile.yml"
   end
 end
