@@ -1,29 +1,29 @@
 # Terret over ACP (v1)
 
-> **Status: this document records the mapping, not the wire.** The method
-> and notification names below are drafted from the Agent Client Protocol
-> as understood when the M8 primers were written, ahead of the server
-> itself. The implementer of the `terret-acp` gem verifies every name,
-> parameter, and result shape against the published spec
-> (agentclientprotocol.com) and corrects this document **in the same
-> commit**, recording the protocol version string the server reports.
-> Where a name here disagrees with the spec, the spec is right and this
-> file is wrong. What is not provisional is the mapping: which Terret seam
-> each protocol operation lands on, and what is deliberately not
-> implemented.
+> **This document reflects ACP v1** — `protocolVersion` is the integer
+> `1` — schema-verified against `agentclientprotocol/agent-client-protocol`
+> `schema/v1`, whose last edit at the time of writing was 2026-07-27. A
+> `schema/v2` exists and is explicitly **draft**: it moves prompt
+> completion into notifications, removes the client-side fs and terminal
+> methods, and renames `authenticate` to `auth/login`. Terret builds
+> against v1 and does not implement v2. The implementer of the
+> `terret-acp` gem re-verifies every name and shape against the live spec
+> at build time and corrects this document in the same commit if anything
+> has moved. What is *not* borrowed from the spec, and is this document's
+> own claim, is the mapping: which Terret seam each operation lands on,
+> and what is deliberately not implemented.
 
 ## What ACP is
 
-The Agent Client Protocol is Zed's contract between an editor and a coding
-agent: **JSON-RPC 2.0 over stdio**. The editor spawns the agent as a
-subprocess and speaks to it over that process's stdin and stdout — the
-same shape as the Language Server Protocol, and for the same reason. An
-editor that speaks ACP can drive any agent that speaks it, and an agent
-that speaks it gets every such editor for free.
+The Agent Client Protocol is a contract between an editor and a coding
+agent: **JSON-RPC 2.0 over stdio**, newline-delimited. The **client spawns
+the agent as a subprocess** and speaks to it over that process's stdin and
+stdout. An editor that speaks ACP can drive any agent that speaks it, and
+an agent that speaks it gets every such editor for free.
 
 It is worth being precise about the direction, because Terret now sits on
-both sides of an interop story that uses similar words for opposite
-things (plan §6.8):
+both sides of an interop story that uses similar words for opposite things
+(plan §6.8):
 
 - **MCP** makes tools available **to** an agent. Terret is the *client*;
   a server's tools mount as `mcp__<server>__<tool>` behind `ctx[:tools]`
@@ -50,43 +50,107 @@ The consumption pattern is copied from
 `gems/terret-ws/lib/terret/ws/connection.rb` (docs/protocol.md). The
 transport is the only new thing.
 
-## The mapping
+## Requests, notifications, and the mapping
 
-| ACP operation | Terret |
-|---|---|
-| `initialize` | capabilities handshake: protocol version, plus what this boot actually mounts |
-| `session/new` | `spawn_agent` on a fresh durable session; answers the session id |
-| `session/prompt` | `run_turn`, with `session/update` notifications projected from `session/event`; answers when the turn closes |
-| `session/cancel` | the cancel path: cooperative, honored at a step boundary, closing a durable `turn/end {status: "cancelled"}` |
+ACP distinguishes requests (carry an `id`, expect a response) from
+notifications (no `id`, no response), and getting that wrong is the
+classic way to hang an editor. The baseline an agent must implement is
+`session/new`, `session/prompt`, `session/cancel`, and sending
+`session/update`.
 
-Four notes on that table, each of which is a real constraint rather than a
-restatement.
+| ACP operation | Kind | Terret |
+|---|---|---|
+| `initialize` | request | capabilities handshake against the booted context |
+| `session/new` | request | `spawn_agent` on a fresh durable session; answers `{sessionId}` |
+| `session/prompt` | request | `run_turn`, streaming `session/update`; **stays pending for the whole turn** and answers `{stopReason}` |
+| `session/cancel` | notification (client → agent) | `cancel_turn`; the pending prompt then answers `cancelled` |
+| `session/update` | notification (agent → client) | projected from `session/event` |
+| `authenticate` | request, optional | never reached (below) |
+| `session/load` | request, optional, capability-gated | not advertised in v1 (below) |
 
-**`initialize` reports what is mounted, not what the code can do.** A
-Terret boot is a profile (docs/composition.md), so two deployments of the
-same gems have different capabilities: one has the approvals row, one does
-not; one sandboxes, one does not. The handshake answers from the booted
-context.
+### `initialize`
 
-**`session/new` spawns a real agent** with the ordinary lifecycle — the
-registry's cap applies (`AgentCapExceeded` at 128, docs/lifecycle.md), and
-the session is durable, titled, and cost-accounted like every other
+```json
+// params
+{"protocolVersion": 1,
+ "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}, "terminal": true},
+ "clientInfo": {"name": "…", "version": "…"}}
+// result
+{"protocolVersion": 1, "agentCapabilities": {…}, "authMethods": []}
+```
+
+`protocolVersion` is the only required field on either side, and it is an
+**integer**, not a version string. `authMethods: []` is how a no-auth
+agent says so, and it is what Terret answers (see "deliberately absent").
+
+The handshake reports **what this boot actually mounts**, not what the
+gems can do. A Terret boot is a profile (docs/composition.md), so two
+deployments of the same code have different capabilities: one has the
+approvals row, one does not; one sandboxes, one does not. The idiom for
+"unsupported" is to **omit an optional capability group entirely** rather
+than to send it with everything false, which suits a report derived from a
+row list — a group is present because a row is.
+
+### `session/new`
+
+Params require `cwd` and `mcpServers` (the latter may be `[]`); the result
+is `{sessionId}`. Terret spawns a real agent with the ordinary lifecycle —
+the registry's cap applies (`AgentCapExceeded` at 128, docs/lifecycle.md),
+and the session is durable, titled, and cost-accounted like every other
 session. An editor session is not a lightweight second-class thing; it is
 the same object the socket would have connected to.
 
-**`session/prompt` branches on resumability.** A session whose log holds a
-`turn/start` with no `turn/end` is resumable, and `run_turn` on it raises
-`TurnOpenInLog` by design (docs/lifecycle.md, "Resuming an open turn").
-Every caller that can meet a session someone else was driving has to
-branch — inject then `resume_turn`, or `run_turn` — and the socket already
-does. ACP is exactly such a caller: an editor reopening a project is the
-canonical way to meet a turn that a killed process left open.
+Both required parameters are places where a protocol field meets a Terret
+invariant, and neither resolves in the protocol's favor:
 
-**`session/cancel` is cooperative.** It requests a stop that lands at the
-next step boundary rather than tearing a fiber out of a tool call; a
-barrier of parallel calls settles first (docs/subagents.md §5). The
-`:stopping` status exists to make that interval observable instead of
-leaving a cancelled agent reporting `:running`.
+- **`cwd` is a request, not an authority.** Filesystem reach is the
+  `workspace:` config row, realpath-contained, deny-by-default, with an
+  empty list denying everything (docs/exec.md §3). A client-supplied
+  directory does not widen it. The natural v1 behavior is to use `cwd` as
+  the working directory for a path *inside* an already-granted workspace
+  and to refuse it otherwise, exactly as the Docker provider refuses a
+  `cwd` outside the granted list today.
+- **`mcpServers` is accepted and not mounted in v1.** Honoring an empty
+  list is trivial; mounting servers the editor names would let a client
+  extend the agent's tool roster past the profile's floor, which is the
+  same escalation `ctx[:subagents]` refuses by construction
+  (docs/subagents.md §3). If it lands later it lands as policy — the
+  allow list and per-server approval that docs/mcp.md already defines —
+  not as an unconditional mount.
+
+### `session/prompt`
+
+Params are `{sessionId, prompt: ContentBlock[]}`; the baseline blocks to
+accept are `{"type": "text", …}` and `{"type": "resource_link", …}`. Note
+that `ContentBlock` discriminates on `type` while a session update
+discriminates on `sessionUpdate` — the two are easy to conflate and the
+spec uses both.
+
+The request **stays pending for the entire turn** and answers
+`{stopReason}` when the turn closes. That is a natural fit for the loop:
+one `run_turn` call, one response.
+
+It branches on resumability. A session whose log holds a `turn/start` with
+no `turn/end` is resumable, and `run_turn` on it raises `TurnOpenInLog` by
+design (docs/lifecycle.md, "Resuming an open turn"). Every caller that can
+meet a session someone else was driving has to branch — inject then
+`resume_turn`, or `run_turn` — and the socket already does. ACP is exactly
+such a caller: an editor reopening a project is the canonical way to meet
+a turn that a killed process left open.
+
+### `session/cancel`
+
+A **notification**, so there is no response to it. On receipt Terret stops
+model calls and requests a turn cancel, flushes pending `session/update`
+notifications, and answers the still-pending `session/prompt` with
+`stopReason: "cancelled"`.
+
+Cancellation is cooperative and lands at the next step boundary rather
+than tearing a fiber out of a tool call; a barrier of parallel calls
+settles first (docs/subagents.md §5). The `:stopping` status exists to
+make that interval observable instead of leaving a cancelled agent
+reporting `:running`, and the turn closes with the ordinary durable
+`turn/end {status: "cancelled"}`.
 
 ## `session/update`: a projection of the log
 
@@ -95,13 +159,48 @@ client that is not in the log first**. Notifications are derived from
 `session/event` and from nothing else, so the ACP server invents no
 vocabulary and adds no second source of truth.
 
-The draft projection:
+Params are `{sessionId, update}`, and the update discriminates on the
+field **`sessionUpdate`** — not `type`.
 
-| durable event | notification |
-|---|---|
-| `assistant/chunk` | agent message chunk |
-| `tool/call` | tool call begin |
-| `tool/result` | tool call end |
+| durable event | `sessionUpdate` | note |
+|---|---|---|
+| `assistant/chunk` | `agent_message_chunk` | `{content: {type: "text", …}}` |
+| `tool/call` | `tool_call` | `toolCallId`, `title`, `kind`, `status: "pending"` |
+| `tool/result` | `tool_call_update` | same `toolCallId`, terminal `status`, content |
+| a `TodoWrite` result | `plan` | see below |
+
+`tool_call`'s `kind` is an enum (`read`, `edit`, `delete`, `move`,
+`search`, `execute`, `think`, `fetch`, `switch_mode`, `other`), and the
+std roster maps onto it cleanly enough that the table is mechanical:
+`Read` is `read`, `Glob` and `Grep` are `search`, `Write` and `Edit` are
+`edit`, `Bash`/`job_*`/`terminal_*` are `execute`, `WebFetch` is `fetch`.
+`Task` and MCP tools have no obvious member and fall to `other`. The
+`status` enum is `pending | in_progress | completed | failed`, which is why
+one Terret event opens the call and a second closes it rather than one
+event carrying both.
+
+**`plan` is the ACP shape of `TodoWrite`**, and the fit is exact rather
+than approximate: the variant carries the whole entry list and **replaces
+it on every update**, which is precisely `TodoWrite`'s contract — the tool
+takes the entire list every call and its result echo is its only storage
+(docs/subagents.md §7). Two designs arrived at the same answer
+independently, which is a decent sign both are right. The one seam to
+mind is the status vocabularies: ACP's entries are `pending |
+in_progress | completed` with a `priority`, and `TodoWrite`'s items are
+`pending | in_progress | completed` with an `activeForm`. The statuses
+line up; the extra fields do not, and the projection drops what has no
+home.
+
+`agent_thought_chunk` exists in the protocol and Terret does not emit it,
+because there is no durable thinking-delta event to project from:
+`assistant/chunk` carries text, and `Thinking` parts ride the completed
+`assistant/message` (docs/events.md). If a thinking-chunk event is ever
+declared, this is where it lands.
+
+Six further variants exist — `user_message_chunk`,
+`available_commands_update`, `current_mode_update`,
+`config_option_update`, `session_info_update`, `usage_update` — and v1
+emits none of them.
 
 There is one honest difference from the socket, and it should be stated
 rather than left for someone to infer. `terret-ws` serializes the durable
@@ -109,10 +208,11 @@ envelope **as-is**, so a client can reconstruct the session exactly and
 replay-then-tail is byte-exact (docs/protocol.md). ACP notifications are a
 **lossy view**: the protocol has shapes for the things an editor renders,
 and Terret has durable events with no ACP shape at all —
-`approval/requested`, `policy/updated`, `session/titled`, `session/compacted`.
-Those simply do not project. An ACP client therefore cannot rebuild a
-session from what it received, and it is not supposed to; the socket is
-what that is for, and both can be mounted against the same agent.
+`approval/requested`, `policy/updated`, `session/titled`,
+`session/compacted`, every `step/*` and `turn/*` bookend. Those simply do
+not project. An ACP client therefore cannot rebuild a session from what it
+received, and it is not supposed to; the socket is what that is for, and
+both can be mounted against the same agent.
 
 Chunk fidelity carries one inherited caveat worth knowing before debugging
 it: with a redactor mounted, the loop coalesces each run of assistant text
@@ -121,41 +221,114 @@ delta-by-delta (docs/exec.md §6). An ACP client of a redacting deployment
 sees text arrive in bursts. That is the redaction trade, not the
 transport's.
 
+## Stop reasons
+
+ACP defines exactly five: `end_turn`, `max_tokens`, `max_turn_requests`,
+`refusal`, `cancelled`. Terret closes every turn with one of five statuses
+of its own (docs/lifecycle.md): `completed`, `cancelled`, `rejected`,
+`empty`, `failed`. The two sets are not the same size and do not
+correspond one to one, which is a mapping question rather than a bug in
+either:
+
+- `completed` → `end_turn`, and `cancelled` → `cancelled`. These are the
+  two that carry almost all the traffic.
+- `max_turn_requests` is the natural peer of `Loop::MAX_STEPS` — a turn
+  that would log a 26th step. Terret raises there today rather than
+  closing a turn, so answering this stop reason is a small deliberate
+  change in the ACP path rather than a projection of something that
+  already exists.
+- `max_tokens` and `refusal` have no Terret producer: neither the
+  adapter's finish reason nor a model refusal is projected into
+  `turn/end`.
+- `rejected`, `empty`, and `failed` have no ACP peer. A `failed` turn
+  reads most naturally as a JSON-RPC error response to the pending prompt
+  rather than as a successful result carrying a sad stop reason, and
+  `rejected`/`empty` are turns that spent no step at all.
+
+Task 7 pins the last three; the ambiguity is recorded here rather than
+resolved by whoever writes the line.
+
 ## Framing, concurrency, and failure
 
+- **Newline-delimited JSON-RPC 2.0 over stdio.** No `Content-Length`
+  headers — this is the point where ACP diverges from LSP and where an
+  LSP-shaped implementation silently fails. Messages are UTF-8 and must
+  not contain embedded newlines.
+- **stdout carries only ACP messages; stderr is free for logs.** That is a
+  real constraint on a harness with plugins in it: anything that prints to
+  stdout corrupts the stream. Ruby's `warn` and `Logger` default to stderr,
+  which is the right side, but a `puts` anywhere in a mounted plugin is a
+  protocol violation rather than a stray line.
 - **One reactor.** The read loop parks the fiber, never the thread (plan
-  §8) — a stdio server that blocks the thread on `gets` would stall every
+  §8) — a stdio server that blocks the thread on a read would stall every
   other agent in the process, which is the one mistake this codebase
   cannot afford to make twice.
 - **One write mutex.** A streaming turn emits notifications while a
   request/response pair is in flight. Frames must not interleave, so every
   write goes through one serialization point.
-- **A malformed request answers a JSON-RPC error and keeps the loop
-  alive.** An editor that sends garbage gets an error object, not a dead
-  agent.
+- **Errors are JSON-RPC standard plus three.** `-32700` parse, `-32600`
+  invalid request, `-32601` method not found (the answer to any method
+  this server does not implement, including every v2 name), `-32602`
+  invalid params, `-32603` internal; ACP adds `-32800` request cancelled,
+  `-32000` auth required, and `-32002` resource not found. A malformed
+  request answers an error object and keeps the loop alive — an editor
+  that sends garbage gets a reply, not a dead agent. Be lenient about
+  malformed *optional* fields; the schema itself defaults them on error.
+- **`$/cancel_request`** is a protocol-level notification either side may
+  send for any pending request, carrying `{requestId}`. The response is
+  either a partial result or `-32800`.
 - **EOF disposes the connection, not the agent.** When the editor closes
   the pipe, the server tears down its own state; the session is durable
   and the agent parks per the M6 lifecycle. Closing a window is not a
-  reason to lose a week-long session, and re-attaching is a `session/prompt`
-  against the same session id going through the resumable branch above.
-
-The exact framing — newline-delimited JSON versus LSP-style
-`Content-Length` headers — is a spec question, listed below rather than
-guessed here.
+  reason to lose a week-long session, and re-attaching is a
+  `session/prompt` against the same session id going through the resumable
+  branch above.
 
 ## What is deliberately absent
 
-**Authentication.** There is none, and that is a decision rather than an
-omission. Stdio inherits the editor's process boundary: the editor spawned
-this process, the pipes are private to the pair, and the OS has already
-decided who may speak on them. The socket's bearer token exists because a
-listening TCP port has no such boundary (docs/security.md, "The socket's
-authority model"); duplicating it over a private pipe would be ceremony.
-The corollary belongs in the threat model rather than in a footnote: **an
-ACP agent is exactly as trusted as the editor that spawned it**, an ACP
-client holds full operator authority over the agents it creates, and the
-thing that still bounds what tools do is the sandbox and the allow list,
-not the transport.
+**Authentication.** `authMethods: []`, so `authenticate` is never reached.
+That is a decision rather than an omission: stdio inherits the editor's
+process boundary — the client spawned this process, the pipes are private
+to the pair, and the OS has already decided who may speak on them. The
+socket's bearer token exists because a listening TCP port has no such
+boundary (docs/security.md, "The socket's authority model"); duplicating
+it over a private pipe would be ceremony. The corollary belongs in the
+threat model rather than in a footnote: **an ACP client is exactly as
+trusted as the editor that spawned it**, it holds full operator authority
+over the agents it creates, and the things that still bound what tools do
+are the sandbox and the allow list, not the transport.
+
+**Every client-side method.** ACP lets an agent call *back* into the
+client: `fs/read_text_file` and `fs/write_text_file`, `terminal/*`,
+`elicitation/*`, and `session/request_permission`. Terret calls none of
+them, and no opt-out declaration exists or is needed — an agent that never
+sends them has nothing to advertise. For the two filesystem methods that
+is a containment decision, not a preference: Terret has its own fs seam
+with realpath containment against a granted workspace and an
+`fs/authorize` waterfall on every operation (docs/exec.md §2–3), and
+routing file access through the editor instead would put an uncontained
+path outside every guarantee M7 built, on the exact seam where containment
+matters most. If editor-mediated file access ever lands, it lands as a
+provider **behind `ctx[:fs]`**, subject to the same containment as every
+other provider — not as a path around it.
+
+**`session/request_permission`, for now.** It is worth separating from the
+rest of that list, because nothing in the protocol blocks it: the method
+is not capability-gated, so every ACP client is assumed to implement it
+and an agent simply chooses whether to send it. The Terret shape is
+already sitting there — a parked `approval/requested` out as the
+permission request, the selected `optionId` appending `approval/resolved`,
+no new state anywhere (docs/lifecycle.md, "Durable approvals"). Whether
+that wiring ships in M8 or is recorded in §14 is a scope call rather than
+a protocol constraint, and the base bundle mounts the approvals row
+`disabled: true` regardless (docs/composition.md §6).
+
+**`session/load`.** Optional and gated behind `agentCapabilities.loadSession`,
+which v1 does not advertise. Terret is unusually well placed to support it
+later — a session *is* a durable log and replay is already exact
+(docs/lifecycle.md) — so this is a scope decision rather than a missing
+capability. Until it is advertised, re-attaching to a session goes through
+`session/prompt` and the resumable branch.
 
 **The ACP client direction.** Plan §6.8 describes a subagent provider that
 delegates a turn to an external agent over ACP. It is recorded in §14 as
@@ -164,40 +337,20 @@ with one provider — the fork (docs/subagents.md §2) — and the seam is
 where that second provider will land when it does, with no change to the
 `Task` tool.
 
-**Client-side filesystem round-trips beyond the protocol minimum.** ACP
-gives an agent a way to reach files through the client rather than
-directly. Terret has its own filesystem seam, with realpath containment
-against a granted workspace and an `fs/authorize` waterfall on every
-operation (docs/exec.md §2–3, docs/security.md). Routing file access
-through the editor instead would put an uncontained path outside every
-guarantee M7 built, and would do it on the exact seam where containment
-matters most. If editor-mediated file access lands later, it lands as a
-provider **behind `ctx[:fs]`**, subject to the same containment as every
-other provider — not as a path around it.
-
-**A permission/approval UI direction**, pending the spec check below. If
-ACP carries a client-prompts-the-human operation, the natural landing is
-the durable approvals seam — `approval/requested` out, the resolution
-appending `approval/resolved` exactly as the socket's `approve`/`deny`
-frames do (docs/lifecycle.md), with no new state anywhere. Whether that
-lands in M8 or is recorded in §14 is the implementer's call once the spec
-is read.
-
 ## Open for the Task-7 implementer
 
-Verify against the spec and correct this document in the same commit:
+The wire facts above are schema-verified; these are decisions, not
+unknowns:
 
-1. Exact method and notification names, and the `initialize` params/result
-   shapes.
-2. The `session/update` payload variants, and which durable events project
-   onto which.
-3. The stop-reason vocabulary a cancelled or completed prompt answers
-   with, and how it lines up with Terret's five `turn/end` statuses
-   (`completed`, `cancelled`, `rejected`, `empty`, `failed`).
-4. Framing: newline-delimited JSON or `Content-Length` headers.
-5. Error codes beyond the JSON-RPC standard set.
-6. Whether a client-side permission request exists, and therefore whether
-   the approvals mapping above ships or is deferred.
+1. The three `turn/end` statuses with no stop reason (`rejected`, `empty`,
+   `failed`), and whether `MAX_STEPS` answers `max_turn_requests`.
+2. Whether `session/request_permission` ships in M8 or is recorded in §14.
+3. Whether `cwd` from `session/new` is honored inside the granted
+   workspace or ignored entirely.
+4. The `ToolKind` table for MCP tools, whose names arrive at runtime.
+
+Re-verify the wire against the live spec at build time regardless, and
+record the protocol version the server reports.
 
 ## Running it
 
