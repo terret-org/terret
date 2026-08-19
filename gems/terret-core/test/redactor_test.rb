@@ -182,6 +182,59 @@ class RedactorTest < Minitest::Test
     assert_equal "remember [REDACTED]", injected.payload[:text]
   end
 
+  # -- resume ---------------------------------------------------------------
+
+  # The log a process death leaves behind: an open turn whose last assistant
+  # message owes a tool call that never produced a result.
+  def stage_owed_call(ctx, args)
+    session = ctx[:sessions].create
+    sid = session.id
+    agent = ctx[:loop].spawn_agent(session_id: sid)
+    call = Terret::LLM::ToolCall.new(id: "tc1", name: "shell", args: args)
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    ctx[:sessions].append(sid, "step/start", { n: 1 })
+    ctx[:sessions].append(sid, "user/message", { text: "go" })
+    ctx[:sessions].append(sid, "assistant/message", { parts: [Terret::LLM.encode_part(call)] })
+    [agent, session]
+  end
+
+  def register_shell(ctx, ran)
+    ctx.with_owner("shell-plugin") do
+      ctx[:tools].register(name: "shell", description: "", params: {}) do |cmd:|
+        ran << cmd
+        "ran it"
+      end
+    end
+  end
+
+  # Resume decodes owed calls from the log, and the log is redacted: replaying
+  # `deploy --key [REDACTED]` is a different command wearing the same name.
+  def test_resume_refuses_to_replay_a_call_whose_args_the_log_redacted
+    ctx, = boot(script: [{ text: "wrapped up" }])
+    ran = []
+    register_shell(ctx, ran)
+    agent, session = stage_owed_call(ctx, { cmd: "deploy --key #{SECRET}" })
+
+    ctx[:loop].resume_turn(agent)
+
+    assert_empty ran, "resume re-ran the command with a substituted literal"
+    result = session.events.find { |e| e.type == "tool/result" }
+    assert_nil result.payload[:content]
+    assert_match(/redacted/, result.payload[:error])
+  end
+
+  def test_resume_still_replays_a_call_the_log_recorded_faithfully
+    ctx, = boot(script: [{ text: "wrapped up" }])
+    ran = []
+    register_shell(ctx, ran)
+    agent, session = stage_owed_call(ctx, { cmd: "ls -la" })
+
+    ctx[:loop].resume_turn(agent)
+
+    assert_equal ["ls -la"], ran
+    assert_equal "ran it", session.events.find { |e| e.type == "tool/result" }.payload[:content]
+  end
+
   # -- streamed chunks ------------------------------------------------------
 
   # FakeAdapter slices text into 8-character deltas, which is exactly what a

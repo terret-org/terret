@@ -102,6 +102,18 @@ until `ctx[:credentials]` (plan §6.9) lands in M8; a pattern that doesn't
 match a secret's actual shape doesn't catch it. This is detection of
 known shapes, not a guarantee that no credential can ever reach the log.
 
+Four boundaries belong in any threat model built on this (docs/exec.md §6
+carries the mechanism). A log is append-only, so turning a redactor on
+protects what is appended afterwards and never what is already stored. A
+`tools/pre_execute` veto skips the `post_execute` layer entirely, leaving
+the append backstop as the only cover for that result. Ordering among
+`post_execute` listeners is unpinned, so middleware registered ahead of
+the redactor reads results before they are rewritten. And the log's own
+structural identifiers are exempt from scrubbing by design — a pattern
+that rewrote a tool call id would break the session rather than protect
+it — so a credential a model puts where an identifier belongs is not
+caught there.
+
 ## The socket's authority model
 
 A connection's bearer token authorizes one agent completely

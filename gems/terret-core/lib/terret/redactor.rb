@@ -27,7 +27,6 @@ module Terret
     DEFAULT_REPLACEMENT = "[REDACTED]"
 
     def start(ctx)
-      @ctx = ctx
       @patterns = compile(config[:patterns])
 
       ctx.on("tools/post_execute") { |result, next_| next_.(redact_result(result)) }
@@ -58,9 +57,12 @@ module Terret
       @patterns.reduce(text) { |acc, pattern| acc.gsub(pattern) { replacement } }
     end
 
-    private
-
+    # Public because a reader downstream has to recognize this mechanism's own
+    # mark: the loop refuses to replay a resumed tool call whose stored
+    # arguments carry it (Loop#redaction_token).
     def replacement = config[:replacement] || DEFAULT_REPLACEMENT
+
+    private
 
     # Both fields, because both are model-visible: derive_messages projects a
     # tool/result's error alongside its content, so a handler that echoes the

@@ -222,6 +222,36 @@ rather than as a read-time filter over the projection, is what keeps
 CLAUDE.md's "model-visible means logged" invariant honest — a filtered
 *read* would mean the log itself still held the secret.
 
+The scrubber does not reach two kinds of value, both deliberately. It
+skips the log's own structural identifiers — tool call ids, the part tag
+`decode_part` dispatches on, lineage, verdicts, the live allow list
+(`Sessions::STRUCTURAL_KEYS`) — because a pattern generic enough to match
+a credential matches a hex id too, and collapsing two tool call ids into
+one replacement token is a request every provider rejects, permanently, in
+an append-only log. That exemption is positional rather than by name: it
+holds at the top of a payload and inside an `assistant/message`'s encoded
+parts, and stops the moment anything content-bearing is entered, so the
+`args[:content]` a `Write` call carries is scrubbed like any other text.
+And streamed text is held back in a small carry window (`scrub_carry` on
+the loop row, 256 bytes) before it becomes `assistant/chunk` events,
+because a provider's deltas break at token boundaries and a secret split
+across two of them defeats a pattern that matches it perfectly; a secret
+longer than that window can still straddle the boundary.
+
+Four more limits worth stating plainly. Enabling a redactor does not
+redact history already in the log — the log is append-only, so the
+scrubber governs what is appended from that moment on and nothing before
+it. A `tools/pre_execute` veto short-circuits `tools/post_execute`
+entirely, so a vetoed call's result is covered by the append backstop
+alone. Ordering among `post_execute` listeners is not pinned: middleware
+registered ahead of the redactor sees unredacted results, and a contract
+for that ordering is an M8 note rather than something to assume. And
+resume refuses to replay an owed tool call whose stored arguments carry
+the replacement token, because re-running a command with a substituted
+literal is a different command (§7); only the redactor's own token is
+recognized, so a scrubber registered directly with some other replacement
+does not trigger that refusal.
+
 Patterns are config — regexp source strings, compiled by the redactor
 plugin — until `ctx[:credentials]` (plan §6.9) lands in M8 and can drive
 them from something more structured. State that limit rather than

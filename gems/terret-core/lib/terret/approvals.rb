@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require "json"
-
 module Terret
   module Tools
     # ctx[:approvals] — durable human-in-the-loop gating (plan §6.3, §12 M6).

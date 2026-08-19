@@ -314,6 +314,29 @@ module Terret
       end
     end
 
+    # Resume replays a tool call decoded from the LOG, and the log is
+    # scrubbed: an argument that carried a credential carries the replacement
+    # token instead. Re-running `deploy --key [REDACTED]` is not a retry of
+    # what the model asked for, it is a DIFFERENT command with the same name —
+    # and for Bash or Write that difference is a real, irreversible side
+    # effect. The M6 at-least-once contract (docs/lifecycle.md) yields to
+    # honesty here: the call is refused with a result that says why, and the
+    # model's next step decides what to do about it.
+    #
+    # Only the redactor's own token is known. A scrubber registered directly
+    # with some other replacement is not detectable from here, and a call it
+    # rewrote still replays — stated in docs/exec.md §6 rather than guessed at.
+    def redaction_token(ctx) = ctx.service?(:redactor) ? ctx[:redactor].replacement : nil
+
+    def redacted?(value, token)
+      case value
+      when String then value.include?(token)
+      when Array  then value.any? { |v| redacted?(v, token) }
+      when Hash   then value.any? { |_k, v| redacted?(v, token) }
+      else false
+      end
+    end
+
     # How much streamed text is held back so a scrubber can see a secret that
     # spans two deltas. Read per turn, so a hot-swapped row governs the next
     # one; a secret longer than this window can still straddle the boundary,
@@ -386,10 +409,20 @@ module Terret
       return steps if owed.empty?
 
       logged = turn.filter_map { |e| e.payload[:id] if e.type == "tool/call" }
+      token = redaction_token(ctx)
       owed.each do |tc|
         unless logged.include?(tc.id)
           sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
         end
+        if token && redacted?(tc.args, token)
+          sessions.append(sid, "tool/result",
+                          { id: tc.id, content: nil,
+                            error: "#{tc.name} was not replayed on resume: its arguments were " \
+                                   "redacted in the session log, so the recorded call is not " \
+                                   "the call that was made" })
+          next
+        end
+
         execute_and_record(ctx, sessions, sid, tc)
       end
       sessions.append(sid, "step/end", { n: steps })
