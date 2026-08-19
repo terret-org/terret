@@ -279,6 +279,60 @@ class ShellTest < Minitest::Test
     pids.each { |pid| refute_alive pid }
   end
 
+  # -- one command at a time ------------------------------------------------
+  #
+  # One bash per key means two commands cannot be in flight on it at once, and
+  # the seam's guarantee is that the result handed back is the caller's own
+  # command's result. Nothing in today's sequential loop dispatch can reach
+  # this, but ctx[:shell] is a public seam and `concurrency:` is declared
+  # metadata the tool barrier does not enforce yet, so the guarantee has to
+  # live here rather than in a caller's habits.
+
+  def test_a_second_run_on_a_session_already_running_a_command_is_refused
+    skip "async not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot
+    ctx[:shell].run("true") # warm it, so the refusal is about the run and not the spawn
+    err = nil
+    slow = nil
+    Sync do |task|
+      running = task.async { ctx[:shell].run("sleep 0.5; echo slow") }
+      sleep 0.1 # let the first run park inside its read, so it is genuinely in flight
+      err = assert_raises(Terret::Exec::ShellBusy) { ctx[:shell].run("echo second") }
+      slow = running.wait
+    end
+
+    assert_kind_of Terret::Tools::Failure, err
+    assert_match(/default/, err.message, "the refusal must name the session it is about")
+    assert_equal "slow\n", slow.stdout, "the in-flight run must be unaffected by the refusal"
+  end
+
+  def test_a_session_takes_runs_again_once_the_in_flight_one_has_finished
+    skip "async not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot
+    Sync do |task|
+      running = task.async { ctx[:shell].run("sleep 0.3; echo slow") }
+      sleep 0.1
+      assert_raises(Terret::Exec::ShellBusy) { ctx[:shell].run("echo second") }
+      running.wait
+    end
+
+    assert_equal "after\n", ctx[:shell].run("echo after").stdout
+  end
+
+  def test_another_session_key_runs_while_one_key_is_busy
+    skip "async not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot
+    Sync do |task|
+      running = task.async { ctx[:shell].run("sleep 0.5; echo slow", session: "a") }
+      sleep 0.1
+      assert_equal "b\n", ctx[:shell].run("echo b", session: "b").stdout
+      assert_equal "slow\n", running.wait.stdout
+    end
+  end
+
   # -- the sandbox seam -----------------------------------------------------
 
   def test_the_bash_argv_becomes_a_process_only_through_the_sandbox_wrap

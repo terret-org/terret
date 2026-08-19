@@ -11,6 +11,15 @@ module Terret
     # them.
     ShellUnavailable = Class.new(Terret::Tools::Failure)
 
+    # A second command arrived for a session that is still running one.
+    # Refused rather than queued: one bash per key can only run one thing at a
+    # time, and a queue would either make the waiting caller's `timeout:` a lie
+    # (its clock would start before its command did) or need a scheduler this
+    # seam has no business owning. The guarantee worth keeping is narrow and
+    # absolute — the result a caller gets back is that caller's command's
+    # result — and a refusal keeps it without inventing machinery.
+    ShellBusy = Class.new(Terret::Tools::Failure)
+
     # ctx[:shell] — one persistent bash per session key (plan §6.6;
     # docs/exec.md §2). The whole reason this seam exists next to
     # ctx[:subprocess]'s one-shot #spawn is that the same process serves every
@@ -82,6 +91,7 @@ module Terret
       def start(ctx)
         @ctx = ctx
         @sessions = {} # key (String) => Session
+        @running = {}  # key (String) => true while a command is in flight
       end
 
       # The loader calls this on unload. A persistent shell is a process the
@@ -100,23 +110,15 @@ module Terret
       # Result like any other, because a command that failed still ran.
       def run(cmd, session: DEFAULT_SESSION, timeout: nil)
         key = session.to_s
-        timeout ||= default_timeout
-        notices = []
-        if stale?(key)
-          discard(key)
-          notices << "the shell session had exited; a fresh one was started, " \
-                     "so the cwd and variables from earlier runs are gone"
-        end
-        s = (@sessions[key] ||= open_session)
-        timeout ||= default_timeout
+        raise ShellBusy, "the #{key} shell session is already running a command" if @running[key]
 
-        return ended(key, "", notices) unless write(s, request(s, cmd))
-
-        outcome, out = collect(s, monotonic + timeout)
-        case outcome
-        when :timeout then timed_out(key, s, out, notices, timeout)
-        when :eof then ended(key, out, notices)
-        else Result.new(status: outcome, stdout: out, notice: join(notices))
+        @running[key] = true
+        begin
+          run!(key, cmd, timeout || default_timeout)
+        ensure
+          # released even when the run raised, so a session is never left
+          # permanently unusable by a failure it already reported
+          @running.delete(key)
         end
       end
 
@@ -133,6 +135,25 @@ module Terret
       def close_all = @sessions.keys.each { |key| discard(key) }
 
       private
+
+      def run!(key, cmd, timeout)
+        notices = []
+        if stale?(key)
+          discard(key)
+          notices << "the shell session had exited; a fresh one was started, " \
+                     "so the cwd and variables from earlier runs are gone"
+        end
+        s = (@sessions[key] ||= open_session)
+
+        return ended(key, "", notices) unless write(s, request(s, cmd))
+
+        outcome, out = collect(s, monotonic + timeout)
+        case outcome
+        when :timeout then timed_out(key, s, out, notices, timeout)
+        when :eof then ended(key, out, notices)
+        else Result.new(status: outcome, stdout: out, notice: join(notices))
+        end
+      end
 
       def default_timeout = config[:timeout] || DEFAULT_TIMEOUT
       def cwd = config[:cwd] || Dir.pwd
