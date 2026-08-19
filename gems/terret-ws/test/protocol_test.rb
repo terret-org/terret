@@ -933,4 +933,85 @@ class ProtocolTest < Minitest::Test
       assert_equal "internal", sock.written.last[:code]
     end
   end
+
+  # The M6 acceptance: many woken turns over the socket, a mid-life
+  # compaction (role summarizer), a fallback title on the first turn/end, a
+  # lifetime usage rollup, and a hot policy flip -- denied before, allowed
+  # after, no restart, running on the compacted projection. Script
+  # accounting (verified against FakeAdapter's strict-order consumption):
+  # turns one and two are single-step (2 entries); the compactor's own
+  # ctx[:summarizer].summarize call consumes one entry at turn two's end (it
+  # rides outside the loop, so it owes no step/end and isn't part of the
+  # step tally); turns three and four are two-step tool turns (4 entries) --
+  # 7 script entries, 6 step/end events total.
+  def test_m6_acceptance_wakes_compaction_title_cost_and_hot_policy
+    Sync do |task|
+      light = { prompt_tokens: 50,  completion_tokens: 10, cost: 0.01 }
+      heavy = { prompt_tokens: 800, completion_tokens: 10, cost: 0.05 }
+      ping  = ->(id) { Terret::LLM::ToolCall.new(id: id, name: "ping", args: {}) }
+      ctx = boot(
+        script: [
+          { text: "Reply one.", usage: light },
+          { text: "Reply two.", usage: heavy },      # over budget -> compaction after this turn
+          { text: "COMPACT: the story so far." },     # the role summarizer's call
+          { text: "Pinging.", usage: light, tool_calls: [ping.("tp1")] },
+          { text: "Denied then.", usage: light },     # model reacts to the veto
+          { text: "Pinging.", usage: light, tool_calls: [ping.("tp2")] },
+          { text: "Pong received.", usage: light }
+        ],
+        extra_rows: [
+          { id: "summarizer", plugin: Terret::RoleSummarizer },
+          { id: "compactor", plugin: Terret::Compactor, config: { budget: 500 } },
+          { id: "titler",    plugin: Terret::Titler } # no :titler role -> fallback title
+        ]
+      )
+      ctx[:llm].set_role(:compactor, "fake/scripted")
+      ctx.with_owner("ping-plugin") do
+        ctx[:tools].register(name: "ping", description: "Pong", params: {}) { "pong" }
+      end
+
+      agent, session = spawn_agent(ctx)
+      Terret::Tools::AllowList.install(agent.ctx, ["nothing"]) # deny-by-default floor
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "subscribe", from_seq: 0 })
+
+      # wake one: titled at first turn/end
+      sock.client_send({ type: "inject", text: "start the saga", wake: true })
+      await { session.events.count { |e| e.type == "turn/end" } == 1 && agent.status == :idle }
+      assert_equal "start the saga", ctx[:sessions].title(session.id)
+
+      # wake two: overweight -> compacted after turn/end, boundary contract holds
+      sock.client_send({ type: "inject", text: "continue", wake: true })
+      await { session.events.any? { |e| e.type == "session/compacted" } }
+      compacted = session.events.find { |e| e.type == "session/compacted" }
+      assert_equal compacted.seq - 1, compacted.payload[:upto_seq]
+      await { sock.event_types.include?("session/compacted") }
+      assert_includes sock.event_types, "session/titled"
+
+      # wake three: the floor denies ping; the turn survives on the error result
+      sock.client_send({ type: "inject", text: "ping something", wake: true })
+      await { session.events.count { |e| e.type == "turn/end" } == 3 && agent.status == :idle }
+      denied = session.events.find { |e| e.type == "tool/result" }
+      assert_match(/allow list/, denied.payload[:error])
+
+      # the flip: durable, effective next call, no restart
+      sock.client_send({ type: "set_policy", patterns: ["ping"] })
+      await { session.events.any? { |e| e.type == "policy/updated" } }
+
+      # wake four: allowed now, and it runs on the compacted projection
+      sock.client_send({ type: "inject", text: "ping again", wake: true })
+      await { session.events.count { |e| e.type == "turn/end" } == 4 && agent.status == :idle }
+      results = session.events.select { |e| e.type == "tool/result" }
+      assert_equal "pong", results.last.payload[:content]
+      assert_equal "COMPACT: the story so far.",
+                   ctx[:sessions].derive_messages(session.id).first.text
+
+      # the bill: every step/end summed over the whole life (6 steps)
+      usage = ctx[:sessions].usage(session.id)
+      assert_equal 6, usage[:steps]
+      assert_equal 50 + 800 + 50 + 50 + 50 + 50, usage[:prompt_tokens]
+      assert_in_epsilon 0.01 + 0.05 + 0.01 + 0.01 + 0.01 + 0.01, usage[:cost]
+      sock.client_close
+    end
+  end
 end
