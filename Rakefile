@@ -70,10 +70,11 @@ end
 desc "Generate docs/config-catalog.md from every service's Hames::Schema (CI diffs this)"
 task :"config:catalog" do
   require_relative "gems/terret/lib/terret/boot"
-  # The base bundle's requires plus the interface/adapter gems, so every schema
-  # a shipped bundle can mount is registered before the catalog is written.
-  %w[terret/store/sqlite terret/openrouter terret/exec terret/tools_std
-     terret/sandbox/docker terret/ws terret/mcp terret/morph].each { |f| require f }
+  require_relative "gems/terret/lib/terret/schema_gems"
+  # One shared list (Terret::SCHEMA_GEMS), so every schema a shipped bundle can
+  # mount is registered before the catalog is written — and a new configurable
+  # gem is added in one place the schema tests read too.
+  Terret::SCHEMA_GEMS.each { |f| require f }
 
   sections = ConfigCatalog.sections
   File.write("docs/config-catalog.md", <<~MD)

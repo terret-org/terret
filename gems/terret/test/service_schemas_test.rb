@@ -2,17 +2,16 @@
 
 require "minitest/autorun"
 require_relative "../lib/terret/boot"
+require_relative "../lib/terret/schema_gems"
 
 # Every service in the base bundle either declares a config_schema against the
 # keys it actually reads, or is deliberately unschema'd. These lock the
 # declarations so a service that grows a config key without extending its schema
 # is caught here rather than in doctor's silence (docs/composition.md §9).
 class ServiceSchemasTest < Minitest::Test
-  def self.require_bundle_code
-    %w[terret/store/sqlite terret/openrouter terret/exec terret/tools_std
-       terret/sandbox/docker terret/ws terret/mcp terret/morph].each { |f| require f }
-  end
-  require_bundle_code
+  # The same list rake config:catalog uses, so the catalog and these tests can
+  # never disagree about which gems ship schemas.
+  Terret::SCHEMA_GEMS.each { |f| require f }
 
   def schema(klass) = klass.config_schema
 
