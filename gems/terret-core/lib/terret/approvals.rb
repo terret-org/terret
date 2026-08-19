@@ -165,15 +165,30 @@ module Terret
         # thread under plain minitest, where tests resolve from another thread
         q.pop
       ensure
-        # The restore is decided, not left to whichever assignment runs last:
-        # a cancel requested while this call was parked has not stopped being
-        # true just because a verdict landed, so the fiber unparks into a turn
-        # that already knows it is stopping and the status says so too
-        # (docs/subagents.md §8).
-        if agent && agent.status == :waiting_approval
-          agent.status = agent.cancelled? ? :stopping : :running
-        end
         @waiting.delete(key)
+        restore(agent, call.session_id)
+      end
+
+      # What the agent goes back to when a parked call comes out, derived from
+      # the LOG rather than from the label this park overwrote.
+      #
+      # A parallel run can park two calls at once (docs/subagents.md §5), and
+      # the fiber that unparks first must not announce a turn that is still
+      # waiting on a human: the socket reads this status to decide whether a
+      # cancel also has to deny_pending!, so a premature :running is a turn
+      # nobody can cancel and a sibling parked forever. While anything is
+      # still pending for the session, :waiting_approval stays true.
+      #
+      # And the restore that does happen is decided rather than left to
+      # whichever assignment runs last: a cancel requested while the call was
+      # parked has not stopped being true just because a verdict landed, so
+      # the fiber unparks into a turn that already knows it is stopping and
+      # the status says the same thing (docs/subagents.md §8).
+      def restore(agent, session_id)
+        return unless agent && agent.status == :waiting_approval
+        return unless pending(session_id).empty?
+
+        agent.status = agent.cancelled? ? :stopping : :running
       end
     end
   end

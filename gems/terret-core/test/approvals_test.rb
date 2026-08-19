@@ -3,6 +3,16 @@
 require "minitest/autorun"
 require_relative "../lib/terret"
 
+# Two calls of one parallel run can be parked at the same time, and only a
+# reactor can put them there: without one the barrier degrades to sequential
+# and the second call never starts while the first is waiting on a human.
+ASYNC_AVAILABLE = begin
+  require "async"
+  true
+rescue LoadError
+  false
+end unless defined?(ASYNC_AVAILABLE)
+
 module ApprovalsHarness
   def boot(script:, extra_rows: [], approvals: { id: "approvals", plugin: Terret::Tools::Approvals })
     Hames.reset_events!
@@ -44,8 +54,18 @@ module ApprovalsHarness
   # Run a turn in a background thread; wait until the agent parks.
   def park_turn(ctx, agent)
     t = Thread.new { ctx[:loop].run_turn(agent, "ship it") }
+    (@parked ||= []) << t
     await("never parked (status=#{agent.status})") { agent.status == :waiting_approval }
     t
+  end
+
+  # A test that fails between the park and its verdict leaves a thread blocked
+  # on a queue nothing will ever push to. Nobody is coming with a decision once
+  # the test is over, so what is still parked gets killed rather than left to
+  # hold the suite.
+  def teardown
+    @parked&.each { |t| t.kill unless t.join(0.5) }
+    @parked = nil
   end
 
   def await(message = "condition never held", timeout: 5)
@@ -320,5 +340,88 @@ class ApprovalsGateTest < Minitest::Test
     agent, session = spawn(ctx) # deploy never registered
     assert_equal :completed, ctx[:loop].run_turn(agent, "ship it")
     assert_match(/KeyError/, session.events.find { |e| e.type == "tool/result" }.payload[:error])
+  end
+end
+
+# One assistant message can park two calls at once now that a parallel run
+# executes as a group. The status the socket branches on has to keep telling
+# the truth through that, because :running on a still-parked turn is a turn
+# nobody can cancel.
+class ParallelApprovalsTest < Minitest::Test
+  include ApprovalsHarness
+
+  def setup
+    skip "async is not installed" unless ASYNC_AVAILABLE
+  end
+
+  DEPLOY_A = Terret::LLM::ToolCall.new(id: "tc1", name: "deploy_a", args: {})
+  DEPLOY_B = Terret::LLM::ToolCall.new(id: "tc2", name: "deploy_b", args: {})
+
+  def two_deploy_script
+    [{ text: "Deploying both.", tool_calls: [DEPLOY_A, DEPLOY_B] }, { text: "Done." }]
+  end
+
+  # `ran` is the only honest barrier for "the parked fiber has come back":
+  # `pending` goes empty inside the appending fiber, before the waiter has
+  # been scheduled at all, and the tool/result does not land until the whole
+  # run finishes. The handler runs immediately after the gate lets the call
+  # through, which is immediately after park's ensure restored the status.
+  def register_parallel_deploys(ctx, ran)
+    ctx.with_owner("deploys") do
+      %w[deploy_a deploy_b].each do |name|
+        ctx[:tools].register(name: name, description: "ship", params: {}, mutating: true,
+                             approval: :always, concurrency: :parallel) do
+          ran << name
+          "#{name} shipped"
+        end
+      end
+    end
+  end
+
+  def test_a_sibling_still_parked_keeps_the_agent_waiting_approval
+    ctx, = boot(script: two_deploy_script)
+    ran = []
+    register_parallel_deploys(ctx, ran)
+    agent, session = spawn(ctx)
+
+    Sync do |task|
+      turn = task.async { ctx[:loop].run_turn(agent, "ship it") }
+      await("both calls never parked") { ctx[:approvals].pending(session.id).length == 2 }
+      assert_equal :waiting_approval, agent.status
+
+      ctx[:sessions].append(session.id, "approval/resolved",
+                            { call_id: "tc1", verdict: "approved" })
+      await("tc1 never unparked") { ran.include?("deploy_a") }
+
+      assert_equal ["tc2"], ctx[:approvals].pending(session.id)
+      assert_equal :waiting_approval, agent.status,
+                   "one verdict must not announce a turn that is still parked on another"
+
+      # ...which is the whole point: the socket reads this status to decide
+      # whether a cancel needs deny_pending!, so a wrong :running here is a
+      # turn that can never be cancelled.
+      agent.cancel("user hit stop")
+      ctx[:approvals].deny_pending!(session.id, reason: "user hit stop")
+      assert_equal :cancelled, task.with_timeout(5) { turn.wait }
+    end
+  end
+
+  def test_the_last_verdict_of_a_parallel_park_restores_the_agent
+    ctx, = boot(script: two_deploy_script)
+    register_parallel_deploys(ctx, [])
+    agent, session = spawn(ctx)
+
+    Sync do |task|
+      turn = task.async { ctx[:loop].run_turn(agent, "ship it") }
+      await("both calls never parked") { ctx[:approvals].pending(session.id).length == 2 }
+
+      %w[tc1 tc2].each do |id|
+        ctx[:sessions].append(session.id, "approval/resolved", { call_id: id, verdict: "approved" })
+      end
+
+      assert_equal :completed, task.with_timeout(5) { turn.wait }
+      results = session.events.select { |e| e.type == "tool/result" }
+      assert_equal ["deploy_a shipped", "deploy_b shipped"], results.map { |e| e.payload[:content] }
+    end
   end
 end
