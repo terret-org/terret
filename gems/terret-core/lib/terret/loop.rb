@@ -131,6 +131,13 @@ module Terret
       agent.ctx.dispose!
       @agents.delete(id)
       @by_session.delete(agent.session_id)
+      # Fork disposal reaps the agent's registrations, but the process state a
+      # tool call created — ctx[:shell]'s bash, ctx[:terminals]' PTYs — is
+      # root-mounted and keyed by session, so it survives the fork. This is the
+      # signal those services reap it on; core stays decoupled from the optional
+      # exec gem by only emitting, and emit isolates a listener fault so a
+      # reaping bug cannot strand the disposal that already happened.
+      @ctx.emit("agent/disposed", agent.session_id)
       agent
     end
 

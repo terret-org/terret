@@ -152,6 +152,11 @@ module Terret
         @ctx = ctx
         @sessions = {} # key (String) => Session
         @running = {}  # key (String) => true while a command is in flight
+        # When the agent that owns a session key is disposed, its bash (and the
+        # background jobs in its process group) must go with it — fork disposal
+        # never reaches this root-mounted process. Registered via ctx.on, so it
+        # reverses when this service unloads.
+        ctx.on("agent/disposed") { |session_id| close(session: session_id) }
       end
 
       # The loader calls this on unload. A persistent shell is a process the

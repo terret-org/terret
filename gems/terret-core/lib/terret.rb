@@ -36,6 +36,7 @@ module Terret
        doc: "agent allow-list replaced (metadata; projection-invisible)")
     e.("session/titled",   :emit, durable: true, doc: "session titled (metadata; projection-invisible)")
     # live extension points
+    e.("agent/disposed",    :emit,      doc: "an agent was disposed (session_id); reap its session-keyed runtime state")
     e.("config/updated",    :emit,      doc: "a row's config was hot-swapped (id, config)")
     e.("session/event",     :emit,      doc: "fan-out of every durable append")
     e.("agent/pre_step",    :waterfall, doc: "rewrite or reject the claimed messages")

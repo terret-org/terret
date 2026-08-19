@@ -66,6 +66,10 @@ module Terret
       def start(ctx)
         @ctx = ctx
         @open = {} # [owner, name] => PTYHandle
+        # Disposing the owning agent reaps every PTY it opened; fork disposal
+        # never touches this root-mounted state. Registered via ctx.on so it
+        # reverses when this service unloads.
+        ctx.on("agent/disposed") { |session_id| close_all_for(session_id) }
       end
 
       # The loader calls this on unload. Terminals are processes the harness

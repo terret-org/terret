@@ -5,6 +5,7 @@ event's public contract; the bus enforces it at runtime.
 
 | Event | Mode | Durable | Description |
 |---|---|---|---|
+| `agent/disposed` | emit |  | an agent was disposed (session_id); reap its session-keyed runtime state |
 | `agent/pre_step` | waterfall |  | rewrite or reject the claimed messages |
 | `agent/request` | waterfall |  | rewrite the outbound model request |
 | `agent/turn_stopping` | serial |  | ordered veto point before turn/end |

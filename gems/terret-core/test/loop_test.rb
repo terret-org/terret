@@ -605,6 +605,33 @@ class AgentLifecycleTest < Minitest::Test
     assert_raises(Terret::TurnAlreadyRunning) { ctx[:loop].dispose_agent(agent.id) }
   end
 
+  # Disposal is the one signal root-mounted, session-keyed runtime state (a
+  # shell's bash, a terminal's PTY) gets to reap what this agent opened — the
+  # fork's own disposal never reaches it.
+  def test_dispose_agent_emits_agent_disposed_with_the_session_id
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    seen = []
+    ctx.on("agent/disposed") { |sid| seen << sid }
+
+    ctx[:loop].dispose_agent(agent.id)
+    assert_equal [s.id], seen
+  end
+
+  # A reaping bug in one listener must not strand disposal: emit isolates it.
+  def test_dispose_agent_survives_a_raising_agent_disposed_listener
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    ctx.on("agent/disposed") { |_sid| raise "boom" }
+
+    ctx[:loop].dispose_agent(agent.id) # must not raise
+    assert_nil ctx[:loop].agent(agent.id)
+    assert_nil ctx[:loop].agent_for_session(s.id)
+    ctx[:loop].spawn_agent(session_id: s.id) # the slot is genuinely free
+  end
+
   def test_the_agent_cap_holds
     ctx2, = boot_with_cap(2)
     a = ctx2[:sessions].create
