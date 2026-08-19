@@ -265,6 +265,29 @@ module Terret
 
         def write(str) = @writer.write(str)
 
+        # Whether the child is still running, probed with a non-blocking wait.
+        # Write failure cannot be the only tell: macOS raises EIO writing to a
+        # master whose child died, but Linux queues the bytes into a pty no
+        # one will ever read and reports nothing — so a caller refusing input
+        # to a dead terminal has to ask the process table, not the fd. The
+        # probe reaps the child when it finds one exited; the status is kept
+        # so #close skips its own wait instead of hunting a pid that is gone
+        # (reap! tolerates that too, but not re-signaling a reaped pid is
+        # better than tolerating it).
+        def alive?
+          return false if @closed || @exited
+
+          if Process.wait2(@pid, Process::WNOHANG)
+            @exited = true
+            false
+          else
+            true
+          end
+        rescue Errno::ECHILD
+          @exited = true
+          false
+        end
+
         # Idempotent: a terminal explicitly closed and then closed again by
         # its owner's disposal must not raise, and must not wait on a child
         # that is already reaped.
@@ -290,7 +313,7 @@ module Terret
           rescue IOError
             nil
           end
-          @ended = @reaper.call(@pid, @grace)
+          @ended = @exited ? :terminated : @reaper.call(@pid, @grace)
         end
 
         private

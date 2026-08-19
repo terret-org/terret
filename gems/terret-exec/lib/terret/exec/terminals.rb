@@ -96,8 +96,18 @@ module Terret
         Terminal.new(name: name, owner: owner, pid: handle.pid)
       end
 
+      # The liveness check comes first because the write alone would not tell:
+      # Linux accepts a write to a pty master whose child is gone and quietly
+      # queues it, so only macOS would ever reach the rescue below. The rescue
+      # stays for the race the check cannot close — a child dying between the
+      # probe and the write, where macOS still raises.
       def input(name, text, session: DEFAULT_SESSION)
-        fetch(name, session).write(text)
+        handle = fetch(name, session)
+        unless handle.alive?
+          raise TerminalGone, "the terminal named #{name} has no live process; close it and open another"
+        end
+
+        handle.write(text)
       rescue Errno::EIO, Errno::EPIPE, IOError
         raise TerminalGone, "the terminal named #{name} has no live process; close it and open another"
       end
