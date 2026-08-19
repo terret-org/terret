@@ -56,7 +56,9 @@ module Terret
       schema = klass.respond_to?(:config_schema) ? klass.config_schema : nil
       return base.merge(status: :unschema, detail: nil) unless schema
 
-      result = schema.validate(config)
+      # redact: a value here is a materialized !env/!setting/!ruby result and
+      # may be a secret; the detail names its type only, never its content.
+      result = schema.validate(config, redact: true)
       status = if result.errors.any? then :error
                elsif result.warnings.any? then :warn
                else :ok

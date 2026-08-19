@@ -86,8 +86,33 @@ class HamesSchemaTest < Minitest::Test
     result = Sandbox.config_schema.validate({ image: "x", jobs: "lots" }, subject: "sandbox")
     err = result.errors.find { |e| e.include?("jobs") }
     refute_nil err
-    assert_match(/must be a Integer/, err)
+    assert_match(/must be an Integer/, err) # article by leading sound, not "a Integer"
     assert_match(/got "lots"/, err)
+  end
+
+  # redact: false (the default) names the value — programmatic callers hold
+  # plain config and the value is the useful part.
+  def test_the_default_message_names_the_rejected_value
+    result = Sandbox.config_schema.validate({ image: 1, network: "lan" }, subject: "s")
+    assert(result.errors.any? { |e| e.include?("got 1") })
+    assert(result.errors.any? { |e| e.include?(%(got "lan")) })
+  end
+
+  # redact: true names the TYPE only, never the content — doctor passes this so
+  # a materialized !env/!setting secret can never reach the message.
+  def test_redact_keeps_a_rejected_values_content_out_of_the_message
+    secret = "sk-canary-9f3a-must-not-appear"
+    type_result = Hames::Schema.build(n: { type: Integer })
+                               .validate({ n: secret }, subject: "s", redact: true)
+    refute_empty type_result.errors
+    type_result.errors.each { |e| refute_includes e, secret }
+    assert_match(/must be an Integer, got a String/, type_result.errors.first)
+
+    enum_result = Hames::Schema.build(mode: { type: String, enum: %w[none host] })
+                               .validate({ mode: secret }, subject: "s", redact: true)
+    refute_empty enum_result.errors
+    enum_result.errors.each { |e| refute_includes e, secret }
+    assert_match(/must be one of "none", "host"/, enum_result.errors.first)
   end
 
   def test_an_enum_violation_fails_naming_the_allowed_set

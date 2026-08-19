@@ -11,8 +11,8 @@ module Hames
   # dependency rule is a design constraint rather than a coincidence (CLAUDE.md).
   # The plan's §10 dry-schema mention is superseded by that rule.
   class Schema
-    # Tells config_schema() the read from config_schema({}) the declaration:
-    # with no argument it reads the stored schema, config_schema({}) declares an
+    # Distinguishes a read of config_schema from a declaration: with no argument
+    # config_schema() reads the stored schema, config_schema({}) declares an
     # empty one (a service that takes no config), and config_schema(key: {...})
     # declares a populated one.
     UNSET = Object.new.freeze
@@ -85,7 +85,14 @@ module Hames
     # unset !env resolving to nil is an ordinary state (§5) rather than a fault.
     # A non-nil value is checked against `type` and `enum`. Extra keys WARN
     # rather than fail, because config rows grow.
-    def validate(config, subject: nil)
+    #
+    # `redact:` governs whether a rejected value's CONTENT may appear in the
+    # message. It stays false for programmatic callers (which hold plain config,
+    # and a message naming the value is more useful), and doctor passes true
+    # because by the time it validates, a value is a materialized !env/!setting/
+    # !ruby result and may be a secret — so its message names the type only,
+    # never the content.
+    def validate(config, subject: nil, redact: false)
       config ||= {}
       prefix = subject ? "#{subject}: " : ""
       errors = []
@@ -97,11 +104,18 @@ module Hames
           next
         end
         if spec.type && Array(spec.type).none? { |t| value.is_a?(t) }
-          errors << "#{prefix}#{spec.name} must be #{Schema.type_desc(spec.type)}, got #{Schema.describe(value)}"
+          got = redact ? Schema.article(value.class.name) : Schema.describe(value)
+          errors << "#{prefix}#{spec.name} must be #{Schema.type_desc(spec.type)}, got #{got}"
         end
         if spec.enum && !spec.enum.include?(value)
-          errors << "#{prefix}#{spec.name} must be one of #{spec.enum.map(&:inspect).join(', ')}, " \
-                    "got #{value.inspect}"
+          allowed = spec.enum.map(&:inspect).join(", ")
+          # Redacted: the allowed set is schema-defined and safe to print; the
+          # configured value is not, so it is named as out-of-set, not echoed.
+          errors << if redact
+                      "#{prefix}#{spec.name} must be one of #{allowed} (the configured value is not)"
+                    else
+                      "#{prefix}#{spec.name} must be one of #{allowed}, got #{value.inspect}"
+                    end
         end
       end
 
@@ -114,14 +128,22 @@ module Hames
     def self.type_desc(type)
       types = Array(type)
       return "a boolean" if types.sort_by(&:name) == [FalseClass, TrueClass]
-      return "a #{types.first}" if types.length == 1
+      return article(types.first.name) if types.length == 1
 
-      "one of #{types.join(', ')}"
+      "one of #{types.map(&:name).join(', ')}"
+    end
+
+    # "an Integer", "a String" — the article chosen by the leading sound, close
+    # enough on class names, so a message never reads "a Integer".
+    def self.article(word)
+      word = word.to_s
+      /\A[aeiou]/i.match?(word) ? "an #{word}" : "a #{word}"
     end
 
     # A scalar renders as itself ("got 5", "got nil"); anything larger renders
     # as its class, so a wrong Hash where a String was wanted does not paste a
-    # whole tree into a one-line status.
+    # whole tree into a one-line status. Only reached when redact is false —
+    # doctor never lets a rejected value's content into a message.
     def self.describe(value)
       case value
       when String, Numeric, Symbol, true, false then value.inspect

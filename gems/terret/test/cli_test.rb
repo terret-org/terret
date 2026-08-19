@@ -234,6 +234,21 @@ class CLITest < Minitest::Test
     refute_includes out, "error:"
   end
 
+  # The promise doctor.rb and composition.md §9 make: doctor validates AFTER
+  # materialize, so a validation error whose message echoed the value would
+  # print a resolved secret. An Integer-typed key wired to !env resolves to the
+  # (string) secret and type-mismatches — the reachable leak vector.
+  def test_doctor_never_echoes_a_resolved_value_in_a_validation_error
+    profile_patch(demo_profile, "rows:\n  - id: loop\n    config: { max_agents: !env DOCTOR_CANARY }\n")
+    ENV["DOCTOR_CANARY"] = "sk-canary-must-never-be-printed"
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 1, status
+    assert_match(/loop.*error.*must be an Integer/, out)
+    refute_includes out, "sk-canary-must-never-be-printed"
+  ensure
+    ENV.delete("DOCTOR_CANARY")
+  end
+
   def test_doctor_reports_a_set_env_marker_as_set
     demo_profile
     ENV["OPENROUTER_API_KEY"] = "sk-present"
