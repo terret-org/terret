@@ -68,12 +68,14 @@ class SandboxDockerTest < Minitest::Test
     assert_empty leaked, "the provider's own stop left containers behind"
   end
 
-  def boot(workspace:, network: "none")
+  # `user:` is passed only when the caller names it, so the default path under
+  # test is the provider's own default rather than one the harness supplied.
+  def boot(workspace:, network: "none", **overrides)
     Hames.reset_events!
     Terret.declare_events!
     loader = Hames::Loader.new
-    loader.layer([{ id: "sandbox", plugin: Terret::Sandbox::Docker,
-                    config: { image: IMAGE, network: network, workspace: Array(workspace) } }])
+    config = { image: IMAGE, network: network, workspace: Array(workspace) }.merge(overrides)
+    loader.layer([{ id: "sandbox", plugin: Terret::Sandbox::Docker, config: config }])
     ctx = loader.boot!
     @plugins << ctx[:sandbox]
     ctx
@@ -248,6 +250,38 @@ class SandboxDockerTest < Minitest::Test
     end
   end
 
+  # The dead-container recovery. Without #restart! an operator's `docker rm`
+  # (or an OOM, or a daemon restart) leaves the provider holding an id that
+  # every later exec answers "No such container" for, with no way back short of
+  # remounting the row.
+  def test_restart_recovers_from_a_container_removed_underneath_us
+    skip "docker unavailable" unless docker?
+
+    workspace do |ws|
+      sandbox = ctx_sandbox(ws)
+      sandbox.workspace_ready!
+      dead = sandbox.container
+      system("docker", "rm", "-f", dead, out: File::NULL, err: File::NULL)
+
+      # The seam cannot notice on its own; a wrapped exec is how the caller
+      # finds out, and it fails against the id the provider is still holding.
+      status, out = spawn!(sandbox.wrap(["true"], cwd: ws))
+
+      refute_equal 0, status
+      assert_match(/[Nn]o such container/, out)
+
+      sandbox.restart!
+
+      assert_nil sandbox.container
+
+      status, out = spawn!(sandbox.wrap(%w[echo recovered], cwd: ws))
+
+      assert_equal 0, status, out
+      assert_equal "recovered\n", out
+      refute_equal dead, sandbox.container, "restart! reused the dead container id"
+    end
+  end
+
   def test_stop_tolerates_a_container_that_is_already_gone
     skip "docker unavailable" unless docker?
 
@@ -291,6 +325,61 @@ class SandboxDockerTest < Minitest::Test
 
       assert_equal 0, status, out
       assert_equal "written by the container\n", File.read(File.join(ws, "guest.txt"))
+    end
+  end
+
+  # -- who the container runs as -----------------------------------------------
+
+  # The reason the default is the host's uid rather than root: on Linux a
+  # root-owned file in a read-write bind mount is one ctx[:fs] cannot edit, so
+  # the container could create work the host tools then cannot touch. macOS
+  # remaps mount ownership and hides it, which is why this asserts the uid
+  # directly instead of trusting a write to prove it.
+  def test_the_container_runs_as_the_host_user_by_default
+    skip "docker unavailable" unless docker?
+
+    workspace do |ws|
+      sandbox = ctx_sandbox(ws)
+      status, out = spawn!(sandbox.wrap(["id", "-u"], cwd: ws))
+
+      assert_equal 0, status, out
+      assert_equal Process.uid.to_s, out.strip
+
+      _, gid = spawn!(sandbox.wrap(["id", "-g"], cwd: ws))
+
+      assert_equal Process.gid.to_s, gid.strip
+    end
+  end
+
+  # The round-trip Task 15 and the soak depend on: the container creates a
+  # file and the HOST edits it afterwards, the way ctx[:fs] would.
+  def test_a_file_the_container_created_can_be_edited_by_the_host
+    skip "docker unavailable" unless docker?
+
+    workspace do |ws|
+      sandbox = ctx_sandbox(ws)
+      status, out = spawn!(sandbox.wrap(["sh", "-c", "echo from-the-container > shared.txt"], cwd: ws))
+
+      assert_equal 0, status, out
+
+      path = File.join(ws, "shared.txt")
+      File.write(path, "edited by the host\n") # this is the call that raises EACCES under root
+
+      assert_equal "edited by the host\n", File.read(path)
+    end
+  end
+
+  # Escape hatch for a profile that needs root inside — apt-get, or installing
+  # into the image — stated explicitly rather than reached by accident.
+  def test_user_nil_runs_as_root
+    skip "docker unavailable" unless docker?
+
+    workspace do |ws|
+      sandbox = boot(workspace: ws, user: nil)[:sandbox]
+      status, out = spawn!(sandbox.wrap(["id", "-u"], cwd: ws))
+
+      assert_equal 0, status, out
+      assert_equal "0", out.strip
     end
   end
 

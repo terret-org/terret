@@ -49,6 +49,21 @@ module Terret
     # rest of the host — the filesystem outside the workspace, the process
     # table, and (at `network: "none"`) the network.
     #
+    # CANCELLATION DOES NOT CROSS THE BOUNDARY, and this one is a real loss
+    # rather than a footnote. Every kill in the harness — #spawn's timeout
+    # escalation, a terminal's close, ctx[:shell]'s sweep — signals a pid on
+    # the HOST, and under this provider that pid is the `docker exec` CLI, not
+    # the process it started. Killing the CLI detaches; the command inside the
+    # container keeps running. So a timed-out command is reported as timed out
+    # and truthfully was abandoned, but it goes on burning the container's CPU
+    # until something stops the container itself, and ctx[:shell]'s `set +m`
+    # guarantee — that one signal to the session's process group ends every
+    # child it started — is void here, because that process group lives in
+    # another pid namespace. Ending the container (#stop, or #restart!) is the
+    # only cancellation that reaches inside it. Closing this properly means
+    # `docker exec` growing a way to signal what it started, or the provider
+    # tracking in-container pids itself; neither belongs in M7.
+    #
     # ENV DOES NOT CROSS. `Subprocess#spawn(env:)` applies to the docker CLI
     # process on the host, not to the process inside the container: variables
     # set that way configure `docker`, and the command never sees them. In-
@@ -155,6 +170,22 @@ module Terret
         @lock.synchronize { @container ||= run_container! }
       end
 
+      # Recovery for a container that left without us: an operator's `docker
+      # rm`, an OOM kill, a Docker daemon restart. Nothing in this gem can
+      # notice that on its own — the provider only builds an argv, and the exec
+      # that would have reported "No such container" is run by
+      # ctx[:subprocess], which has no path back to the seam to say so. So
+      # recovery is explicit: drop the id being held, remove the container if
+      # it somehow is still there, and let the next #wrap build a fresh one.
+      # Without it a dead container stays dead for the life of the process and
+      # only a remount brings the agent back.
+      #
+      # What a restart costs is the same either way: everything the old
+      # container held is gone with it — ctx[:shell]'s sessions, open
+      # terminals, anything a command exported. A fresh one starts as fresh as
+      # the first one did.
+      def restart! = discard!
+
       # The loader's unload hook, and the only thing standing between a
       # crashed agent and a `sleep infinity` holding a bind mount forever. The
       # default argument is what lets a caller that is not the loader — a test,
@@ -195,6 +226,26 @@ module Terret
       def image = config[:image] || DEFAULT_IMAGE
       def network = config[:network] || DEFAULT_NETWORK
 
+      # Defaults to the HOST's uid:gid, and on Linux that default is
+      # load-bearing rather than a nicety. The workspace is bind-mounted
+      # read-write, so a container running as root writes root-owned files into
+      # it — and ctx[:fs], which runs as the host user, then cannot Write or
+      # Edit what the container just created. One world stops being one world.
+      # macOS hides this (Docker Desktop remaps ownership on the mount), which
+      # is exactly what makes it worth defaulting: silently fine on a
+      # developer's laptop, silently broken in Linux CI, which is where the
+      # acceptance run and the soak actually happen.
+      #
+      # The cost, measured rather than guessed: the host uid has no /etc/passwd
+      # entry inside the image, so `whoami` fails with "cannot find name for
+      # user ID 501", $HOME is `/`, and an interactive bash greets as "I have
+      # no name!". Harmless under `--norc --noprofile`, and the sentinel
+      # protocol is unaffected — the suite proves that rather than assuming it.
+      # A profile that needs root inside the container — to apt-get, or to
+      # install into the image — sets `user: nil` explicitly and takes the
+      # ownership problem back with it.
+      def user = config.fetch(:user) { "#{Process.uid}:#{Process.gid}" }
+
       # `sleep infinity` rather than the image's own entrypoint: this container
       # is a place to exec into, not a service, so it has to stay up and do
       # nothing. `--rm` so a container whose process ends is not left behind as
@@ -214,7 +265,7 @@ module Terret
         end
 
         argv = ["docker", "run", "-d", "--rm", "--label", LABEL, "--network", network,
-                *mounts, image, "sleep", "infinity"]
+                *(user ? ["--user", user] : []), *mounts, image, "sleep", "infinity"]
         status, out = capture(argv)
         raise ContainerUnavailable, "docker run failed (status #{status.inspect}): #{out}" unless status&.zero?
 

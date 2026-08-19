@@ -55,7 +55,7 @@ match. `fs.watch` is not part of v1; it stays out until a consumer needs
 it.
 
 **`ctx[:subprocess]`** — `spawn(argv, cwd:, env:, stdin:, timeout:)` and
-`pty_spawn(argv)`. Every argv passes `ctx[:sandbox].wrap(argv, cwd:)`
+`pty_spawn(argv)`. Every argv passes `ctx[:sandbox].wrap(argv, cwd:, tty:)`
 before it reaches `Process.spawn` or `PTY.spawn` — there is no spawn path
 in Terret that bypasses the sandbox seam, by construction, because nothing
 else is allowed to build the final argv. Timeout is cooperative
@@ -108,12 +108,19 @@ is no "no restriction configured" state that fails open.
 ## 4. The sandbox seam
 
 `ctx[:sandbox]` is the seam every argv passes through before it becomes a
-real process (§2). Its contract is small on purpose: `wrap(argv, cwd:)`
-returns the argv actually spawned, `isolated?` reports whether that argv
-runs inside a process boundary, and `workspace_ready!` is the hook a
+real process (§2). Its contract is small on purpose: `wrap(argv, cwd:,
+tty:)` returns the argv actually spawned, `isolated?` reports whether that
+argv runs inside a process boundary, and `workspace_ready!` is the hook a
 provider uses to make sure its execution world exists before the first
 spawn (a no-op for `none`; for Docker, it starts the long-lived container
 if one is not already running).
+
+`tty:` is how the calling path declares what it is. `pty_spawn` passes
+`true` and `spawn` never does, because a provider that puts a terminal on
+the far side of the seam has to be told when one is wanted and cannot
+guess: `docker exec -i -t` against pipe stdin fails outright, so the flag
+cannot simply be always-on. `none` accepts and ignores it — the host pty
+the caller already holds is the terminal.
 
 **`none`** is the identity provider: `wrap` returns its argument
 unchanged, `isolated?` is `false`. It is the explicit, opt-in-only trusted
@@ -121,10 +128,34 @@ mode (§13) — a profile that wants it says so.
 
 **`docker`** is the default-isolation provider (§13): a long-lived
 container per boot, `--network none` unless config overrides it, each
-workspace directory bind-mounted at the same absolute path (§1).
-`wrap(argv, cwd:)` turns `argv` into
-`["docker", "exec", "-w", cwd, container_id, *argv]`; `isolated?` is
-`true`.
+workspace directory bind-mounted at the same absolute path (§1) — the
+*realpath*, the same resolution `ctx[:fs]` applies to its own roots, so
+both services agree on what a workspace directory is called. It runs as
+the host's uid:gid by default, so files the container creates in that
+read-write mount stay editable by `ctx[:fs]`; `user: nil` opts back into
+root. `wrap(argv, cwd:, tty:)` turns `argv` into
+
+```
+["docker", "exec", "-i", ("-t" when tty:), "-w", cwd, container_id, *argv]
+```
+
+`-i` is always present, because without it `docker exec` does not attach
+stdin at all and neither a written `stdin:` nor `ctx[:shell]`'s protocol
+would reach the command. `-t` rides the PTY path only, and it is not
+cosmetic: without a terminal inside the container `stty -echo` has nothing
+to quiet while the host pty keeps echoing, so the echoed request line —
+session sentinel and all — lands in what `ctx[:shell]` reads back as the
+command's output. A `cwd` outside the granted workspace is refused rather
+than relocated, because it does not exist inside the container.
+`isolated?` is `true`.
+
+Two limits are inherent to the `docker exec` model rather than to this
+implementation. Environment does not cross: `spawn(env:)` configures the
+docker CLI on the host, not the process inside. And neither does
+cancellation — every kill signals the host-side CLI, so a timed-out
+command is abandoned but keeps running inside the container, and
+`ctx[:shell]`'s process-group sweep does not reach it. Stopping the
+container is what ends it.
 
 Swapping one for the other is a single patch row (plan §7) — the
 mechanism M7's acceptance stands on:
