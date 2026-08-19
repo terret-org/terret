@@ -406,4 +406,78 @@ class SubprocessTest < Minitest::Test
     assert_includes seen, "late"
     assert_operator ticks, :>, 5, "the ticker fiber stopped while the pty read blocked"
   end
+
+  # -- drain cooperation and escalation -------------------------------------
+  #
+  # A child that keeps the pipe readable is the case a job invites: it runs
+  # while nobody watches, and its writes can outrun a collector. The drain has
+  # to stay cooperative under that, and end_group has to escalate under it.
+
+  # A reader that is always ready with bytes — a child that never stops
+  # writing — optionally for a fixed number of passes before it reports the
+  # pipe momentarily empty. read_nonblock is the only method the drain touches.
+  class Runaway
+    def initialize(passes: Float::INFINITY, chunk: 64 * 1024)
+      @passes = passes
+      @chunk = ("x" * chunk).b
+    end
+
+    def read_nonblock(max, exception: false)
+      return :wait_readable if @passes <= 0
+
+      @passes -= 1
+      @chunk.byteslice(0, max)
+    end
+
+    def closed? = false
+    def close = nil
+  end
+
+  # Draining a burst that stays readable must not run to completion without
+  # letting another fiber breathe. Bounded passes so the drain still finishes
+  # (an unbounded fake would wedge the reactor rather than fail an assertion):
+  # the ticker's count is the proof the drain yielded along the way.
+  def test_a_continuously_readable_pipe_yields_to_other_fibers_while_draining
+    skip "async not installed" unless ASYNC_AVAILABLE
+
+    handle = Terret::Exec::Subprocess::PipeHandle.new(
+      reader: Runaway.new(passes: 200), pid: 2**30, reaper: ->(*) { :terminated }, grace: 1
+    )
+    ticks = 0
+    Sync do |task|
+      ticker = task.async do
+        loop do
+          ticks += 1
+          sleep 0
+        end
+      end
+      drainer = task.async { handle.read(64 * 1024) }
+      drainer.wait
+      ticker.stop
+    end
+
+    assert_operator ticks, :>, 5,
+                    "the drain ran to completion without yielding; the ticker starved"
+  end
+
+  # A writer that ignores TERM and keeps the pipe readable used to hold
+  # end_group's drain forever, so its own deadline check was never reached and
+  # the SIGKILL never landed. The watchdog is a plain Thread on purpose: an
+  # unfixed end_group spins with no yield, and nothing on a reactor could
+  # preempt it, so the bound has to come from outside the code under test.
+  def test_end_group_escalates_to_kill_when_a_writer_keeps_the_pipe_readable
+    reaped = []
+    handle = Terret::Exec::Subprocess::PipeHandle.new(
+      reader: Runaway.new, pid: 2**30, reaper: ->(pid, _grace) { reaped << pid; :killed }, grace: 0.2
+    )
+    ended = nil
+    watchdog = Thread.new { ended = handle.send(:end_group) }
+    returned = !watchdog.join(5).nil?
+
+    assert returned, "end_group spun on a continuously-readable pipe; the SIGKILL escalation never ran"
+    assert_equal :killed, ended
+    assert_equal [-(2**30)], reaped, "the child's process group must be reaped after the grace"
+  ensure
+    watchdog&.kill
+  end
 end

@@ -387,6 +387,14 @@ module Terret
         # last words were cut short.
         MAX_PENDING = 2 << 20
 
+        # How much one drain may read before it yields the reactor. A child that
+        # keeps the pipe readable would otherwise spin the drain loop with no
+        # scheduler yield and no exit — starving every other fiber on the one
+        # reactor, which is exactly the case a job (running while nobody watches)
+        # invites. MAX_PENDING bounded retained memory, not reactor occupancy:
+        # read-and-discard still loops. This bounds the occupancy.
+        YIELD_BYTES = 1 << 20
+
         def initialize(reader:, pid:, reaper:, grace:)
           @reader = reader
           @pid = pid
@@ -527,7 +535,11 @@ module Terret
           deadline = now + @grace
           @pending ||= String.new(encoding: Encoding::BINARY)
           loop do
-            drain(@pending, CHUNK, cap: MAX_PENDING)
+            # The deadline rides into the drain: a writer that keeps the pipe
+            # readable used to hold the drain here forever, so this loop's own
+            # deadline check was never reached and the SIGKILL below never ran.
+            # drain now surrenders at the deadline, and this break confirms it.
+            drain(@pending, CHUNK, cap: MAX_PENDING, deadline: deadline)
             break if @eof || now >= deadline
 
             sleep POLL
@@ -543,8 +555,15 @@ module Terret
           ended
         end
 
-        def drain(buf, max, cap: nil)
+        def drain(buf, max, cap: nil, deadline: nil)
+          since_yield = 0
           loop do
+            # A deadline lets a caller (end_group) bound the whole drain: a
+            # continuously-readable pipe would otherwise never surrender this
+            # loop. Checked before the read so a passed deadline stops it at
+            # once rather than after one more chunk.
+            return if deadline && now >= deadline
+
             chunk = @reader.read_nonblock(max, exception: false)
             if chunk.nil?
               @eof = true
@@ -553,6 +572,14 @@ module Terret
             break if chunk == :wait_readable
 
             keep(buf, chunk, cap)
+            since_yield += chunk.bytesize
+            next if since_yield < YIELD_BYTES
+
+            # Cooperative yield so a pipe that stays readable cannot monopolize
+            # the reactor. sleep 0 parks the fiber briefly under a scheduler and
+            # is a no-op without one, so both deployments stay correct.
+            since_yield = 0
+            sleep 0
           end
         rescue IOError
           @eof = true
