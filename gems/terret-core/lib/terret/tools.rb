@@ -206,5 +206,23 @@ module Terret
                       &.payload&.[](:patterns)
       end
     end
+
+    # AllowList as a config row, so a bundle can ship the deny-by-default
+    # floor the way it ships everything else (docs/composition.md §6). The
+    # module above is still the mechanism and still installable by hand; this
+    # is only the mounting. Its registrations are already effects of the
+    # mounting row, so unloading the row takes the gate with it.
+    #
+    # `patterns:` is the floor — the policy governing sessions that never
+    # issued a policy/updated of their own. Unconfigured means an empty floor,
+    # which denies every tool call.
+    class AllowListFloor < Hames::Service
+      service_key :allow_list
+      inject :tools, :sessions
+
+      def start(ctx)
+        AllowList.install(ctx, config[:patterns] || [])
+      end
+    end
   end
 end

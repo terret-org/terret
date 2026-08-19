@@ -1,0 +1,180 @@
+# terret-base — layer one of every profile (docs/composition.md §6).
+#
+# These rows are the answer to "what is a Terret": the session log, the
+# harness, the model seam, the execution world, the tool roster, and the
+# policy floor. A profile stacks this bundle first and then says what is
+# different about ITS machine, in profile.yml settings and patch.yml rows.
+#
+# Two things here are secure-by-default rather than convenient-by-default, and
+# both are called out where they sit: the sandbox is docker with the network
+# denied, and every allow list starts closed.
+#
+# Remember that a patch replaces a row's config WHOLESALE. Read a row here
+# before you patch it (or run `trt dump-config`) — a patch that mentions one
+# key drops the rest.
+name: terret-base
+
+# A bundle ships rows; the code those rows name comes from the gems the bundle
+# depends on (see terret.gemspec). Bundler puts them on the load path, and
+# these are the files that pull them in before a row's constant has to resolve.
+requires:
+  - terret/store/sqlite
+  - terret/openrouter
+  - terret/exec
+  - terret/tools_std
+  - terret/sandbox/docker
+
+rows:
+  # -- the durable log ------------------------------------------------------
+  # Everything the model can see is a projection of this file. Losing it loses
+  # the agent's memory; it is the one row worth backing up.
+  - id: session_store
+    plugin: Terret::Store::SQLite
+    config:
+      path: !setting store.path
+
+  - id: sessions
+    plugin: Terret::Sessions
+
+  - id: prompt
+    plugin: Terret::Prompt
+
+  - id: tools
+    plugin: Terret::Tools::Registry
+
+  # -- the model seam -------------------------------------------------------
+  # Roles are "provider/model"; "openrouter" is the provider name the row
+  # below registers. Point a role somewhere else by patching this row — and
+  # restate every role you still want, because the replacement is wholesale.
+  - id: llm
+    plugin: Terret::LLM::Service
+    config:
+      roles:
+        main: !setting model.main
+
+  # nil api_key is deliberate when the variable is unset: the adapter falls
+  # back to OPENROUTER_API_KEY itself and raises a better error than YAML can,
+  # and dump-config stays runnable on a machine that holds no secrets.
+  - id: openrouter
+    plugin: Terret::OpenRouter::Plugin
+    config:
+      api_key: !env OPENROUTER_API_KEY
+
+  # -- the execution world --------------------------------------------------
+  # THE SANDBOX ROW IS THE ONE TO READ TWICE. Every argv the harness spawns
+  # goes through ctx[:sandbox], and the default is a container with no
+  # network. Running tools directly on the host is a per-profile opt-in
+  # (docs/security.md, plan §13) — the shipped headless patch.yml shows what
+  # that opt-in looks like and what it costs.
+  - id: sandbox
+    plugin: Terret::Sandbox::Docker
+    config:
+      image: !setting sandbox.image
+      network: none
+      workspace: !setting workspace
+
+  - id: subprocess
+    plugin: Terret::Exec::Subprocess
+
+  # AND THE FS ROW FOR THE OPPOSITE REASON: `workspace:` is what every
+  # filesystem tool is contained to, and an empty or unconfigured list DENIES
+  # EVERY FILE OPERATION rather than permitting them. There is no
+  # ungranted-but-permitted state, so a profile that never sets
+  # settings.workspace gets an agent that cannot read a file. That is the safe
+  # failure, and a confusing one if nobody says so in advance.
+  - id: fs
+    plugin: Terret::Exec::FS
+    config:
+      workspace: !setting workspace
+
+  - id: shell
+    plugin: Terret::Exec::Shell
+
+  - id: terminals
+    plugin: Terret::Exec::Terminals
+
+  - id: jobs
+    plugin: Terret::Exec::Jobs
+
+  # -- the tool roster ------------------------------------------------------
+  # Claude Code's names wherever it has one. Every handler reaches the world
+  # only through a seam, which is why swapping the sandbox row above moves the
+  # whole roster into a container with no tool change.
+  - id: std_files
+    plugin: Terret::ToolsStd::Files
+
+  - id: std_bash
+    plugin: Terret::ToolsStd::Bash
+
+  - id: std_terminals
+    plugin: Terret::ToolsStd::Terminals
+
+  - id: std_jobs
+    plugin: Terret::ToolsStd::Jobs
+
+  - id: std_todo
+    plugin: Terret::ToolsStd::Todo
+
+  # Deny-by-default, like every other list here: WebFetch reaches nothing
+  # until a profile names hosts in `allow`. Patch this row with the globs your
+  # agent actually needs.
+  - id: std_web_fetch
+    plugin: Terret::ToolsStd::WebFetch
+    config:
+      allow: []
+      deny: []
+
+  - id: subagents
+    plugin: Terret::Subagents
+
+  - id: std_task
+    plugin: Terret::ToolsStd::Task
+
+  - id: loop
+    plugin: Terret::Loop
+
+  # -- policy ---------------------------------------------------------------
+  # The scrubber at the append boundary and at tools/post_execute: a
+  # credential that reaches a tool result never reaches the session log or the
+  # model. These patterns are a floor, not a guarantee — add the shapes your
+  # environment actually issues.
+  - id: redactor
+    plugin: Terret::Redactor
+    config:
+      patterns:
+        - "sk-[A-Za-z0-9_-]{16,}"
+        - "gh[pousr]_[A-Za-z0-9]{20,}"
+        - "AKIA[0-9A-Z]{16}"
+        - "xox[baprs]-[A-Za-z0-9-]{10,}"
+
+  # The floor: the policy governing a session that never issued a
+  # policy/updated of its own. It names exactly the roster mounted above, so a
+  # tool arriving from a third-party bundle is denied until a profile says
+  # otherwise — that is what deny-by-default buys, and the cost is this list.
+  - id: allow_list
+    plugin: Terret::Tools::AllowListFloor
+    config:
+      patterns:
+        - Read
+        - Write
+        - Edit
+        - Glob
+        - Grep
+        - Bash
+        - WebFetch
+        - Task
+        - TodoWrite
+        - terminal_open
+        - terminal_read
+        - terminal_input
+        - terminal_close
+        - job_start
+        - job_collect
+        - job_stop
+
+  # Present but unmounted: approvals are opt-in per tool (M6), and an
+  # unattended profile has nobody to ask. Flip `disabled` in a patch to turn
+  # them on; the row is here so you can see what you are turning on.
+  - id: approvals
+    plugin: Terret::Tools::Approvals
+    disabled: true

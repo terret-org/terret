@@ -1,0 +1,27 @@
+# Rows this profile changes about terret-base. Applied after every bundle in
+# the stack, before ~/.terret/patch.yml and before any --patch overlay.
+#
+# A patch targeting an existing id replaces that row's config WHOLESALE. It
+# never deep-merges. So a patch that repoints the model has to carry the api
+# key along with it, and `trt dump-config --profile headless` is how you see
+# what a row currently holds before you replace it.
+#
+# A row with an id that is not in the stack yet is an insertion, and it has to
+# say where it goes with `before:` or `after:` naming an existing row.
+
+rows: []
+# ---------------------------------------------------------------------------
+# UNCOMMENT TO RUN TOOLS DIRECTLY ON THIS HOST, UNSANDBOXED.
+#
+# Every Bash command, every spawned process, and every terminal this agent
+# opens runs as you, on your machine, with your network. A prompt-injected
+# instruction that reaches a tool call has nothing between it and the host but
+# the allow list. See docs/security.md.
+#
+# This comment block is not a security control. What it is, is the difference
+# between a decision made and a default inherited.
+# ---------------------------------------------------------------------------
+# rows:
+#   - id: sandbox
+#     plugin: Terret::Exec::SandboxNone
+#     config: {}

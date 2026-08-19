@@ -1,0 +1,46 @@
+# The headless profile — the template Terret ships (docs/composition.md §3).
+#
+# Copy this directory to ~/.terret/profiles/<name>/ and edit it, or edit it in
+# place under ~/.terret/profiles/headless/. A home that holds no copy falls
+# back to this file, so `trt boot --profile headless` runs out of the box —
+# which also means an unedited profile has no workspace and can read nothing.
+#
+#   trt dump-config --profile headless    # what the stack actually resolves to
+#   trt doctor      --profile headless    # what does not fit
+#   trt boot        --profile headless    # run it
+
+bundles:
+  - terret # terret-base, always layer one
+
+# Out-of-tree requires for code that is not a bundle. Bundles pull in their
+# own gems; this is for a plugin you wrote and put on the load path yourself.
+plugins: []
+
+# The settings map has no schema of its own. Its whole job is to be the target
+# of !setting references, so a value used by three rows is written once.
+settings:
+  # EVERY FILESYSTEM TOOL IS CONTAINED TO THESE DIRECTORIES, and an empty list
+  # denies every file operation. That is the safe default and not a bug: there
+  # is no ungranted-but-permitted state. Add the absolute path of the project
+  # you want the agent to work in.
+  #
+  #   workspace:
+  #     - /Users/you/code/some-project
+  workspace: []
+
+  store:
+    # The append-only session log. Everything the agent says and does lands
+    # here, so put it somewhere durable and somewhere you can back up — a
+    # relative path resolves against whatever directory trt was run from,
+    # which is rarely what you meant.
+    path: /var/tmp/terret/sessions.db
+
+  model:
+    # "provider/model". The provider is the adapter name a row registered;
+    # terret-base registers "openrouter", keyed from OPENROUTER_API_KEY.
+    main: openrouter/anthropic/claude-sonnet-4.5
+
+  sandbox:
+    # The container every spawned process runs inside. It needs whatever
+    # toolchain your agent's commands expect; the default is small on purpose.
+    image: ruby:slim
