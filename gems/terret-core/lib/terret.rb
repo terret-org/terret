@@ -59,5 +59,6 @@ require_relative "terret/approvals"
 require_relative "terret/compactor"
 require_relative "terret/titler"
 require_relative "terret/loop"
+require_relative "terret/subagents"
 
 Terret.declare_events!

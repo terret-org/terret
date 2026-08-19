@@ -96,7 +96,15 @@ module Terret
       @max_agents = config[:max_agents] || 128
     end
 
-    def spawn_agent(session_id:, id: "agent-#{session_id}")
+    # `parent:` is the context the agent's own scope forks from, and it
+    # defaults to this service's root exactly as it always did — an interface
+    # spawning a top-level agent wants the root, and the socket, ACP and every
+    # test harness keep their call sites unchanged. The subagent provider is
+    # the one caller that passes something else: the CALLING agent's fork, so
+    # a child inherits that agent's roster and policy floor instead of the
+    # root's (docs/subagents.md §3). The two cases do not have to share one
+    # answer, and this keyword is what keeps them from having to.
+    def spawn_agent(session_id:, id: "agent-#{session_id}", parent: @ctx)
       raise AgentExists, "agent #{id} already exists" if @agents.key?(id)
       if (live = @by_session[session_id])
         raise AgentExists, "session #{session_id} already has agent #{live.id}"
@@ -106,7 +114,7 @@ module Terret
               "#{@agents.size} agents live; max_agents is #{@max_agents}"
       end
 
-      agent = Agent.new(id:, session_id:, ctx: @ctx.fork)
+      agent = Agent.new(id:, session_id:, ctx: parent.fork)
       @agents[id] = agent
       @by_session[session_id] = agent
       agent
