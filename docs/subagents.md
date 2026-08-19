@@ -18,13 +18,12 @@ replay.
 `ctx[:subagents]` is a **sole-provider** seam — the shape
 `ctx[:session_store]` and `ctx[:summarizer]` already use (docs/lifecycle.md,
 "Compaction"). Exactly one provider may claim the key; a second
-registration raises rather than quietly winning. That is the right shape
-here for the same reason it was right for the summarizer: "what is a
-subagent in this deployment" is one answer for the whole process, decided
-in a config row, not something each caller negotiates per call. A boot
-that mounted two subagent providers has a bug in its bundle stack, and
-finding out at boot beats finding out when a `Task` call goes somewhere
-nobody expected.
+registration raises rather than quietly winning — though that much is true
+of every service key in the kernel, which answers a duplicate claim with a
+`ContractError`. What is a design choice here is that **nothing sits behind
+the key dispatching between providers**. "What is a subagent in this
+deployment" is one answer for the whole process, decided in a config row,
+rather than a roster the `Task` tool picks from per call.
 
 The seam is small:
 
@@ -38,7 +37,7 @@ argument is explicit rather than reached for from a service ivar.
 
 Plan §6.4 names three providers for this seam. M8 builds one: the fork
 provider. The other two — a delegated turn to an external agent over ACP
-(docs/acp.md), and a pooled worker — are recorded in §14 as deferred, not
+(docs/acp.md), and a pooled worker — are recorded in plan §14 as deferred, not
 sketched here. A seam with one provider is still a seam; what makes it one
 is that the `Task` tool talks to `run` and knows nothing else.
 
@@ -50,7 +49,12 @@ calling agent's context and runs it to completion. Exactly:
 1. **Fork the calling agent's context** (`ctx.fork`, plan §4.1). Every
    registration the child makes is recorded on that fork.
 2. **Spawn a child agent** on it with a **fresh session id** — a new
-   durable session, not a copy of the parent's.
+   durable session, not a copy of the parent's. This is the one M8 change
+   to the registry: `spawn_agent` gains a `parent:` keyword whose default
+   is the loop service's own `@ctx`, so it forks from the root exactly as
+   it does today and every existing caller — the socket, ACP, a test
+   harness — is untouched. The subagent provider is the caller that passes
+   something else: the calling agent's context.
 3. **Append the prompt** as a `user/message` on the child's session, the
    same append every other input goes through.
 4. **Run the turn to completion** through the ordinary `Loop`: same steps,
@@ -119,8 +123,21 @@ with the tools that agent can see and the `tools/pre_execute` listeners
 that govern it — including its `Terret::Tools::AllowList`. Deny-by-default
 carries down. **A subagent is not an escalation path**, and the design
 says so structurally rather than by a check someone has to remember to
-write: there is no code path that builds a child from the root context,
-because `run` takes the caller's `ctx` as an argument.
+write: `run` takes the caller's `ctx` as an argument and passes it as
+`parent:`, so **no path the subagent provider can take builds a child from
+the root context**. (The registry's own default is still a root fork —
+that is what an interface spawning a top-level agent wants, and §2's
+`parent:` keyword is what keeps the two cases from having to share one
+answer.)
+
+Where the caller's context comes from is worth naming, because the whole
+guarantee rests on it. `Task` is a std tool registered on the **root**
+context like the rest of the roster, so its handler's closure captures the
+root and not any agent. What it does at call time is look the caller up:
+the handler receives the session it is running in (M7's merge-ordered
+`session_id`, which a model-forged argument cannot override), and
+`ctx[:loop].agent_for_session(session_id).ctx` is the calling agent's
+forked context. That lookup is the load-bearing line in the tool.
 
 That matters because the alternative is a familiar hole. If a child were
 forked from the root, an agent restricted to `Read` and `Grep` could ask a
@@ -223,21 +240,40 @@ Three consequences worth being explicit about:
   rather than ending a turn, and that does not change here.
 - **`Loop::MAX_STEPS` still bounds the turn.** Twenty-five steps is
   twenty-five steps; parallelism makes a step wider, never longer.
-- **Cancellation still lands at step boundaries.** A barrier lives inside
-  a step, so a cancel requested while five calls are in flight settles
-  after that run rather than tearing fibers out of the middle of it. The
-  `:stopping` status (§8) exists to make that window visible instead of
-  leaving a cancelled-but-still-working agent looking `:running`.
+- **Cancellation still lands at step boundaries, and now between runs
+  rather than between calls.** A barrier is not interruptible from outside
+  once it starts, so a cancel requested while five calls are in flight
+  settles after that run rather than tearing fibers out of the middle of
+  it. That visibly changes one behavior the socket documents: a cancelled
+  batch truncates the calls that have not started, each getting a
+  `tool/result` carrying `cancelled before execution` (docs/protocol.md),
+  and with maximal runs there are **fewer** such results than before,
+  because a run already in flight finishes. Every call in the batch still
+  ends with a result either way — the projection never holds a call
+  without one. The `:stopping` status (§8) exists to make that window
+  visible instead of leaving a cancelled-but-still-working agent looking
+  `:running`.
 
 ## 6. `ctx[:jobs]` and the `job_*` tools
 
 A job is a subprocess that outlives the tool call that started it. The
 seam lives in `terret-exec`, because it needs `ctx[:subprocess]` and
-therefore `ctx[:sandbox]`: **`job_start` wraps its argv through
-`ctx[:sandbox].wrap` exactly like `Bash` does**, so a job in a sandboxed
-profile runs inside the container with everything else (docs/exec.md §4).
-There is no spawn path in Terret that skips the sandbox seam, and jobs do
-not become the first one.
+therefore `ctx[:sandbox]`: a job's argv goes through
+`ctx[:sandbox].wrap` on the way to `Process.spawn` like every other spawn
+in the system (docs/exec.md §2), so a job in a sandboxed profile runs
+inside the container with everything else. There is no spawn path in
+Terret that skips the sandbox seam, and jobs do not become the first one.
+
+The seam a job does **not** use is `ctx[:shell]`. A shell command from
+`job_start` becomes a fresh `bash -lc <command>` argv handed to
+`ctx[:subprocess]`, not a `run` against the agent's persistent bash. The
+two would be actively wrong together: `ctx[:shell]` is one long-lived
+process per agent driven by a sentinel protocol that reads until it sees
+its marker (docs/exec.md §2), so a job parked in it would hold that shell
+for its entire lifetime and every subsequent `Bash` call in the session
+would block behind it. The comparison to draw with `Bash` is therefore
+about *wrapping*, not about the seam: `Bash` wraps once when its session
+opens, while a job wraps per spawn.
 
 ```ruby
 ctx[:jobs].start(argv, session:, cwd: nil)  # => opaque job id
@@ -265,8 +301,9 @@ shells and its terminals do.
 | `job_collect` | `false` | `:never` | `:parallel` |
 | `job_stop` | `true` | `:policy` | `:serial` |
 
-`job_start` takes a `command` string run through the shell, matching
-`Bash`'s convention rather than inventing a second one. Job tools are
+`job_start` takes a `command` string, matching `Bash`'s parameter
+convention rather than inventing a second one; the seam turns it into the
+`bash -lc` argv above. Job tools are
 snake_case because they have no Claude Code equivalent to be verbatim
 with — the same rule that produced `terminal_open` in M7.
 
@@ -296,7 +333,7 @@ The harness does not detect this and does not claim to — the honest
 contract is that Terret never loses a call and never invents a result for
 one that has not run, and it stops there. `job_collect` is how the model
 finds out: two ids where it expected one, or output that does not match
-what it thinks it started. Harness-level idempotency keys remain a §14
+what it thinks it started. Harness-level idempotency keys remain a plan §14
 item.
 
 One inherited limit from the Docker provider applies here more than
@@ -348,7 +385,12 @@ coercing it to something plausible.
 
 Plan §6.4 specifies `idle → running → waiting_approval | waiting_input →
 stopping → done/failed`. M6 built the first three and said so
-(docs/lifecycle.md, "The status machine"). M8 adds two more:
+(docs/lifecycle.md, "The status machine"). M8 adds two more — and not the
+sixth: **`failed` is a turn status, not an agent status.** It is what
+`turn/end {status}` carries when an exception left the turn, alongside
+`completed`, `cancelled`, `rejected`, and `empty`; the agent that ran that
+turn goes back to `:idle` and takes the next one. There is nothing for an
+agent-side `:failed` slot to mean, so none is minted.
 
 - **`:stopping`** — set when a cancel is requested, cleared when the turn
   ends. Cancellation is cooperative and honored at step boundaries (plan
@@ -359,6 +401,18 @@ stopping → done/failed`. M6 built the first three and said so
   operator real time; the turn that closes inside it still appends the
   ordinary durable `turn/end {status: "cancelled"}`, and the agent returns
   to `:idle`.
+
+  It interacts with `:waiting_approval`, which is the one other sub-state
+  of a running turn, and the interaction is decided rather than left to
+  whichever assignment runs last. The approvals gate flips an agent to
+  `:waiting_approval` while a call is parked and restores it when a
+  verdict lands (docs/lifecycle.md, "Durable approvals"). **That restore
+  returns the agent to `:stopping` when a cancel is standing**, not to
+  `:running` — a cancel requested while a call was parked has not stopped
+  being true just because the human answered. Cancelling a parked turn
+  denies every standing request durably (`deny_pending!`), so the parked
+  fiber unparks into a turn that already knows it is stopping, and the
+  status now says the same thing the turn does.
 - **`:done`** — set by `dispose_agent`, terminal. A disposed agent's
   context is gone along with every effect it owned, so a later `run_turn`
   against that handle refuses rather than half-working against a dead
@@ -367,5 +421,5 @@ stopping → done/failed`. M6 built the first three and said so
 **`:waiting_input` stays vocabulary and nothing more.** Plan §6.4 names
 it, no consumer exists for it, and a status nothing ever sets is worse
 than an absent one — it invites a client to write a branch that never
-runs. It is recorded in §14 as reserved. The day something parks a turn on
+runs. It is recorded in plan §14 as reserved. The day something parks a turn on
 human input rather than human approval, it gets implemented then.

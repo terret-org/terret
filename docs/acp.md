@@ -32,7 +32,7 @@ both sides of an interop story that uses similar words for opposite things
   a server's tools mount as `mcp__<server>__<tool>` behind `ctx[:tools]`
   (docs/mcp.md).
 - **ACP** makes an agent available **to** an editor. Terret is the
-  *server*; an editor drives `ctx[:agents]`.
+  *server*; an editor drives `ctx[:loop]`, the agent registry.
 
 `terret-acp` is the second one only. The ACP *client* direction — Terret
 delegating a turn to some other agent over ACP — is a subagent provider
@@ -45,7 +45,7 @@ and is deferred (below).
 vocabulary of its own. That is the point of building it at all beyond the
 editors it unlocks. The claim in plan §1 is that everything is a plugin
 and the interface is not privileged; the standing proof of that claim was
-one interface (§9.1). A second interface, on a completely different
+one interface (plan §9.1). A second interface, on a completely different
 transport, built out of the same two seams with no change to core, is what
 turns a claim into evidence.
 
@@ -66,7 +66,7 @@ classic way to hang an editor. The baseline an agent must implement is
 | `initialize` | request | capabilities handshake against the booted context |
 | `session/new` | request | `spawn_agent` on a fresh durable session; answers `{sessionId}` |
 | `session/prompt` | request | `run_turn`, streaming `session/update`; **stays pending for the whole turn** and answers `{stopReason}` |
-| `session/cancel` | notification (client → agent) | `cancel_turn`; the pending prompt then answers `cancelled` |
+| `session/cancel` | notification (client → agent) | `Agent#cancel`, the same method the socket's `cancel` frame calls; the pending prompt then answers `cancelled` |
 | `session/update` | notification (agent → client) | projected from `session/event` |
 | `authenticate` | request, optional | never reached (below) |
 | `session/load` | request, optional, capability-gated | not advertised in v1 (below) |
@@ -109,10 +109,10 @@ invariant, and neither resolves in the protocol's favor:
 - **`cwd` is a request, not an authority.** Filesystem reach is the
   `workspace:` config row, realpath-contained, deny-by-default, with an
   empty list denying everything (docs/exec.md §3). A client-supplied
-  directory does not widen it. The natural v1 behavior is to use `cwd` as
-  the working directory for a path *inside* an already-granted workspace
-  and to refuse it otherwise, exactly as the Docker provider refuses a
-  `cwd` outside the granted list today.
+  directory does not widen it. Whether the server then *uses* `cwd` as a
+  working directory inside an already-granted workspace or ignores it
+  entirely is deferred to the implementer (open item 2 below); what is
+  settled is that it cannot grant reach the profile did not.
 - **`mcpServers` is accepted and not mounted in v1.** Honoring an empty
   list is trivial; mounting servers the editor names would let a client
   extend the agent's tool roster past the profile's floor, which is the
@@ -143,10 +143,11 @@ a turn that a killed process left open.
 
 ### `session/cancel`
 
-A **notification**, so there is no response to it. On receipt Terret stops
-model calls and requests a turn cancel, flushes pending `session/update`
-notifications, and answers the still-pending `session/prompt` with
-`stopReason: "cancelled"`.
+A **notification**, so there is no response to it. On receipt Terret calls
+`Agent#cancel` — the existing method, the same one the socket's `cancel`
+frame drives (docs/protocol.md); no ACP-specific cancel entry point is
+minted — then flushes pending `session/update` notifications and answers
+the still-pending `session/prompt` with `stopReason: "cancelled"`.
 
 Cancellation is cooperative and lands at the next step boundary rather
 than tearing a fiber out of a tool call; a barrier of parallel calls
@@ -184,10 +185,12 @@ event carrying both.
 Those three are the whole of what v1 emits. Eight further variants exist
 in the schema and none of them are sent:
 
-`agent_thought_chunk` has no durable source to project from —
-`assistant/chunk` carries text, and `Thinking` parts ride the completed
-`assistant/message` (docs/events.md) — so if a thinking-chunk event is
-ever declared, this is where it would land. `plan` carries a full entry
+`agent_thought_chunk` has no source to project from, and the reason is
+stronger than a missing event: **Terret has no thinking part at all.** The
+LLM vocabulary is `Text`, `ToolCall`, and `ToolResult` (plan §6.5 lists a
+`Thinking` part; the code does not have one), so reasoning content is
+neither logged nor projected anywhere today. If it ever is — a part, then
+an event — this is where it would surface. `plan` carries a full entry
 list that it **replaces on every update**, which happens to be exactly
 `TodoWrite`'s contract (docs/subagents.md §7) and makes that tool its
 natural future source; mapping the two is a later idea rather than
@@ -226,11 +229,13 @@ either:
 
 - `completed` → `end_turn`, and `cancelled` → `cancelled`. These are the
   two that carry almost all the traffic.
-- `max_turn_requests` is the natural peer of `Loop::MAX_STEPS` — a turn
-  that would log a 26th step. Terret raises there today rather than
-  closing a turn, so answering this stop reason is a small deliberate
-  change in the ACP path rather than a projection of something that
-  already exists.
+- `max_turn_requests` is the semantic peer of `Loop::MAX_STEPS` — a turn
+  that would log a 26th step — but it is not what Terret produces today. A
+  step-ceiling overflow raises inside the turn body, which the turn's own
+  rescue path closes as `turn/end {status: "failed"}` *and* re-raises. So
+  a runaway turn currently lands in the JSON-RPC error branch, not on this
+  stop reason. Answering `max_turn_requests` instead would be a
+  deliberate change, not a projection of something that already exists.
 - `max_tokens` and `refusal` have no Terret producer: neither the
   adapter's finish reason nor a model refusal is projected into
   `turn/end`.
@@ -239,7 +244,7 @@ either:
   rather than as a successful result carrying a sad stop reason, and
   `rejected`/`empty` are turns that spent no step at all.
 
-Task 7 pins the last three; the ambiguity is recorded here rather than
+Task 7 pins what the unmapped statuses answer with; it is recorded rather than
 resolved by whoever writes the line.
 
 ## Framing, concurrency, and failure
@@ -318,7 +323,7 @@ permission UI would move the most security-relevant decision in the system
 out of the log and into a process Terret does not control. Nothing in the
 protocol blocks the mapping — the method is not capability-gated, so an
 agent simply chooses whether to send it — and projecting
-`approval/requested` onto it someday is a §14-ledger idea. The M8 verdict
+`approval/requested` onto it someday is a plan §14 ledger idea. The M8 verdict
 is that it is not called.
 
 **`session/load`.** Optional and gated behind `agentCapabilities.loadSession`,
@@ -329,7 +334,7 @@ capability. Until it is advertised, re-attaching to a session goes through
 `session/prompt` and the resumable branch.
 
 **The ACP client direction.** Plan §6.8 describes a subagent provider that
-delegates a turn to an external agent over ACP. It is recorded in §14 as
+delegates a turn to an external agent over ACP. It is recorded in plan §14 as
 deferred, alongside the pooled-worker provider. `ctx[:subagents]` ships
 with one provider — the fork (docs/subagents.md §2) — and the seam is
 where that second provider will land when it does, with no change to the

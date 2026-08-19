@@ -9,7 +9,7 @@ something if there is a way to say *which* plugins, in what order, with
 what config, without editing Ruby. That is what this document describes:
 bundles ship rows, profiles stack bundles, patches adjust rows, and
 `Terret.boot` hands the result to the Hames loader. The model is a direct
-port of dsh's (§2.2), YAML-native.
+port of dsh's (plan §2.2), YAML-native.
 
 ## 1. The row is the unit
 
@@ -37,7 +37,13 @@ Everything else in this document is a way of producing that list.
 ## 2. Bundles
 
 A **bundle** is a gem that ships `config/bundle.yml`, an ordered list of
-rows, plus the code those rows mount. It declares itself in its gemspec:
+rows. It does not have to contain the code those rows mount — it has to
+make that code available, which for a Ruby gem means **depending on the
+gems the rows name**. That distinction is what lets `terret-base` (§6)
+live inside the meta-gem while mounting services from eight other gems: it
+ships the rows and declares the dependencies, and the classes resolve
+because Bundler put them on the load path. A bundle declares itself in its
+gemspec:
 
 ```ruby
 s.metadata = { "terret" => { "bundle" => "config/bundle.yml" } }
@@ -50,7 +56,7 @@ and Bundler already resolves versions. Discovery scans loaded gemspecs
 (`Gem::Specification.each`) for the key and parses the referenced file. A
 third-party gem becomes discoverable by shipping normally — nothing to
 register, nothing to symlink, no directory to drop a file into. It is the
-port of dsh's `package.json` `dsh` field (§5), and it is the mechanism
+port of dsh's `package.json` `dsh` field (plan §5), and it is the mechanism
 `docs/cookbook/adding-a-bundle.md` walks end to end.
 
 A profile names bundles by **gem name**. A name that discovery did not
@@ -120,7 +126,7 @@ rows:
   - id: sandbox
     config: { image: "terret/sandbox:latest", network: none }
 
-  - id: llm.main
+  - id: llm
     config: { model: !setting model.main }
 
   - id: audit
@@ -138,12 +144,17 @@ a key inexpressible — there is no YAML for "and remove `network`" — and it
 makes the effective value of any key a function of the entire stack, so
 reading one file never tells you what a service will get. Wholesale
 replacement means the last layer that mentions a row is the answer, whole.
-The cost is real and worth paying: restating a two-key config to change one
-key is three seconds of typing, and `dump-config` (§10) is there for when
-the current value is not obvious.
+
+The `llm` row above is that rule biting, and it is left in rather than
+tidied away: the base bundle's row carries an `api_key: !env …` alongside
+its model, and a patch that mentions only `model:` **drops the key**. The
+adapter then boots without one. This is the mode of failure to expect from
+wholesale replacement, and the cure is to restate the whole config —
+`dump-config` (§10) is there precisely to show what a row currently holds
+before a patch replaces it.
 
 A patch may also swap `plugin:` on an existing id, which is the mechanism
-docs/exec.md §4 leans on: one row swaps `Terret::Sandbox::None` for
+docs/exec.md §4 leans on: one row swaps `Terret::Exec::SandboxNone` for
 `Terret::Sandbox::Docker` and every tool built on `ctx[:fs]` and
 `ctx[:subprocess]` moves into the container, tool code untouched.
 
@@ -185,24 +196,35 @@ profile author controls.
 in a clean binding when it is. The flag is the consent — config that can
 execute arbitrary Ruby is code with a YAML extension, and a profile
 downloaded from anywhere should not be able to run without the operator
-having said so out loud. Parsing is `YAML.safe_load` with explicit
-permitted tag classes throughout; `YAML.load` never appears, so an
-untrusted profile cannot instantiate arbitrary objects even before
-reaching the `!ruby` check.
+having said so out loud.
+
+How those three tags are actually read matters, because the obvious
+implementation does not work. `YAML.safe_load` **drops a local tag
+silently**: `permitted_classes:` gates Ruby-object tags like
+`!ruby/object:Foo`, not application tags like `!env`, so a document loaded
+that way comes back with the tag gone and the bare scalar in its place —
+`!env OPENROUTER_API_KEY` would resolve to the *string*
+`"OPENROUTER_API_KEY"` and boot a service with a literal nonsense key. So
+resolution is explicit: `Psych.parse` to an AST, then a visitor that walks
+it and resolves `!env`, `!setting`, and `!ruby` nodes by tag, refusing any
+other tag it meets. Separately and still true: `YAML.load` never appears
+anywhere in the path, so an untrusted profile cannot instantiate arbitrary
+Ruby objects at parse time regardless of what the visitor does afterward.
 
 ## 6. `terret-base`, and secure by default
 
 `terret-base` is a bundle **inside the meta-gem**
-(`gems/terret/config/bundle.yml`), not a gem of its own — §5's layout
-lists no such gem and §7 puts it inside `terret`. It is layer one of every
-profile, and its rows are the answer to "what is a Terret":
+(`gems/terret/config/bundle.yml`), not a gem of its own — plan §5's layout
+lists no such gem and plan §7 puts it inside `terret`. It is layer one of
+every profile, and its rows are the answer to "what is a Terret":
 
 | Row | Plugin | Note |
 |---|---|---|
 | `session_store` | `Terret::Store::SQLite` | durable log, WAL |
 | `sessions`, `prompt`, `tools`, `loop` | terret-core | the harness itself |
 | `llm` | `Terret::OpenRouter::Adapter` | model roles, `!env`-keyed |
-| fs / subprocess / shell / terminals | terret-exec | the execution world |
+| `fs` | `Terret::Exec::FS` | **`workspace:` — an empty or unconfigured list denies every fs op** |
+| subprocess / shell / terminals | terret-exec | the rest of the execution world |
 | `sandbox` | `Terret::Sandbox::Docker` | **`network: none`** |
 | std tools | terret-tools-std | the CC-named roster |
 | `redactor` | terret-core | `tools/post_execute` + the append scrubber |
@@ -226,14 +248,22 @@ rows:
   # between it and the host but the allow list. See docs/security.md.
   # ------------------------------------------------------------------
   # - id: sandbox
-  #   plugin: Terret::Sandbox::None
+  #   plugin: Terret::Exec::SandboxNone
   #   config: {}
 ```
 
 A comment block is not a security control. What it is, is the difference
-between a decision made and a default inherited, and §13 asks for exactly
-that: `none` requires explicit per-profile opt-in. The template is where
-the explicitness lives.
+between a decision made and a default inherited, and plan §13 asks for
+exactly that: `none` requires explicit per-profile opt-in. The template is
+where the explicitness lives.
+
+The `fs` row deserves the same second read for the opposite reason: its
+`workspace:` list is what every filesystem tool is contained to, and an
+empty or unconfigured list **denies every fs operation** rather than
+permitting them (docs/exec.md §3, docs/security.md). There is no
+ungranted-but-permitted state, so a profile that forgets the row gets an
+agent that cannot read a file — the safe failure, and a confusing one if
+nobody says so in advance.
 
 ## 7. `Terret.boot`
 
@@ -246,7 +276,7 @@ ctx = Terret.boot(profile: "headless",
 
 It resolves the layers (§4), hands the row list to the Hames loader, and
 returns the booted context. That is the whole surface, and its shape is
-the §1 embeddability goal made concrete: a Rails app calls `Terret.boot`
+plan §1's embeddability goal made concrete: a Rails app calls `Terret.boot`
 in an initializer and holds the `ctx`, with no process to supervise and no
 socket to speak. The `trt` executable is one caller of this method rather
 than the way Terret is used.
@@ -265,23 +295,29 @@ trt dump-config --profile NAME
 trt acp         --profile NAME          # docs/acp.md
 ```
 
-Non-interactive, optparse, no thor, no REPL, no TUI. §1's non-goals bar an
-**interactive text CLI** — a human-facing terminal UI that is a way of
-*talking to an agent*. They do not bar an executable. `trt boot` starts
-the reactor and parks; `trt acp` serves an editor over stdio; the other
-two print and exit. Nothing here is a chat window, and nothing here is a
-second interface competing with the socket (§9 of the plan): every one of
-these subcommands is a thin wrapper over `Terret.boot` or over pure
-resolution.
+Non-interactive, optparse, no thor, no REPL, no TUI. Plan §1's non-goals
+bar an **interactive text CLI** — a human-facing terminal UI that is a way
+of *talking to an agent* — and do not bar an executable. Nothing here is a
+chat window and nothing here competes with the socket (plan §9): `trt
+boot` starts the reactor and parks, `trt acp` serves an editor over stdio,
+the other two print and exit, and every one of them is a thin wrapper over
+`Terret.boot` or over pure resolution.
 
 ## 9. `doctor` and `Hames::Schema`
 
 `trt doctor` resolves a profile and validates every row's config against
 its plugin's schema declaration, without booting anything.
 
-`Hames::Schema` is a class-level declaration on `Hames::Service` — pure
-stdlib, no dry-schema, because the kernel's zero-runtime-dependency
-constraint is a design constraint rather than a coincidence (CLAUDE.md):
+`Hames::Schema` is the kernel's own tiny config validator: a plain
+description of a service's config keys — for each one a `type:`, whether
+it is `required:`, an optional `enum:` of legal values, a `default:`, and
+a `doc:` string — plus the code that checks a config hash against that
+description and reports what does not fit. Services declare against it
+with the `config_schema` class method, which stores the description on the
+class (inherited by subclasses) where doctor and the catalog generator can
+both read it. It is pure stdlib rather than dry-schema, because the
+kernel's zero-runtime-dependency rule is a design constraint rather than a
+coincidence (CLAUDE.md):
 
 ```ruby
 class Docker < Hames::Service
