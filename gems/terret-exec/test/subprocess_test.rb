@@ -236,6 +236,65 @@ class SubprocessTest < Minitest::Test
     refute_alive pid
   end
 
+  # The wedge this guards against is specific, and was measured rather than
+  # theorised: a shell SIGKILLed while its terminal still holds bytes nobody
+  # read sticks in macOS `E` state, and the blocking wait that reaps it then
+  # never returns — taking the calling fiber, and with one reactor the whole
+  # process, down with it. A shell in a terminal is the ordinary case for
+  # terminal_open, so the handle has to be safe on its own rather than only
+  # when its caller remembers to drain first.
+  #
+  # The watchdog is a plain Thread rather than the `task.with_timeout` the
+  # fiber tests below use, and that is not a stylistic choice: measured on the
+  # unfixed code, the wedged fiber sits in the scheduler's own process_wait
+  # hook (`proc_wait2` → `IO_Event_Selector_KQueue_process_wait`), where a
+  # timer running on that same reactor never gets to preempt it. Nothing
+  # inside the reactor can rescue a reactor wedged this way, which is the
+  # sharpest argument for the handle not being able to reach it at all.
+  def test_closing_a_pty_handle_with_output_pending_does_not_wedge_the_reactor
+    Dir.mktmpdir do |dir|
+      ready = File.join(dir, "ready")
+      # PROMPT_COMMAND writes to the terminal and only then marks itself
+      # ready, so once the file exists the pty is holding bytes no one has
+      # read: the precondition is established rather than slept for. The
+      # write stays well under a pty's buffer (about 1KB on macOS) on
+      # purpose — flooding it blocks bash mid-printf, and the marker after it
+      # would never be reached.
+      env = { "PROMPT_COMMAND" => "printf 'x%.0s' {1..256}; : > #{ready}" }
+      ctx, = boot(config: { term_grace: 1 })
+      handle = ctx[:subprocess].pty_spawn(["bash", "--norc", "-i"], env: env)
+      pid = handle.pid
+      watchdog = nil
+
+      begin
+        deadline = now + 10
+        sleep 0.01 until File.exist?(ready) || now > deadline
+        assert File.exist?(ready), "bash never reached a prompt; the precondition never held"
+
+        ended = nil
+        started = now
+        watchdog = Thread.new { ended = handle.close }
+        returned = !watchdog.join(6).nil?
+        elapsed = now - started
+
+        assert returned, "close never returned; it wedged on a child stuck trying to exit"
+        assert_operator elapsed, :<, 3, "close took #{elapsed}s"
+        # :killed would mean the child sat out the whole grace before a
+        # SIGKILL landed. Dropping the master hangs it up instead, so the
+        # escalation should not be reached for an interactive shell at all.
+        assert_equal :terminated, ended
+        refute_alive pid
+      ensure
+        watchdog&.kill
+        begin
+          Process.kill("KILL", pid)
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+    end
+  end
+
   def test_closing_a_pty_handle_twice_is_harmless
     ctx, = boot
     handle = ctx[:subprocess].pty_spawn(["cat"])

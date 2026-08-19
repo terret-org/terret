@@ -259,17 +259,29 @@ module Terret
         # Idempotent: a terminal explicitly closed and then closed again by
         # its owner's disposal must not raise, and must not wait on a child
         # that is already reaped.
+        #
+        # The fds are dropped BEFORE the child is reaped, and that order is
+        # load-bearing rather than tidy. A child SIGKILLed while its terminal
+        # still holds bytes nobody read can stick in exit — measured on macOS
+        # with a shell and as little as a startup banner pending, the process
+        # sits in `E` state and the blocking wait that reaps it never returns.
+        # There is no rescuing that from inside the reactor either: the fiber
+        # parks in the scheduler's own process_wait hook, where its timers
+        # never get to preempt it, so one terminal closed in the wrong order
+        # takes every agent in the process with it. Closing the master first
+        # discards the pending output and hangs the child up, which also
+        # spares an interactive shell — one that ignores SIGTERM by design —
+        # the whole grace period it would otherwise sit out before the SIGKILL.
         def close
           return @ended if @closed
 
           @closed = true
-          @ended = @reaper.call(@pid, @grace)
           [@writer, @reader].each do |io|
             io.close unless io.closed?
           rescue IOError
             nil
           end
-          @ended
+          @ended = @reaper.call(@pid, @grace)
         end
 
         private
