@@ -237,6 +237,48 @@ class ApprovalsGateTest < Minitest::Test
     assert_empty ctx[:approvals].pending(session.id)
   end
 
+  # A cancel requested while a call was parked has not stopped being true just
+  # because the human answered, so the gate's restore returns the agent to
+  # :stopping rather than to :running — the status now says the same thing the
+  # turn does.
+  def test_the_approvals_restore_returns_a_cancelled_agent_to_stopping
+    ctx, = boot(script: park_script)
+    register_deploy(ctx, approval: :always)
+    agent, session = spawn(ctx)
+    unparked = []
+    ctx.on("tools/post_execute") do |result, next_|
+      unparked << agent.status
+      next_.(result)
+    end
+    turn = park_turn(ctx, agent)
+
+    # exactly what the socket does with a cancel frame on a parked agent
+    agent.cancel("user hit stop")
+    ctx[:approvals].deny_pending!(session.id, reason: "user hit stop")
+
+    assert_equal :cancelled, turn.value
+    assert_equal [:stopping], unparked
+    assert_equal :idle, agent.status
+    assert_equal "cancelled", session.events.last.payload[:status]
+  end
+
+  def test_an_uncancelled_parked_agent_still_restores_to_running
+    ctx, = boot(script: park_script)
+    register_deploy(ctx, approval: :always)
+    agent, session = spawn(ctx)
+    unparked = []
+    ctx.on("tools/post_execute") do |result, next_|
+      unparked << agent.status
+      next_.(result)
+    end
+    turn = park_turn(ctx, agent)
+
+    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+
+    assert_equal :completed, turn.value
+    assert_equal [:running], unparked
+  end
+
   def test_pending_lists_requested_without_resolved
     ctx, = boot(script: [])
     _, session = spawn(ctx)

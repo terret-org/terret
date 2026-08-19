@@ -165,7 +165,14 @@ module Terret
         # thread under plain minitest, where tests resolve from another thread
         q.pop
       ensure
-        agent.status = :running if agent && agent.status == :waiting_approval
+        # The restore is decided, not left to whichever assignment runs last:
+        # a cancel requested while this call was parked has not stopped being
+        # true just because a verdict landed, so the fiber unparks into a turn
+        # that already knows it is stopping and the status says so too
+        # (docs/subagents.md §8).
+        if agent && agent.status == :waiting_approval
+          agent.status = agent.cancelled? ? :stopping : :running
+        end
         @waiting.delete(key)
       end
     end

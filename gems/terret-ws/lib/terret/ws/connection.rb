@@ -185,7 +185,12 @@ module Terret
 
       def handle_cancel(reason)
         case @agent.status
-        when :running
+        # :stopping is a cancel already standing on a turn that has not
+        # reached its boundary yet (docs/subagents.md §8). A client that sends
+        # a second frame into that window is not cancelling nothing — the turn
+        # is still running — so the frame is honored again with the newer
+        # reason rather than answered `not_running`.
+        when :running, :stopping
           @agent.cancel(reason)
         when :waiting_approval
           # cancel first, THEN deny: the parked fiber unparks into a turn

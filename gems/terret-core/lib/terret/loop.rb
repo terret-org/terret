@@ -21,6 +21,11 @@ module Terret
   # process rather than raising the cap when this bites.
   class AgentCapExceeded < StandardError; end
 
+  # Raised when a turn is asked of an agent dispose_agent already tore down.
+  # Its forked context is gone along with every effect it owned, so the honest
+  # answer is a refusal rather than a turn half-working against a dead fork.
+  class AgentDisposed < StandardError; end
+
   # Claimed messages are [type, text] pairs — "user/message" for the turn's
   # input, "context/injected" for steers drained from the inbox — so the log
   # records provenance even after a pre_step listener rewrites the claim.
@@ -38,7 +43,11 @@ module Terret
       @session_id = session_id
       @ctx = ctx           # a forked, agent-scoped context
       @inbox = []          # injected context waits here until a waking message
-      @status = :idle # :idle | :running | :waiting_approval (parked in the tools pipeline)
+      # :idle | :running | :waiting_approval (parked in the tools pipeline) |
+      # :stopping (cancelled, still finishing) | :done (disposed, terminal).
+      # docs/subagents.md §8: :failed is a TURN status, not an agent one, and
+      # :waiting_input stays vocabulary until something parks a turn on it.
+      @status = :idle
       @cancelled = false
       @cancel_reason = nil
     end
@@ -62,9 +71,17 @@ module Terret
     # is the honest synchronous form. A cancel is per-turn and best-effort:
     # if the turn rejects, fails, or completes before a boundary honors it,
     # the cancel dies with that turn rather than haunting the next one.
+    # The status moves only from :running: :stopping is a sub-state of a turn
+    # that is still working and is no longer going to finish, so there is
+    # nothing for it to mean on an idle agent — and an idle agent left
+    # non-idle by a cancel could never start the turn that would clear it.
+    # A parked agent keeps saying :waiting_approval, which is still true; the
+    # approvals gate's restore is what reads the standing cancel and returns
+    # it to :stopping rather than to :running.
     def cancel(reason = nil)
       @cancel_reason = reason
       @cancelled = true
+      @status = :stopping if @status == :running
     end
 
     def cancelled? = !!@cancelled
@@ -137,6 +154,7 @@ module Terret
       end
 
       agent.ctx.dispose!
+      agent.status = :done # terminal: the handle now refuses a turn outright
       @agents.delete(id)
       @by_session.delete(agent.session_id)
       # Fork disposal reaps the agent's registrations, but the process state a
@@ -198,6 +216,7 @@ module Terret
     # Shared turn envelope: the status guard, the failure rescue, and the
     # turn/end ensure. Both entry points run their body inside it.
     def turning(agent, close_on_failure: true)
+      raise AgentDisposed, "agent #{agent.id} was disposed" if agent.status == :done
       unless agent.status == :idle
         raise TurnAlreadyRunning, "agent #{agent.id} is #{agent.status}"
       end
@@ -402,7 +421,11 @@ module Terret
         # a group, so there is no per-call moment to interleave a call event
         # into.
         run.each { |tc| log_call(sessions, sid, tc) }
-        results = concurrent ? execute_together(ctx, sid, run) : run.map { |tc| execute_call(ctx, sid, tc) }
+        results = if concurrent
+                    execute_together(ctx, sid, run)
+                  else
+                    run.map { |tc| execute_call(ctx, sid, tc) }
+                  end
         # In CALL order, always. Concurrency may change when work happens; it
         # may not change what the log says happened, because derive_messages
         # projects the model's history from this order and resume rebuilds it.

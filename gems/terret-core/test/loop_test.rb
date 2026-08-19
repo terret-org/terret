@@ -267,6 +267,51 @@ class TurnFlowTest < Minitest::Test
     refute agent.cancelled? # the flag does not leak into the next turn
   end
 
+  # Cancellation is cooperative and honored at boundaries, so between the
+  # request and the boundary there is a real interval where the agent is still
+  # working and is no longer going to finish. Through M7 that interval was
+  # indistinguishable from :running, which costs an operator real time.
+  def test_a_cancel_mid_turn_says_the_agent_is_stopping
+    ctx, = boot(script: two_step_script)
+    agent = nil
+    inside = nil
+    ctx.with_owner("cancelling-tool") do
+      ctx[:tools].register(name: "weather", description: "Weather lookup",
+                           params: { city: "string" }) do |city:|
+        agent.cancel("user hit stop")
+        inside = agent.status
+        "22C in #{city}"
+      end
+    end
+    at_close = []
+    ctx.on("agent/turn_stopping") do |a|
+      at_close << a.status
+      nil
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "weather?")
+
+    assert_equal :stopping, inside
+    assert_equal [:stopping], at_close, "the window stays visible until the turn closes"
+    assert_equal :idle, agent.status
+    assert_equal "cancelled", session.events.last.payload[:status]
+  end
+
+  # :stopping is a sub-state of a running turn. A cancel with no turn to stop
+  # leaves the agent idle — an idle agent that could not start a turn because
+  # of a stale status would be wedged by it.
+  def test_a_cancel_on_an_idle_agent_leaves_it_idle
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, = spawn(ctx)
+
+    agent.cancel("too soon")
+
+    assert_equal :idle, agent.status
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "hello?")
+  end
+
   def test_cancel_set_before_the_turn_closes_it_with_no_step
     ctx, = boot(script: [{ text: "hi" }])
     agent, session = spawn(ctx)
@@ -640,6 +685,21 @@ class AgentLifecycleTest < Minitest::Test
     assert_nil ctx[:loop].agent(agent.id)
     assert_nil ctx[:loop].agent_for_session(s.id)
     ctx[:loop].spawn_agent(session_id: s.id) # the slot is genuinely free
+  end
+
+  # :done is terminal. A disposed agent's context is gone along with every
+  # effect it owned, so the handle refuses rather than half-working against a
+  # dead fork.
+  def test_a_disposed_agent_is_done_and_refuses_another_turn
+    ctx, = boot(script: [{ text: "hi" }])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+
+    ctx[:loop].dispose_agent(agent.id)
+
+    assert_equal :done, agent.status
+    err = assert_raises(Terret::AgentDisposed) { ctx[:loop].run_turn(agent, "hello") }
+    assert_match(/disposed/, err.message)
   end
 
   def test_the_agent_cap_holds
