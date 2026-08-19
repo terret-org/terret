@@ -798,6 +798,55 @@ class ResumeTurnTest < Minitest::Test
     ctx[:loop].resume_turn(agent) # assert_log_invariant! runs inside every step; no raise = held
     ctx[:sessions].assert_log_invariant!(session.id, ctx[:sessions].derive_messages(session.id))
   end
+
+  # A second turn/start over an open turn strands the owed call forever
+  # (resumable? scans from the LAST turn/start) and leaves the projection
+  # holding an assistant tool call with no result — a hard 400 on a real
+  # adapter, permanently.
+  def test_run_turn_refuses_a_session_whose_log_holds_an_open_turn
+    ctx, = boot_with_approvals([{ text: "Deployed." }])
+    register_deploy(ctx)
+    session = ctx[:sessions].create
+    craft_dangling_log(ctx, session)
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    before = session.events.length
+
+    assert_raises(Terret::TurnOpenInLog) { ctx[:loop].run_turn(agent, "ship it") }
+    assert_equal before, session.events.length, "the refusal must append nothing"
+    assert ctx[:loop].resumable?(session.id), "the open turn must still be resumable"
+    assert_equal :idle, agent.status
+  end
+
+  # A transient failure mid-resume (an LLM outage) must leave the turn open so
+  # the next stimulus picks it up. Closing it with turn/end status failed would
+  # brick the session: the owed tool call can never be completed after that.
+  def test_a_failed_resume_leaves_the_turn_open_for_the_next_one
+    ctx, = boot_with_approvals([]) # exhausted script: the adapter raises
+    register_deploy(ctx)
+    session = ctx[:sessions].create
+    craft_dangling_log(ctx, session)
+    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc9", verdict: "approved" })
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_raises(RuntimeError) { ctx[:loop].resume_turn(agent) }
+    refute session.events.map(&:type).include?("turn/end"), "a failed resume must not close the turn"
+    assert ctx[:loop].resumable?(session.id)
+    assert_equal :idle, agent.status
+
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new([{ text: "Deployed." }]))
+    assert_equal :completed, ctx[:loop].resume_turn(agent)
+    assert_equal "turn/end", session.events.last.type
+  end
+
+  # run_turn keeps the old contract: a failure there is terminal for the turn,
+  # and the log says so.
+  def test_a_failed_run_turn_still_closes_with_a_failed_turn_end
+    ctx, = boot_with_approvals([])
+    agent, session = spawn(ctx)
+
+    assert_raises(RuntimeError) { ctx[:loop].run_turn(agent, "hello") }
+    assert_equal "failed", session.events.last.payload[:status]
+  end
 end
 
 class HotPolicyTest < Minitest::Test
@@ -863,6 +912,33 @@ class HotPolicyTest < Minitest::Test
     _, session = spawn(ctx)
     Terret::Tools::AllowList.update(ctx, session.id, ["x"])
     assert_empty ctx[:sessions].derive_messages(session.id)
+  end
+
+  # A session this context cannot read may carry a policy far stricter than
+  # the boot floor. Falling back to the floor there grants MORE authority than
+  # anyone configured, so an unknown session gets none.
+  def test_an_unreadable_session_denies_every_call
+    ctx, = boot(script: [])
+    register_ping(ctx)
+    agent, = spawn(ctx)
+    Terret::Tools::AllowList.install(agent.ctx, ["ping"]) # the floor says yes
+
+    call = Terret::Tools::Call.new(id: "x1", name: "ping", args: {}, session_id: "not-a-session")
+    result = nil
+    warned = capture_warn { result = ctx[:tools].execute(call, ctx: agent.ctx) }
+
+    assert_nil result.content
+    assert_match(/allow list/, result.error)
+    assert_match(/not-a-session/, warned)
+  end
+
+  def capture_warn
+    old = $stderr
+    $stderr = StringIO.new
+    yield
+    $stderr.string
+  ensure
+    $stderr = old
   end
 
   private

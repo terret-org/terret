@@ -30,6 +30,15 @@ class CompactorTest < Minitest::Test
     [ctx[:loop].spawn_agent(session_id: session.id), session]
   end
 
+  def capture_warn
+    old = $stderr
+    $stderr = StringIO.new
+    yield
+    $stderr.string
+  ensure
+    $stderr = old
+  end
+
   # A summarizer that declines every request (Morph-without-a-key shape).
   class DecliningSummarizer < Hames::Service
     service_key :summarizer
@@ -125,6 +134,39 @@ class CompactorTest < Minitest::Test
     assert session.events.map(&:type).include?("turn/end")
     refute session.events.map(&:type).include?("session/compacted")
     assert_nil ctx[:compactor].compact!(session.id), "manual compact! reports the decline as nil"
+  end
+
+  # Summarizing takes a network round trip. The boundary is computed after it
+  # returns, so anything model-visible that landed meanwhile would be swept
+  # under a summary that never saw it — a silent context loss.
+  class RacingSummarizer < Hames::Service
+    service_key :summarizer
+    inject :sessions
+
+    attr_accessor :session_id
+
+    def start(ctx)
+      @ctx = ctx
+    end
+
+    def summarize(_history)
+      @ctx[:sessions].append(@session_id, "user/message", { text: "typed while you thought" })
+      "SUMMARY: everything so far."
+    end
+  end
+
+  def test_compaction_declines_when_model_visible_history_lands_mid_summarize
+    ctx, = boot(script: [{ text: "reply" }], summarizer: RacingSummarizer)
+    agent, session = spawn(ctx)
+    ctx[:loop].run_turn(agent, "hello")
+    ctx[:summarizer].session_id = session.id
+
+    warned = capture_warn { assert_nil ctx[:compactor].compact!(session.id) }
+
+    assert_match(/compaction skipped/, warned)
+    refute session.events.map(&:type).include?("session/compacted")
+    assert_includes ctx[:sessions].derive_messages(session.id).map(&:text),
+                    "typed while you thought"
   end
 
   def test_compacting_an_empty_session_refuses

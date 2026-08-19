@@ -212,7 +212,14 @@ class AgentHost
 
     @busy = true
     Async do
-      @ctx[:loop].run_turn(@agent, text)
+      # a session picked back up after a crash may still have a turn open in
+      # the log; the text rides its next step instead of starting a second one
+      if @ctx[:loop].resumable?(@session.id)
+        @agent.inject(text)
+        @ctx[:loop].resume_turn(@agent)
+      else
+        @ctx[:loop].run_turn(@agent, text)
+      end
     rescue => e
       # the durable turn/end (status :failed) already re-enabled the composer
       # through the normal render path; only the exception detail is ephemeral —

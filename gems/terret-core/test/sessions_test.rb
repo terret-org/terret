@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require "json"
+require "tmpdir"
 require_relative "../lib/terret"
 
 class SessionsPrimitivesTest < Minitest::Test
@@ -230,6 +231,68 @@ class SessionsUsageTest < Minitest::Test
     s = sessions.create
     assert_equal({ prompt_tokens: 0, completion_tokens: 0, cost: 0.0, steps: 0 },
                  sessions.usage(s.id))
+  end
+end
+
+class SessionsConcurrencyTest < Minitest::Test
+  # JSONL's append opens and writes a file — a genuine yield point, both under
+  # the fiber scheduler and between threads. Forcing the switch makes the race
+  # deterministic instead of hoping the scheduler lands inside the window.
+  class YieldingStore < Terret::Store::JSONL
+    def append(event)
+      Thread.pass
+      super
+    end
+  end
+
+  def boot(dir)
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: YieldingStore, config: { dir: dir } },
+      { id: "sessions", plugin: Terret::Sessions }
+    ])
+    loader.boot!
+  end
+
+  def test_concurrent_appenders_never_share_a_seq
+    Dir.mktmpdir do |dir|
+      sessions = boot(dir)[:sessions]
+      s = sessions.create
+
+      threads = 2.times.map do |t|
+        Thread.new { 25.times { |i| sessions.append(s.id, "user/message", { text: "#{t}-#{i}" }) } }
+      end
+      threads.each(&:join)
+
+      seqs = s.events.map(&:seq)
+      assert_equal seqs.uniq.length, seqs.length, "two appenders took the same seq"
+      assert_equal (0...seqs.length).to_a, seqs.sort
+      assert_equal seqs, sessions.read(s.id).map(&:seq), "the store disagrees with memory"
+    end
+  end
+
+  def test_an_append_from_a_listener_fans_out_after_the_event_it_reacted_to
+    Dir.mktmpdir do |dir|
+      ctx = boot(dir)
+      sessions = ctx[:sessions]
+      s = sessions.create
+
+      # registered FIRST, so its nested append happens before the recorder
+      # below ever sees the event that triggered it — the compactor and titler
+      # both react to turn/end exactly like this
+      ctx.on("session/event") do |ev|
+        sessions.append(ev.session_id, "session/titled", { title: "derived" }) if ev.type == "turn/end"
+      end
+      order = []
+      ctx.on("session/event") { |ev| order << [ev.seq, ev.type] }
+
+      sessions.append(s.id, "turn/end", { status: "completed" })
+
+      assert_equal order.sort_by(&:first), order, "fan-out overtook the log's own order"
+      assert_equal [[1, "turn/end"], [2, "session/titled"]], order
+    end
   end
 end
 

@@ -5,6 +5,13 @@ module Terret
   # turns would interleave the durable log, so this refuses loudly instead.
   class TurnAlreadyRunning < StandardError; end
 
+  # Raised when run_turn is called on a session whose log still holds an open
+  # turn. A second turn/start would strand whatever the open turn owes —
+  # resumable? scans from the LAST turn/start — and leave the projection
+  # carrying an assistant tool call with no result, which a real adapter
+  # rejects outright, forever. Resume the open turn instead.
+  class TurnOpenInLog < StandardError; end
+
   # Raised on id or session collision in spawn_agent: silent replacement
   # leaked the old agent's forked context and orphaned its mid-turn state
   # (plan §14). Dispose the old agent first, explicitly.
@@ -131,6 +138,14 @@ module Terret
 
     # Runs one turn for `input`. Returns the turn status symbol.
     def run_turn(agent, input)
+      # Only an idle agent is asked this: while it is mid-turn the log's open
+      # turn is its own, TurnAlreadyRunning is the accurate answer, and the
+      # socket's raced-wake requeue is written against it.
+      if agent.status == :idle && resumable?(agent.session_id)
+        raise TurnOpenInLog,
+              "session #{agent.session_id} has an open turn; resume_turn it"
+      end
+
       turning(agent) do |state, sessions, sid|
         sessions.append(sid, "turn/start", { agent: agent.id })
         step_loop(agent, state, pending: input.nil? ? [] : [["user/message", input]], steps: 0)
@@ -147,7 +162,9 @@ module Terret
     def resume_turn(agent)
       raise ArgumentError, "session #{agent.session_id} has no open turn" unless resumable?(agent.session_id)
 
-      turning(agent) do |state, _sessions, _sid|
+      # A transient failure here (an LLM outage) must leave the turn open for
+      # the next stimulus: closing it would strand the owed tool call for good.
+      turning(agent, close_on_failure: false) do |state, _sessions, _sid|
         step_loop(agent, state, pending: [], steps: complete_dangling(agent))
       end
     end
@@ -165,7 +182,7 @@ module Terret
 
     # Shared turn envelope: the status guard, the failure rescue, and the
     # turn/end ensure. Both entry points run their body inside it.
-    def turning(agent)
+    def turning(agent, close_on_failure: true)
       unless agent.status == :idle
         raise TurnAlreadyRunning, "agent #{agent.id} is #{agent.status}"
       end
@@ -185,9 +202,11 @@ module Terret
       ensure
         begin
           ctx.serial("agent/turn_stopping", agent)
-          payload = { status: state.status }
-          payload[:reason] = agent.cancel_reason if state.status == :cancelled && agent.cancel_reason
-          sessions.append(sid, "turn/end", payload)
+          if state.status != :failed || close_on_failure
+            payload = { status: state.status }
+            payload[:reason] = agent.cancel_reason if state.status == :cancelled && agent.cancel_reason
+            sessions.append(sid, "turn/end", payload)
+          end
         ensure
           agent.clear_cancel!
           agent.status = :idle

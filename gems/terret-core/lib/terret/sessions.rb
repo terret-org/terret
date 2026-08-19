@@ -24,6 +24,11 @@ module Terret
       @ctx = ctx
       @store = ctx[:session_store]
       @cache = {}
+      @locks = {}
+      @locks_mutex = Mutex.new
+      @emit_mutex = Mutex.new
+      @emit_queue = []
+      @emitting = false
     end
 
     def create(id: SecureRandom.hex(6), parent_id: nil)
@@ -40,14 +45,18 @@ module Terret
       raise Hames::ContractError, "#{type} is not a durable event" unless decl.durable
 
       s = fetch(session_id)
-      ev = SessionEvent.new(
-        id: SecureRandom.hex(8), session_id:, seq: s.events.length,
-        at: Time.now.utc, type: type.to_s, payload: normalize_payload(payload)
-      )
-      # durable first: if the store raises, nothing believes the event happened
-      @store.append(ev)
-      s.events << ev
-      @ctx.emit("session/event", ev)
+      normalized = normalize_payload(payload)
+      ev = lock_for(session_id).synchronize do
+        e = SessionEvent.new(
+          id: SecureRandom.hex(8), session_id:, seq: s.events.length,
+          at: Time.now.utc, type: type.to_s, payload: normalized
+        )
+        # durable first: if the store raises, nothing believes the event happened
+        @store.append(e)
+        s.events << e
+        e
+      end
+      fan_out(ev)
       ev
     end
 
@@ -141,6 +150,51 @@ module Terret
     end
 
     private
+
+    # Seq assignment, the durable write, and the memory push are one critical
+    # section per session. The store write is a yield point — JSONL opens a
+    # file, and a fiber scheduler switches there — so without this two
+    # appenders (a connection frame and a turn, say) read the same
+    # events.length and both claim it. Mutex is fiber-aware under the
+    # scheduler, so this parks a fiber rather than stalling the reactor.
+    def lock_for(session_id)
+      @locks_mutex.synchronize { @locks[session_id] ||= Mutex.new }
+    end
+
+    # Fan-out runs OUTSIDE the append lock, and in seq order. A listener that
+    # appends while handling an event — the compactor and the titler both do,
+    # on turn/end — would otherwise deliver its nested event to every other
+    # subscriber before the event it reacted to, so a socket tail would see
+    # the log out of order. Queueing behind the delivery in flight fixes that,
+    # at a price worth naming: a listener's own append returns before that
+    # event fans out. Assumes one reactor; the flag is mutex-guarded so
+    # threaded appenders cannot lose a queued event between the two.
+    def fan_out(ev)
+      @emit_mutex.synchronize do
+        @emit_queue << ev
+        return if @emitting
+
+        @emitting = true
+      end
+      drain_emits
+    end
+
+    def drain_emits
+      while (ev = next_emit)
+        @ctx.emit("session/event", ev)
+      end
+    rescue Exception
+      @emit_mutex.synchronize { @emitting = false }
+      raise
+    end
+
+    def next_emit
+      @emit_mutex.synchronize do
+        ev = @emit_queue.shift
+        @emitting = false unless ev
+        ev
+      end
+    end
 
     # Compacted history is still model-visible, so it lives in the log and
     # projects as a user message standing in for everything at or before its

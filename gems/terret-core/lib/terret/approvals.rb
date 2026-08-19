@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json"
+
 module Terret
   module Tools
     # ctx[:approvals] — durable human-in-the-loop gating (plan §6.3, §12 M6).
@@ -29,11 +31,14 @@ module Terret
         end
       end
 
-      # Log-derived: requested without a matching resolved. The in-memory
-      # waiter map is never consulted — after a restart it is empty while the
-      # log still knows what is owed.
+      # Log-derived: requested without a matching resolved, within the OPEN
+      # turn. The in-memory waiter map is never consulted — after a restart it
+      # is empty while the log still knows what is owed. Nothing is pending
+      # once the turn that asked has closed: a request its turn outlived was
+      # settled by that turn ending, and a provider is free to reuse the call
+      # id afterwards.
       def pending(session_id)
-        events = @ctx[:sessions].fetch(session_id).events
+        events = open_turn(session_id)
         resolved = events.filter_map { |e| e.payload[:call_id] if e.type == "approval/resolved" }
         events.filter_map do |e|
           next unless e.type == "approval/requested"
@@ -82,13 +87,42 @@ module Terret
         d.approval == :always || (d.approval == :policy && d.mutating)
       end
 
+      # Everything appended after the last turn/start, and nothing at all once
+      # that turn has closed. Approvals are per-turn state.
+      def open_turn(session_id)
+        events = @ctx[:sessions].fetch(session_id).events
+        opened = events.rindex { |e| e.type == "turn/start" }
+        return [] unless opened
+
+        turn = events[(opened + 1)..]
+        turn.any? { |e| e.type == "turn/end" } ? [] : turn
+      end
+
       # A verdict already in the log (replay after a restart, or a decision
-      # that raced ahead of execution) settles the call without parking.
+      # that raced ahead of execution) settles the call without parking. The
+      # match is bound to content, not just to the call id: the latest request
+      # in the open turn naming this id, this tool, and these args, with a
+      # verdict for that id recorded after it. Provider tool call ids are not
+      # contractually unique, so an id reused in a later turn — or reused
+      # within one turn for a different call — must never inherit an old
+      # decision.
       def recorded_verdict(call)
-        @ctx[:sessions].fetch(call.session_id).events.find do |e|
+        events = open_turn(call.session_id)
+        asked = events.rindex do |e|
+          e.type == "approval/requested" && e.payload[:call_id] == call.id &&
+            e.payload[:name] == call.name && e.payload[:args] == stored_form(call.args)
+        end
+        return nil unless asked
+
+        events[(asked + 1)..].find do |e|
           e.type == "approval/resolved" && e.payload[:call_id] == call.id
         end&.payload
       end
+
+      # Args reach the log through Sessions' primitives contract (symbol keys,
+      # symbols in value position stringified); a JSON round trip lands on the
+      # same shape, so the comparison above is against what was really stored.
+      def stored_form(args) = JSON.parse(JSON.generate(args), symbolize_names: true)
 
       def park(call)
         q = Thread::Queue.new
@@ -96,6 +130,13 @@ module Terret
         # waiter first, then the durable request: a verdict can never land in
         # the gap between the append's fan-out and the waiter existing
         @waiting[key] = q
+        # ...and the gate's own lookup happened before that waiter existed, so
+        # a verdict landing in between signalled nothing. Look again now that
+        # a signal has somewhere to land, or the pop below waits forever.
+        if (raced = recorded_verdict(call))
+          return raced
+        end
+
         agent = @ctx[:loop].agent_for_session(call.session_id)
         unless pending?(call.session_id, call.id) # a resume re-parks on the standing request
           @ctx[:sessions].append(call.session_id, "approval/requested",

@@ -92,6 +92,13 @@ module Terret
         @roles    = (config[:roles] || {}).dup # :main => "fake/scripted"
       end
 
+      # The role map is the whole of this service's config, and layering
+      # replaces a row's config wholesale — so does this. Registered adapters
+      # are runtime state, not config, and survive untouched.
+      def reconfigure(config)
+        @roles = (config[:roles] || {}).dup
+      end
+
       def register_adapter(name, adapter)
         @adapters[name.to_s] = adapter
         -> { @adapters.delete(name.to_s) }

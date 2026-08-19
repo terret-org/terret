@@ -141,7 +141,7 @@ module Terret
 
         last = replayed.empty? ? from_seq - 1 : replayed.last.seq
         until buffered.empty?
-          batch = buffered.select { |ev| ev.seq > last }
+          batch = buffered.select { |ev| ev.seq > last }.sort_by(&:seq)
           buffered.clear
           return unless replay(batch)
 

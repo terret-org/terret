@@ -36,6 +36,11 @@ module Terret
       @budget = config[:budget]
     end
 
+    # Everything derive_messages projects. Anything else may land under a
+    # boundary without being summarized; these may not.
+    MODEL_VISIBLE = %w[user/message context/injected assistant/message
+                       tool/result session/compacted].freeze
+
     # Summarize the whole projected history and append the boundary event.
     # Returns the appended SessionEvent, or nil when the summarizer declined.
     def compact!(session_id)
@@ -43,9 +48,22 @@ module Terret
       history = sessions.derive_messages(session_id)
       raise ArgumentError, "nothing to compact in #{session_id}" if history.empty?
 
+      base_seq = sessions.fetch(session_id).events.last.seq
       summary = @ctx[:summarizer].summarize(history)
       unless summary.is_a?(String) && !summary.strip.empty?
         warn "terret: compaction skipped for #{session_id}: summarizer declined"
+        return nil
+      end
+
+      # Summarizing is a round trip; the boundary covers the whole prefix, so
+      # model-visible history arriving while it ran would be swept under a
+      # summary that never read it. Decline instead — the next overweight turn
+      # retries, and nothing is lost in the meantime.
+      raced = sessions.fetch(session_id).events
+                      .count { |e| e.seq > base_seq && MODEL_VISIBLE.include?(e.type) }
+      unless raced.zero?
+        warn "terret: compaction skipped for #{session_id}: " \
+             "#{raced} model-visible event(s) landed while summarizing"
         return nil
       end
 

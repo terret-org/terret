@@ -102,7 +102,11 @@ module Terret
                       .find { |e| e.type == "policy/updated" }
                       &.payload&.[](:patterns)
       rescue KeyError
-        nil # session unknown to this context: the floor applies
+        # A session this context cannot read may carry a policy far stricter
+        # than the boot floor, so falling back to the floor would grant more
+        # authority than anyone configured. Deny everything instead.
+        warn "terret: no policy readable for session #{session_id.inspect}; denying every tool call"
+        []
       end
     end
   end

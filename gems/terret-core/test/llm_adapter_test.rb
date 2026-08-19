@@ -97,6 +97,35 @@ class LLMServiceRolesTest < Minitest::Test
     assert_equal [service.instance_variable_get(:@adapters)["fake"], "one"], service.resolve(:main)
   end
 
+  def test_reconfigure_swaps_the_roles_and_keeps_registered_adapters
+    service = Terret::LLM::Service.new(roles: { main: "fake/one" })
+    service.start(nil)
+    a = Object.new
+    b = Object.new
+    service.register_adapter("fake", a)
+    service.register_adapter("alt", b)
+
+    warned = capture_warn do
+      service.replace_config!({ roles: { main: "alt/two", compactor: "fake/small" } })
+      service.reconfigure({ roles: { main: "alt/two", compactor: "fake/small" } })
+    end
+
+    assert_empty warned, "roles are hot-swappable; the base warning would be a lie"
+    assert_equal [b, "two"], service.resolve(:main)
+    assert_equal [a, "small"], service.resolve(:compactor)
+    # config layering replaces wholesale, so a role the new config drops is gone
+    assert_raises(KeyError) { service.resolve(:titler) }
+  end
+
+  def capture_warn
+    old = $stderr
+    $stderr = StringIO.new
+    yield
+    $stderr.string
+  ensure
+    $stderr = old
+  end
+
   def test_start_does_not_alias_the_callers_config_hash
     original_roles = { main: "fake/one" }
     service = Terret::LLM::Service.new(roles: original_roles)

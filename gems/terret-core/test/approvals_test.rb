@@ -4,7 +4,7 @@ require "minitest/autorun"
 require_relative "../lib/terret"
 
 module ApprovalsHarness
-  def boot(script:, extra_rows: [])
+  def boot(script:, extra_rows: [], approvals: { id: "approvals", plugin: Terret::Tools::Approvals })
     Hames.reset_events!
     Terret.declare_events!
 
@@ -16,7 +16,7 @@ module ApprovalsHarness
       { id: "tools",    plugin: Terret::Tools::Registry },
       { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
       { id: "loop",     plugin: Terret::Loop },
-      { id: "approvals", plugin: Terret::Tools::Approvals },
+      approvals,
       *extra_rows
     ])
     ctx = loader.boot!
@@ -44,13 +44,37 @@ module ApprovalsHarness
   # Run a turn in a background thread; wait until the agent parks.
   def park_turn(ctx, agent)
     t = Thread.new { ctx[:loop].run_turn(agent, "ship it") }
-    deadline = Time.now + 5
-    until agent.status == :waiting_approval
-      raise "never parked (status=#{agent.status})" if Time.now > deadline
+    await("never parked (status=#{agent.status})") { agent.status == :waiting_approval }
+    t
+  end
+
+  def await(message = "condition never held", timeout: 5)
+    deadline = Time.now + timeout
+    until yield
+      raise message if Time.now > deadline
 
       sleep 0.005
     end
-    t
+  end
+
+  # The log a process death mid-park leaves behind: an open turn whose last
+  # assistant message owes a deploy call that has no result yet.
+  def stage_open_turn(ctx, resolved: false)
+    session = ctx[:sessions].create
+    sid = session.id
+    agent = ctx[:loop].spawn_agent(session_id: sid)
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    ctx[:sessions].append(sid, "step/start", { n: 1 })
+    ctx[:sessions].append(sid, "user/message", { text: "ship it" })
+    ctx[:sessions].append(sid, "assistant/message",
+                          { parts: [Terret::LLM.encode_part(DEPLOY_CALL)] })
+    ctx[:sessions].append(sid, "tool/call", { id: "tc1", name: "deploy", args: { env: "prod" } })
+    ctx[:sessions].append(sid, "approval/requested",
+                          { call_id: "tc1", name: "deploy", args: { env: "prod" } })
+    if resolved
+      ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+    end
+    [agent, session]
   end
 end
 
@@ -102,18 +126,72 @@ class ApprovalsGateTest < Minitest::Test
   end
 
   def test_a_verdict_already_in_the_log_settles_without_parking
-    # The restart property, minus the restart: the resolved event precedes
-    # execution, so the gate must consume it and never park.
+    # The restart property, with the restart staged in the log: the open turn
+    # already carries the request and its verdict, so the resumed call must
+    # consume that verdict and never park again.
+    ctx, = boot(script: [{ text: "Done." }])
+    register_deploy(ctx, approval: :always)
+    agent, session = stage_open_turn(ctx, resolved: true)
+
+    assert_equal :completed, ctx[:loop].resume_turn(agent)
+    assert_equal "deployed to prod",
+                 session.events.find { |e| e.type == "tool/result" }.payload[:content]
+    # a second request would mean the gate parked despite a standing verdict
+    assert_equal 1, session.events.count { |e| e.type == "approval/requested" }
+  end
+
+  def test_a_verdict_from_a_closed_turn_never_settles_a_later_call
+    # Provider tool call ids are not contractually unique. An id reused after
+    # its turn closed must be asked about again, not silently approved.
     ctx, = boot(script: park_script)
     register_deploy(ctx, approval: :always)
     agent, session = spawn(ctx)
-    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+    sid = session.id
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    ctx[:sessions].append(sid, "approval/requested",
+                          { call_id: "tc1", name: "deploy", args: { env: "prod" } })
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+    ctx[:sessions].append(sid, "turn/end", { status: "completed" })
 
-    assert_equal :completed, ctx[:loop].run_turn(agent, "ship it")
-    assert_equal "deployed to prod",
-                 session.events.find { |e| e.type == "tool/result" }.payload[:content]
-    # exactly one requested/resolved pair would be wrong: nothing new was requested
-    refute session.events.map(&:type).include?("approval/requested")
+    turn = park_turn(ctx, agent)
+    assert ctx[:approvals].pending?(sid, "tc1"), "the new turn must stand on its own request"
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "denied" })
+    assert_equal :completed, turn.value
+  end
+
+  def test_a_verdict_does_not_carry_over_to_a_call_with_different_args
+    ctx, = boot(script: [])
+    register_deploy(ctx, approval: :always)
+    agent, session = spawn(ctx)
+    sid = session.id
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    ctx[:sessions].append(sid, "approval/requested",
+                          { call_id: "tc1", name: "deploy", args: { env: "staging" } })
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+
+    # same open turn, same call id, but prod is not what anyone approved
+    call = Terret::Tools::Call.new(id: "tc1", name: "deploy",
+                                   args: { env: "prod" }, session_id: sid)
+    t = Thread.new { ctx[:tools].execute(call, ctx: agent.ctx) }
+    await { session.events.count { |e| e.type == "approval/requested" } == 2 }
+
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "denied" })
+    result = t.value
+    assert_nil result.content
+    assert_match(/denied/, result.error)
+  end
+
+  def test_pending_ignores_requests_from_a_closed_turn
+    ctx, = boot(script: [])
+    _, session = spawn(ctx)
+    sid = session.id
+    ctx[:sessions].append(sid, "turn/start", { agent: "a" })
+    ctx[:sessions].append(sid, "approval/requested", { call_id: "old", name: "x", args: {} })
+    ctx[:sessions].append(sid, "turn/end", { status: "cancelled" })
+    ctx[:sessions].append(sid, "turn/start", { agent: "a" })
+    ctx[:sessions].append(sid, "approval/requested", { call_id: "new", name: "y", args: {} })
+
+    assert_equal ["new"], ctx[:approvals].pending(sid)
   end
 
   def test_a_prior_veto_settles_the_call_before_anyone_is_asked
@@ -144,10 +222,37 @@ class ApprovalsGateTest < Minitest::Test
   def test_pending_lists_requested_without_resolved
     ctx, = boot(script: [])
     _, session = spawn(ctx)
+    ctx[:sessions].append(session.id, "turn/start", { agent: "a" })
     ctx[:sessions].append(session.id, "approval/requested", { call_id: "a", name: "x", args: {} })
     ctx[:sessions].append(session.id, "approval/requested", { call_id: "b", name: "y", args: {} })
     ctx[:sessions].append(session.id, "approval/resolved",  { call_id: "a", verdict: "approved" })
     assert_equal ["b"], ctx[:approvals].pending(session.id)
+  end
+
+  # The gate's verdict lookup and park's waiter install are two statements.
+  # A verdict landing between them signals a waiter that does not exist yet,
+  # so the pop has nothing left to wake it. There is no seam between the two
+  # to schedule a thread into, so this double makes the window deterministic:
+  # the gate's lookup misses, park's re-check sees what landed.
+  class RacingApprovals < Terret::Tools::Approvals
+    def recorded_verdict(call)
+      @looked = (@looked || 0) + 1
+      @looked == 1 ? nil : super
+    end
+  end
+
+  def test_park_rechecks_the_log_after_installing_its_waiter
+    ctx, = boot(script: [{ text: "Done." }],
+                approvals: { id: "approvals", plugin: RacingApprovals })
+    register_deploy(ctx, approval: :always)
+    agent, session = stage_open_turn(ctx, resolved: true)
+
+    t = Thread.new { ctx[:loop].resume_turn(agent) }
+    assert t.join(5), "park wedged on a queue nothing can signal"
+    assert_equal :completed, t.value
+    assert_equal "deployed to prod",
+                 session.events.find { |e| e.type == "tool/result" }.payload[:content]
+    assert_equal 1, session.events.count { |e| e.type == "approval/requested" }
   end
 
   def test_a_vanished_tool_still_renders_a_recoverable_error

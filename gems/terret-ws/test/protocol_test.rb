@@ -506,8 +506,12 @@ class ProtocolTest < Minitest::Test
   def test_approve_and_deny_append_durable_resolutions
     ctx = boot(script: [{ text: "hi" }], extra_rows: [APPROVALS_ROW])
     agent, session = spawn_agent(ctx)
+    # requests belong to a turn: nothing is pending once the turn that asked
+    # has closed, so the staging is an agent parked mid-turn on two of them
+    ctx[:sessions].append(session.id, "turn/start", { agent: agent.id })
     ctx[:sessions].append(session.id, "approval/requested", { call_id: "tc1", name: "a", args: {} })
     ctx[:sessions].append(session.id, "approval/requested", { call_id: "tc2", name: "b", args: {} })
+    agent.status = :waiting_approval
 
     Sync do |task|
       sock, = connect(ctx, agent, task)
