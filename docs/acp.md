@@ -15,11 +15,14 @@
 
 ## What ACP is
 
-The Agent Client Protocol is a contract between an editor and a coding
-agent: **JSON-RPC 2.0 over stdio**, newline-delimited. The **client spawns
-the agent as a subprocess** and speaks to it over that process's stdin and
-stdout. An editor that speaks ACP can drive any agent that speaks it, and
-an agent that speaks it gets every such editor for free.
+The Agent Client Protocol is **Zed's** — introduced by Zed as the contract
+between an editor and a coding agent, and now stewarded in its own
+`agentclientprotocol` organization since the repository moved out of
+`zed-industries`. The wire is **JSON-RPC 2.0 over stdio**,
+newline-delimited: the **client spawns the agent as a subprocess** and
+speaks to it over that process's stdin and stdout. An editor that speaks
+ACP can drive any agent that speaks it, and an agent that speaks it gets
+every such editor for free.
 
 It is worth being precise about the direction, because Terret now sits on
 both sides of an interop story that uses similar words for opposite things
@@ -167,7 +170,6 @@ field **`sessionUpdate`** — not `type`.
 | `assistant/chunk` | `agent_message_chunk` | `{content: {type: "text", …}}` |
 | `tool/call` | `tool_call` | `toolCallId`, `title`, `kind`, `status: "pending"` |
 | `tool/result` | `tool_call_update` | same `toolCallId`, terminal `status`, content |
-| a `TodoWrite` result | `plan` | see below |
 
 `tool_call`'s `kind` is an enum (`read`, `edit`, `delete`, `move`,
 `search`, `execute`, `think`, `fetch`, `switch_mode`, `other`), and the
@@ -179,28 +181,20 @@ std roster maps onto it cleanly enough that the table is mechanical:
 one Terret event opens the call and a second closes it rather than one
 event carrying both.
 
-**`plan` is the ACP shape of `TodoWrite`**, and the fit is exact rather
-than approximate: the variant carries the whole entry list and **replaces
-it on every update**, which is precisely `TodoWrite`'s contract — the tool
-takes the entire list every call and its result echo is its only storage
-(docs/subagents.md §7). Two designs arrived at the same answer
-independently, which is a decent sign both are right. The one seam to
-mind is the status vocabularies: ACP's entries are `pending |
-in_progress | completed` with a `priority`, and `TodoWrite`'s items are
-`pending | in_progress | completed` with an `activeForm`. The statuses
-line up; the extra fields do not, and the projection drops what has no
-home.
+Those three are the whole of what v1 emits. Eight further variants exist
+in the schema and none of them are sent:
 
-`agent_thought_chunk` exists in the protocol and Terret does not emit it,
-because there is no durable thinking-delta event to project from:
+`agent_thought_chunk` has no durable source to project from —
 `assistant/chunk` carries text, and `Thinking` parts ride the completed
-`assistant/message` (docs/events.md). If a thinking-chunk event is ever
-declared, this is where it lands.
-
-Six further variants exist — `user_message_chunk`,
+`assistant/message` (docs/events.md) — so if a thinking-chunk event is
+ever declared, this is where it would land. `plan` carries a full entry
+list that it **replaces on every update**, which happens to be exactly
+`TodoWrite`'s contract (docs/subagents.md §7) and makes that tool its
+natural future source; mapping the two is a later idea rather than
+anything M8 owes. The remaining six —`user_message_chunk`,
 `available_commands_update`, `current_mode_update`,
-`config_option_update`, `session_info_update`, `usage_update` — and v1
-emits none of them.
+`config_option_update`, `session_info_update`, and `usage_update` — have
+no Terret consumer.
 
 There is one honest difference from the socket, and it should be stated
 rather than left for someone to infer. `terret-ws` serializes the durable
@@ -302,26 +296,30 @@ are the sandbox and the allow list, not the transport.
 client: `fs/read_text_file` and `fs/write_text_file`, `terminal/*`,
 `elicitation/*`, and `session/request_permission`. Terret calls none of
 them, and no opt-out declaration exists or is needed — an agent that never
-sends them has nothing to advertise. For the two filesystem methods that
-is a containment decision, not a preference: Terret has its own fs seam
-with realpath containment against a granted workspace and an
-`fs/authorize` waterfall on every operation (docs/exec.md §2–3), and
-routing file access through the editor instead would put an uncontained
-path outside every guarantee M7 built, on the exact seam where containment
-matters most. If editor-mediated file access ever lands, it lands as a
-provider **behind `ctx[:fs]`**, subject to the same containment as every
-other provider — not as a path around it.
+sends them has nothing to advertise.
 
-**`session/request_permission`, for now.** It is worth separating from the
-rest of that list, because nothing in the protocol blocks it: the method
-is not capability-gated, so every ACP client is assumed to implement it
-and an agent simply chooses whether to send it. The Terret shape is
-already sitting there — a parked `approval/requested` out as the
-permission request, the selected `optionId` appending `approval/resolved`,
-no new state anywhere (docs/lifecycle.md, "Durable approvals"). Whether
-that wiring ships in M8 or is recorded in §14 is a scope call rather than
-a protocol constraint, and the base bundle mounts the approvals row
-`disabled: true` regardless (docs/composition.md §6).
+For the two filesystem methods that is a containment decision, not a
+preference: Terret has its own fs seam with realpath containment against a
+granted workspace and an `fs/authorize` waterfall on every operation
+(docs/exec.md §2–3), and routing file access through the editor instead
+would put an uncontained path outside every guarantee M7 built, on the
+exact seam where containment matters most. If editor-mediated file access
+ever lands, it lands as a provider **behind `ctx[:fs]`**, subject to the
+same containment as every other provider — not as a path around it.
+
+`session/request_permission` is refused on the same grounds, and the
+reasoning is the one this whole harness is built on rather than anything
+about ACP: **Terret's permission gate is its own.** A tool verdict comes
+from `ctx[:approvals]` and from hot-reloadable deny-by-default policy
+(docs/lifecycle.md, docs/security.md), both of which are durable, both of
+which survive the client disconnecting, and both of which are the same
+whichever interface is attached. Delegating that verdict to an editor's
+permission UI would move the most security-relevant decision in the system
+out of the log and into a process Terret does not control. Nothing in the
+protocol blocks the mapping — the method is not capability-gated, so an
+agent simply chooses whether to send it — and projecting
+`approval/requested` onto it someday is a §14-ledger idea. The M8 verdict
+is that it is not called.
 
 **`session/load`.** Optional and gated behind `agentCapabilities.loadSession`,
 which v1 does not advertise. Terret is unusually well placed to support it
@@ -344,10 +342,9 @@ unknowns:
 
 1. The three `turn/end` statuses with no stop reason (`rejected`, `empty`,
    `failed`), and whether `MAX_STEPS` answers `max_turn_requests`.
-2. Whether `session/request_permission` ships in M8 or is recorded in §14.
-3. Whether `cwd` from `session/new` is honored inside the granted
+2. Whether `cwd` from `session/new` is honored inside the granted
    workspace or ignored entirely.
-4. The `ToolKind` table for MCP tools, whose names arrive at runtime.
+3. The `ToolKind` table for MCP tools, whose names arrive at runtime.
 
 Re-verify the wire against the live spec at build time regardless, and
 record the protocol version the server reports.
