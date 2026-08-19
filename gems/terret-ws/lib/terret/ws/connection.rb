@@ -14,11 +14,21 @@ module Terret
     # close. One Connection serves one agent. Frames land on existing seams;
     # everything outbound is a durable session event serialized as-is.
     class Connection
-      attr_reader :agent
+      # The bearer this client presented. Kept so a token rotation can sweep
+      # the connections it just invalidated (Service#reconfigure).
+      attr_reader :agent, :token
 
-      def initialize(ctx:, agent:, io:, runner:, resumer: ->(_agent) {}, queue_limit: 256)
+      # A set_policy is durable and every future tool call scans what it
+      # installs, so the frame is bounded: a client must not be able to write
+      # megabytes of patterns into the log.
+      MAX_PATTERNS = 128
+      MAX_PATTERN_LENGTH = 256
+
+      def initialize(ctx:, agent:, io:, runner:, resumer: ->(_agent) {}, queue_limit: 256,
+                     token: nil)
         @ctx = ctx
         @agent = agent
+        @token = token
         @io = io
         @runner = runner # ->(agent, text) { start a turn task owned by the server }
         @resumer = resumer # ->(agent) { re-enter the log's open turn, same rooting }
@@ -181,7 +191,11 @@ module Terret
           # cancel first, THEN deny: the parked fiber unparks into a turn
           # that already knows it is cancelled; each denial is durable
           @agent.cancel(reason)
-          @ctx[:approvals].deny_pending!(@sid, reason: reason || "cancelled")
+          # nothing can be parked without the row, but every reference to an
+          # optional service is guarded, including the unreachable ones
+          if @ctx.service?(:approvals)
+            @ctx[:approvals].deny_pending!(@sid, reason: reason || "cancelled")
+          end
         else
           push_frame(Frames.error(code: "not_running"))
         end
@@ -223,6 +237,14 @@ module Terret
         unless patterns.is_a?(Array) && patterns.all? { |p| p.is_a?(String) }
           return push_frame(Frames.error(code: "bad_frame",
                                          message: "patterns must be an array of strings"))
+        end
+        if patterns.length > MAX_PATTERNS
+          return push_frame(Frames.error(code: "bad_frame",
+                                         message: "at most #{MAX_PATTERNS} patterns"))
+        end
+        if patterns.any? { |p| p.length > MAX_PATTERN_LENGTH }
+          return push_frame(Frames.error(code: "bad_frame",
+                                         message: "a pattern is at most #{MAX_PATTERN_LENGTH} characters"))
         end
 
         Tools::AllowList.update(@ctx, @sid, patterns)

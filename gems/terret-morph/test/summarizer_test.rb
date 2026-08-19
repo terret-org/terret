@@ -6,6 +6,13 @@ require_relative "../lib/terret/morph"
 class MorphSummarizerTest < Minitest::Test
   HISTORY = [
     Terret::LLM::Message.new(role: :user, parts: [Terret::LLM::Text.new(text: "deploy the thing")]),
+    Terret::LLM::Message.new(role: :assistant, parts: [
+      Terret::LLM::Text.new(text: "Deploying."),
+      Terret::LLM::ToolCall.new(id: "tc1", name: "deploy", args: { env: "prod" })
+    ]),
+    Terret::LLM::Message.new(role: :tool, parts: [
+      Terret::LLM::ToolResult.new(id: "tc1", content: "release r-8842 is live", error: nil)
+    ]),
     Terret::LLM::Message.new(role: :assistant, parts: [Terret::LLM::Text.new(text: "Deployed.")])
   ].freeze
 
@@ -46,6 +53,26 @@ class MorphSummarizerTest < Minitest::Test
     assert_equal 0, body[:preserve_recent]
     assert_includes body[:input], "user: deploy the thing"
     assert_includes body[:input], "assistant: Deployed."
+    # a transcript that drops tool calls and results throws away the deploy id,
+    # the arguments, and every error the run produced
+    assert_includes body[:input], %(assistant: [tool_call deploy {"env":"prod"}])
+    assert_includes body[:input], "tool: [tool_result release r-8842 is live]"
+    refute_includes body[:input].split("\n"), "tool: "
+  end
+
+  def test_a_failed_tool_result_renders_its_error
+    seen = nil
+    transport = lambda do |_url, _headers, body|
+      seen = JSON.parse(body, symbolize_names: true)
+      [200, JSON.generate({ output: "ok" })]
+    end
+    history = [Terret::LLM::Message.new(role: :tool, parts: [
+                 Terret::LLM::ToolResult.new(id: "tc1", content: nil, error: "deploy denied: no")
+               ])]
+
+    boot(transport: transport)[:summarizer].summarize(history)
+
+    assert_equal "tool: [tool_result deploy denied: no]", seen[:input]
   end
 
   def test_every_failure_mode_declines_to_nil_with_a_warn

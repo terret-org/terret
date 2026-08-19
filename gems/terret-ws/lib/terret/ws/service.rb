@@ -25,6 +25,7 @@ module Terret
         @tokens = config[:tokens] || {}
         @queue_limit = config[:queue_limit] || 256
         @heartbeat = config[:heartbeat] || 20
+        revoke_stale_connections
       end
 
       attr_reader :heartbeat
@@ -49,11 +50,19 @@ module Terret
 
         sid = session_id.to_s
         resolve_session(sid)
-        agent = @ctx[:loop].agent("agent-#{sid}") || @ctx[:loop].spawn_agent(session_id: sid)
+        begin
+          agent = @ctx[:loop].agent("agent-#{sid}") || @ctx[:loop].spawn_agent(session_id: sid)
+        rescue AgentExists, AgentCapExceeded => e
+          # a registry refusal is this process's business, not the client's
+          # fault; it still deserves an answer rather than a dropped socket
+          io.write(Frames.error(code: "internal", message: e.message))
+          io.close
+          return
+        end
         @connections[sid]&.shutdown(code: "superseded")
         conn = Connection.new(ctx: @ctx, agent: agent, io: io,
                               runner: runner(runner_task), resumer: resumer(runner_task),
-                              queue_limit: @queue_limit)
+                              queue_limit: @queue_limit, token: token)
         @connections[sid] = conn
         conn.run
       ensure
@@ -68,6 +77,18 @@ module Terret
       end
 
       private
+
+      # A rotation that only locks out the next connection is not a
+      # revocation: every live connection whose presented bearer no longer
+      # authorizes its session goes, with the same frame it would have got at
+      # the door.
+      def revoke_stale_connections
+        stale = @connections.reject { |sid, conn| authorized?(sid, conn.token) }
+        stale.each do |sid, conn|
+          conn.shutdown(code: "unauthorized")
+          @connections.delete(sid)
+        end
+      end
 
       def resolve_session(sid)
         sessions = @ctx[:sessions]

@@ -61,11 +61,24 @@ module Terret
         configured.positive? ? configured : DEFAULT_TIMEOUT
       end
 
-      # The transcript Morph compresses: role-tagged lines. Extractive
-      # compression keeps surviving lines byte-identical, so the compacted
-      # history the model sees is a strict subset of what it already saw.
+      # The transcript Morph compresses: role-tagged lines, one per message
+      # part so line-level compression can keep or drop each on its merit.
+      # Extractive compression keeps surviving lines byte-identical, so the
+      # compacted history the model sees is a strict subset of what it already
+      # saw. Tool calls and results carry their own line rather than rendering
+      # blank: a session's deploy ids, arguments, and errors live there, and a
+      # summary that dropped them would be worse than no summary at all.
       def render(history)
-        history.map { |m| "#{m.role}: #{m.text}" }.join("\n")
+        history.flat_map { |m| m.parts.map { |part| "#{m.role}: #{line_for(part)}" } }.join("\n")
+      end
+
+      def line_for(part)
+        case part
+        when LLM::Text       then part.text
+        when LLM::ToolCall   then "[tool_call #{part.name} #{JSON.generate(part.args)}]"
+        when LLM::ToolResult then "[tool_result #{part.error || part.content}]"
+        else part.to_s
+        end
       end
 
       def transport

@@ -11,7 +11,9 @@ log, event by event. If it isn't in the log, it doesn't reach a client.
 - Auth: `Authorization: Bearer <token>`, checked before the agent is resolved.
   Tokens are scoped per agent id; a token for one agent cannot open another's
   stream. An unauthorized connection receives one `error` frame with code
-  `unauthorized` and is closed.
+  `unauthorized` and is closed. Revocation reaches connections already open:
+  rotating a token drops every live connection that presented the old one,
+  with the same `unauthorized` frame it would have got at the door.
 - In v1 the agent id names the session: connecting to `{agent_id}` resumes the
   session with that id, or creates it on first connect.
 - One connection per agent. A second authorized connection for the same agent
@@ -161,7 +163,10 @@ Replaces the agent's active tool allow list with `patterns` (a list of
 last one appended wins, it is effective on the very next tool call with no
 reinstall, and it survives a restart because replay rebuilds it (see
 docs/lifecycle.md, "Hot-reloadable permissions"). `patterns` must be an
-array of strings; anything else gets `bad_frame` and nothing is appended.
+array of strings; anything else gets `bad_frame` and nothing is appended. It
+is bounded at 128 patterns of at most 256 characters each — the set is
+durable and every later tool call scans it — and a frame over either bound
+gets `bad_frame` with nothing appended.
 
 ## Liveness
 

@@ -18,7 +18,7 @@ class ServiceTest < Minitest::Test
     skip "async not installed" unless ASYNC_AVAILABLE
   end
 
-  def boot(script:, tokens:)
+  def boot(script:, tokens:, loop_config: {})
     Hames.reset_events!
     Terret.declare_events!
 
@@ -29,12 +29,12 @@ class ServiceTest < Minitest::Test
       { id: "prompt",   plugin: Terret::Prompt },
       { id: "tools",    plugin: Terret::Tools::Registry },
       { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
-      { id: "loop",     plugin: Terret::Loop },
+      { id: "loop",     plugin: Terret::Loop, config: loop_config },
       { id: "ws",       plugin: Terret::WS::Service, config: { tokens: tokens } }
     ])
     ctx = loader.boot!
     ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(script))
-    ctx
+    [ctx, loader]
   end
 
   class FakeSocket
@@ -74,7 +74,7 @@ class ServiceTest < Minitest::Test
   end
 
   def test_a_bad_token_is_refused_before_the_agent_exists
-    ctx = boot(script: [], tokens: { "s1" => "right" })
+    ctx, = boot(script: [], tokens: { "s1" => "right" })
 
     Sync do
       sock = FakeSocket.new
@@ -88,7 +88,7 @@ class ServiceTest < Minitest::Test
   end
 
   def test_connecting_resolves_or_creates_the_session_named_by_the_agent_id
-    ctx = boot(script: [{ text: "hi" }], tokens: { "s1" => "secret" })
+    ctx, = boot(script: [{ text: "hi" }], tokens: { "s1" => "secret" })
 
     Sync do |task|
       sock = FakeSocket.new
@@ -113,7 +113,7 @@ class ServiceTest < Minitest::Test
   end
 
   def test_a_second_connection_supersedes_the_first
-    ctx = boot(script: [], tokens: { "s1" => "secret" })
+    ctx, = boot(script: [], tokens: { "s1" => "secret" })
 
     Sync do |task|
       sock1 = FakeSocket.new
@@ -133,12 +133,56 @@ class ServiceTest < Minitest::Test
   end
 
   def test_tokens_do_not_cross_agents
-    ctx = boot(script: [], tokens: { "s1" => "one", "s2" => "two" })
+    ctx, = boot(script: [], tokens: { "s1" => "one", "s2" => "two" })
 
     Sync do
       sock = FakeSocket.new
       ctx[:ws].attach(session_id: "s2", token: "one", io: sock)
       assert_equal "unauthorized", sock.written.last[:code]
+    end
+  end
+
+  # Revoking a token has to reach the connection already holding it, or a
+  # rotation only locks out clients that were not connected at the time.
+  def test_rotating_a_token_drops_the_connection_that_presented_the_old_one
+    ctx, loader = boot(script: [], tokens: { "s1" => "one", "s2" => "two" })
+
+    Sync do |task|
+      sock1 = FakeSocket.new
+      t1 = task.async { ctx[:ws].attach(session_id: "s1", token: "one", io: sock1) }
+      sock2 = FakeSocket.new
+      t2 = task.async { ctx[:ws].attach(session_id: "s2", token: "two", io: sock2) }
+      await { sock1.written.any? && sock2.written.any? }
+
+      loader.reconfigure!("ws", { tokens: { "s1" => "rotated", "s2" => "two" } })
+
+      await { sock1.closed? }
+      assert_equal "unauthorized", sock1.written.last[:code]
+      refute sock2.closed?, "a session whose token did not change keeps its connection"
+      sock2.client_close
+      [t1, t2].each(&:wait)
+    end
+  end
+
+  # Both registry refusals are reachable from the socket, and a client that
+  # hits one deserves an answer rather than a dropped TCP connection.
+  def test_an_agent_cap_refusal_answers_the_client_instead_of_raising
+    ctx, = boot(script: [], tokens: { "s1" => "one", "s2" => "two" },
+                loop_config: { max_agents: 1 })
+
+    Sync do |task|
+      sock1 = FakeSocket.new
+      t1 = task.async { ctx[:ws].attach(session_id: "s1", token: "one", io: sock1) }
+      await { sock1.written.any? { |f| f[:type] == "hello" } }
+
+      sock2 = FakeSocket.new
+      task.async { ctx[:ws].attach(session_id: "s2", token: "two", io: sock2) }.wait
+
+      assert_equal "internal", sock2.written.last[:code]
+      assert_match(/max_agents/, sock2.written.last[:message])
+      assert sock2.closed?
+      sock1.client_close
+      t1.wait
     end
   end
 end

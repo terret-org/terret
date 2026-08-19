@@ -765,6 +765,48 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  # A policy is durable and every future tool call scans it, so a client must
+  # not be able to write an unbounded pattern set into the log.
+  def test_set_policy_refuses_oversized_pattern_sets
+    Sync do |task|
+      ctx = boot(script: [])
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+
+      sock.client_send({ type: "set_policy", patterns: Array.new(129) { "tool*" } })
+      await { sock.protocol_frames.count { |f| f[:code] == "bad_frame" } == 1 }
+
+      sock.client_send({ type: "set_policy", patterns: ["x" * 257] })
+      await { sock.protocol_frames.count { |f| f[:code] == "bad_frame" } == 2 }
+
+      refute session.events.map(&:type).include?("policy/updated")
+      # the bounds are inclusive: the largest legal frame still lands
+      sock.client_send({ type: "set_policy", patterns: Array.new(128) { "x" * 256 } })
+      await { session.events.map(&:type).include?("policy/updated") }
+      sock.client_close
+    end
+  end
+
+  # The status is unreachable without the approvals row, but a guarded
+  # reference to an optional service must hold anyway.
+  def test_cancelling_a_parked_agent_without_the_approvals_row_still_cancels
+    Sync do |task|
+      ctx = boot(script: [])
+      agent, = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+      await { sock.written.any? }
+      agent.status = :waiting_approval
+
+      sock.client_send({ type: "cancel", reason: "enough" })
+      await { agent.cancelled? }
+
+      assert_equal "enough", agent.cancel_reason
+      refute sock.closed?
+      assert_empty sock.protocol_frames.select { |f| f[:type] == "error" }
+      sock.client_close
+    end
+  end
+
   # Before the M6 boundary, invalid UTF-8 appended durably and blew up in the
   # socket's JSON serializer, dropping the connection. Now the boundary
   # refuses it before any consumer can see it: the log stays untouched and the
