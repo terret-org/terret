@@ -69,13 +69,35 @@ module Terret
         end
         return next_.(call) unless d && requires_approval?(d)
 
-        verdict = recorded_verdict(call) || park(call)
+        # Order is the contract: a verdict already in the log settles the call
+        # however it got there, so a resume inside a child honors the decision
+        # a human really made. Only a call with no answer at all reaches the
+        # unattended check, and only then does it fail closed.
+        verdict = recorded_verdict(call) || unattended_verdict(call) || park(call)
         if verdict[:verdict] == "approved"
           next_.(call)
         else
           reason = verdict[:reason] || "no reason given"
           Result.new(id: call.id, content: nil, error: "#{call.name} denied: #{reason}")
         end
+      end
+
+      # Fail closed instead of deadlocking. A subagent's session cannot be
+      # reached by any approver: the parent's log never names it, so no socket
+      # is bound to it and no operator can answer a request they were never
+      # shown. Parking there would wait on a verdict that cannot arrive and
+      # would take the parent's turn — and the fiber running it — with it, so
+      # the call is denied with a reason the model can act on and report.
+      #
+      # Nothing durable is appended for the refusal. It is not a decision
+      # anybody made, and the tool/result the loop writes is already the
+      # permanent record of what happened to the call.
+      UNATTENDED_DENIAL = { verdict: "denied",
+                            reason: "no approver can reach a subagent session" }.freeze
+
+      def unattended_verdict(call)
+        agent = @ctx[:loop].agent_for_session(call.session_id)
+        agent&.unattended ? UNATTENDED_DENIAL : nil
       end
 
       # :always asks every time; :policy asks when the tool mutates (plan

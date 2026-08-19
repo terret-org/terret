@@ -141,6 +141,41 @@ class SubagentSeamTest < Minitest::Test
                  child.events.find { |e| e.type == "tool/result" }.payload[:content]
   end
 
+  # Nothing can reach a subagent's session to answer an approval: the parent's
+  # log never names it, no socket is bound to it, and an operator cannot see a
+  # request they were never shown. Parking there waits for a verdict that
+  # cannot arrive and takes the parent's turn down with it, so the gate fails
+  # closed and the child is told why.
+  def test_an_approval_that_would_park_inside_a_child_is_denied_instead
+    write = Terret::LLM::ToolCall.new(id: "c1", name: "write_file", args: { path: "x" })
+    ctx, = boot(script: [{ text: "Writing it.", tool_calls: [write] },
+                         { text: "I was not allowed to." }],
+                extra_rows: [{ id: "approvals", plugin: Terret::Tools::Approvals }])
+    wrote = false
+    ctx.with_owner("writer") do
+      ctx[:tools].register(name: "write_file", description: "w", params: { path: "string" },
+                           mutating: true, approval: :policy) do |path:|
+        wrote = true
+        "wrote #{path}"
+      end
+    end
+    parent, = spawn(ctx)
+
+    result = nil
+    t = Thread.new { result = ctx[:subagents].run(prompt: "write the file", ctx: parent.ctx) }
+    joined = t.join(5)
+    t.kill unless joined
+    assert joined, "the child parked on an approval nobody could ever answer"
+
+    refute wrote, "a call that cannot be approved must not run"
+    assert_equal "I was not allowed to.", result.text
+    child = ctx[:sessions].fetch(result.session_id)
+    assert_equal "write_file denied: no approver can reach a subagent session",
+                 child.events.find { |e| e.type == "tool/result" }.payload[:error]
+    refute child.events.map(&:type).include?("approval/requested"),
+           "nobody is going to be asked, so nothing asks"
+  end
+
   # Sole provider: "what is a subagent in this deployment" is one answer for
   # the whole process, decided in a config row.
   def test_a_second_provider_registration_refuses

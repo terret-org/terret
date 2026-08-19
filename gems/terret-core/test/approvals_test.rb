@@ -335,6 +335,39 @@ class ApprovalsGateTest < Minitest::Test
     assert_equal 1, session.events.count { |e| e.type == "approval/requested" }
   end
 
+  # An agent no approver can reach (the subagent provider marks its children)
+  # fails closed rather than parking forever on a request nobody will see.
+  def test_an_unattended_agent_is_denied_rather_than_parked
+    ctx, = boot(script: park_script)
+    register_deploy(ctx, approval: :always)
+    agent, session = spawn(ctx)
+    agent.unattended = true
+
+    t = Thread.new { ctx[:loop].run_turn(agent, "ship it") }
+    joined = t.join(5)
+    t.kill unless joined
+    assert joined, "an unattended agent must never park"
+
+    assert_equal :completed, t.value
+    result = session.events.find { |e| e.type == "tool/result" }
+    assert_equal "deploy denied: no approver can reach a subagent session", result.payload[:error]
+    refute session.events.map(&:type).include?("approval/requested")
+  end
+
+  # The rule is about a request nobody can answer. A verdict already in the
+  # log WAS answered, so replay honors it exactly as it does for any other
+  # agent — a crash-and-resume inside a child is not a second decision.
+  def test_a_recorded_verdict_is_still_honored_for_an_unattended_agent
+    ctx, = boot(script: [{ text: "Done." }])
+    register_deploy(ctx, approval: :always)
+    agent, session = stage_open_turn(ctx, resolved: true)
+    agent.unattended = true
+
+    assert_equal :completed, ctx[:loop].resume_turn(agent)
+    assert_equal "deployed to prod",
+                 session.events.find { |e| e.type == "tool/result" }.payload[:content]
+  end
+
   def test_a_vanished_tool_still_renders_a_recoverable_error
     ctx, = boot(script: [{ text: "Trying.", tool_calls: [DEPLOY_CALL] }, { text: "Oh well." }])
     agent, session = spawn(ctx) # deploy never registered

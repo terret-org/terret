@@ -107,6 +107,36 @@ embeds the child's stack. A stack trace in a tool result is context the
 parent's model cannot act on and pays for on every subsequent request; the
 session id is the pointer to where the whole story actually is.
 
+**An approval that would park inside a child is denied instead.** This is the
+one place the child's pipeline does not behave exactly like its parent's, and
+it is a deadlock that has to be answered rather than a rule anybody wanted.
+Nothing can reach a child's session to decide anything: the parent's log never
+names it (that is the paragraph above), so no socket is bound to it and no
+operator can answer a request they were never shown. A parked call there waits
+on a verdict that cannot arrive, and it waits holding the fiber that runs the
+parent's turn — one delegated call would take the parent down with it. So the
+approvals gate refuses: the call comes back as an ordinary denial reading
+`no approver can reach a subagent session`, the child's model sees it in a
+tool result and can say so, and no `approval/requested` is ever written,
+because nobody is going to be asked.
+
+The order inside the gate is what keeps this from swallowing real decisions. A
+verdict **already in the log** settles a call however it got there, so a child
+that crashed and resumed still honors the answer a human really gave; only a
+call with no recorded answer at all reaches this refusal. The allow list still
+runs first, as it does everywhere. And a top-level agent is untouched — the
+flag is set by the subagent provider on the children it spawns, so an
+interface-driven agent parks exactly as it always did.
+
+What this costs is real and worth stating: **a subagent cannot do anything
+that needs a human's consent.** A deployment that wants a child to run `Bash`
+in a profile where `Bash` demands approval has to grant that at the policy
+level rather than at the moment of the call. Routing a child's request to the
+parent's operator — a delegated approval — is the design that would lift this,
+and it is a plan §14 item rather than something to bolt on: it needs a link
+from a parent transcript to a child's request that §2 deliberately does not
+create.
+
 Two limits fall straight out of the existing machinery. The registry's
 agent cap (`config[:max_agents]`, default 128, docs/lifecycle.md) counts
 children like anything else, and a child holds its slot for the length of
@@ -201,7 +231,9 @@ its own approvals gate, one decision per actual effect. Gating `Task`
 itself would ask a human to approve a call whose effects are not knowable
 until after the approval is granted — the worst possible moment to ask —
 and would then ask again, correctly, for each real effect inside. The
-calls that need a human get one where the human can see what they are.
+calls that need a human get one where the human can see what they are —
+and where no human can see them at all, §2's fail-closed rule denies them
+rather than parking a turn nobody can unstick.
 
 **`concurrency: :parallel`** because a `Task` call is a whole turn of
 latency, which is exactly the case the barrier was declared for.
@@ -306,6 +338,15 @@ convention rather than inventing a second one; the seam turns it into the
 `bash -lc` argv above. Job tools are
 snake_case because they have no Claude Code equivalent to be verbatim
 with — the same rule that produced `terminal_open` in M7.
+
+`job_start` and `job_stop` are `:policy` on a mutating tool, which means a
+**subagent cannot start or stop a job** in a profile where approvals are
+mounted: §2's fail-closed rule denies the call rather than parking it. A child
+can still `job_collect` — that one asks nobody. Delegating "run this long
+thing and watch it" therefore means the parent starts the job and the child
+reads it, which is the shape that was going to be wanted anyway: the job
+outlives the child, and a buffer nobody collects is the failure mode the other
+arrangement produces.
 
 ### Session-scoped, and not durable
 

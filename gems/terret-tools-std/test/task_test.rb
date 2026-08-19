@@ -123,6 +123,37 @@ class TaskToolTest < Minitest::Test
                  child.events.find { |e| e.type == "tool/result" }.payload[:error]
   end
 
+  # `approval: :never` on Task is only honest because everything the child
+  # does passes the child's own gate. What that gate cannot do is ask a human
+  # about a session no human can see, so it refuses — and the refusal comes
+  # back to the parent as an answer instead of hanging its turn forever.
+  def test_an_approval_inside_a_child_comes_back_as_a_denial_rather_than_hanging
+    write = Terret::LLM::ToolCall.new(id: "c1", name: "write_file", args: { path: "x" })
+    ctx, = boot(script: [{ text: "Writing.", tool_calls: [write] },
+                         { text: "I was not allowed to write it." }],
+                extra_rows: [{ id: "approvals", plugin: Terret::Tools::Approvals }])
+    ctx.with_owner("writer") do
+      ctx[:tools].register(name: "write_file", description: "w", params: { path: "string" },
+                           mutating: true, approval: :policy) { |path:| "wrote #{path}" }
+    end
+    parent, session = spawn(ctx)
+
+    result = nil
+    t = Thread.new do
+      result = call(ctx, parent, session.id, description: "write it", prompt: "write the file")
+    end
+    joined = t.join(5)
+    t.kill unless joined
+    assert joined, "the parent's Task call never returned; the child parked"
+
+    assert_nil result.error
+    assert_match(/\AI was not allowed to write it\./, result.content)
+    child_id = result.content[/child session (\S+)\z/, 1]
+    child = ctx[:sessions].fetch(child_id)
+    assert_equal "write_file denied: no approver can reach a subagent session",
+                 child.events.find { |e| e.type == "tool/result" }.payload[:error]
+  end
+
   def test_a_call_from_a_session_with_no_live_agent_fails_closed
     ctx, = boot(script: [{ text: "never reached" }])
     parent, = spawn(ctx)

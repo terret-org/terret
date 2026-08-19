@@ -55,6 +55,11 @@ module Terret
       session = sessions.create
       agent = loop_service.spawn_agent(session_id: session.id,
                                        id: "subagent-#{session.id}", parent: ctx)
+      # Marked before the turn can start: nothing routes an approval request
+      # for this session to a human, so the gate must deny rather than park on
+      # a verdict that can never arrive. A parked child would hold the parent's
+      # fiber forever and there is no one to unstick it.
+      agent.unattended = true
       begin
         # The ordinary Loop: same steps, same MAX_STEPS ceiling, same pipeline,
         # same approvals gate, same allow list. run_turn's own input path is

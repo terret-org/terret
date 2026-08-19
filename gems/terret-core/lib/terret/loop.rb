@@ -38,11 +38,20 @@ module Terret
     attr_reader :id, :session_id, :ctx
     attr_accessor :status
 
+    # True when no human can be asked about this agent's tool calls. Nothing
+    # routes an approval request for a subagent's session to an operator — the
+    # parent's log does not even name it (docs/subagents.md §2) — so the
+    # approvals gate denies rather than parking on a verdict that can never
+    # arrive. Set by the subagent provider on the children it spawns; a
+    # top-level agent is attended and parks exactly as it always did.
+    attr_accessor :unattended
+
     def initialize(id:, session_id:, ctx:)
       @id = id
       @session_id = session_id
       @ctx = ctx           # a forked, agent-scoped context
       @inbox = []          # injected context waits here until a waking message
+      @unattended = false
       # :idle | :running | :waiting_approval (parked in the tools pipeline) |
       # :stopping (cancelled, still finishing) | :done (disposed, terminal).
       # docs/subagents.md §8: :failed is a TURN status, not an agent one, and
