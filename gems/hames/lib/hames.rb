@@ -9,4 +9,5 @@ end
 
 require_relative "hames/events"
 require_relative "hames/context"
+require_relative "hames/schema"
 require_relative "hames/loader"

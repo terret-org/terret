@@ -4,6 +4,11 @@ module Hames
   # Base class for service plugins. A plugin may instead be any object that
   # responds to apply(ctx) (the functional form), with optional #inject.
   class Service
+    # config_schema (and its inheritance) comes from the DSL mixin, so a
+    # functional plugin that is not a Service can extend the same module and be
+    # schema'd identically (docs/composition.md §9).
+    extend Hames::Schema::DSL
+
     class << self
       # Both class-level declarations are inherited: a subclass (a test
       # double, a provider variant) mounts exactly like its parent unless it
