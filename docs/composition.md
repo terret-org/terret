@@ -59,10 +59,12 @@ break; but the path alone is what a bundle should ship.
 That single line is the whole registration mechanism, and choosing gemspec
 metadata over a registry file or a plugin directory is deliberate: `gem
 install` is already the install step, `Gemfile` is already the manifest,
-and Bundler already resolves versions. Discovery scans loaded gemspecs
-(`Gem::Specification.each`) for the key and parses the referenced file. A
-third-party gem becomes discoverable by shipping normally — nothing to
-register, nothing to symlink, no directory to drop a file into. It is the
+and Bundler already resolves versions. Discovery walks every gemspec
+`Gem::Specification` knows about — under Bundler that is the bundle, and
+outside it every gem installed on the machine, loaded or not — reads the
+key, and parses the file it points at. A third-party gem becomes
+discoverable by shipping normally — nothing to register, nothing to
+symlink, no directory to drop a file into. It is the
 port of dsh's `package.json` `dsh` field (plan §5), and it is the mechanism
 `docs/cookbook/adding-a-bundle.md` walks end to end.
 
@@ -94,8 +96,10 @@ at all.
 
 A profile names bundles by **gem name**. A name that discovery did not
 find fails closed, listing what *was* discovered — the failure mode here
-is almost always a gem that is installed but not loaded, and printing the
-found set turns a five-minute confusion into a five-second one.
+is almost always a gem that is not installed in this environment, or not
+in this Gemfile, or one that ships no `terret` metadata at all, and
+printing the found set turns a five-minute confusion into a five-second
+one.
 
 ## 3. Profiles
 
@@ -191,15 +195,30 @@ docs/exec.md §4 leans on: one row swaps `Terret::Exec::SandboxNone` for
 `Terret::Sandbox::Docker` and every tool built on `ctx[:fs]` and
 `ctx[:subprocess]` moves into the container, tool code untouched.
 
+Swapping `plugin:` while saying nothing about `config:` **forwards the old
+config to the new class**, whatever it held — an `!env`-resolved key, a
+workspace list, a path — because replacement is per field and a patch that
+mentions one field replaces one field. That is usually what you want and
+occasionally very much not; `dump-config` reports the plugin and the config
+layer separately (§10) so a row inheriting a config from a layer that never
+meant it for this class is visible. A swap that should inherit nothing has
+to say `config: {}` out loud.
+
 A row with an id that does not exist yet is an **insertion**, and it must
-say where it goes with `before:` or `after:` naming an existing id.
-Position matters for reasons the loader's dependency ordering does not
-cover — two `tools/pre_execute` listeners have an order, and that order is
-policy. An anchor naming an id that is not in the stack fails closed,
-naming the id, rather than appending the row somewhere plausible: an audit
-listener silently mounted at the end of the chain instead of in front of
-the thing it was supposed to audit is exactly the failure that should
-never be quiet.
+say where it goes with `before:` or `after:` naming an existing id. An
+anchor naming an id that is not in the stack fails closed, naming the id,
+rather than appending the row somewhere plausible.
+
+**What position controls is the tree, not the mount order and not listener
+order.** These anchors decide where a row sits in the resolved list — which
+is what `dump-config` prints, what a later patch reads, and what a human
+reviews. The loader then mounts in dependency order derived from `inject`
+(§1), so a row's position here does not decide when it mounts; and because
+listeners register as their row mounts, it does not decide the order of two
+`tools/pre_execute` listeners either. A profile that needs an audit
+listener to run *in front of* the thing it audits cannot express that with
+`before:` today. Deterministic listener ordering is a known gap rather than
+a guarantee this format makes.
 
 ## 5. Tagged scalars
 
