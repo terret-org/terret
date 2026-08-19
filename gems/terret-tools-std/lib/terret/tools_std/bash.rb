@@ -31,9 +31,14 @@ module Terret
       # further, and this is what the model sees when none does.
       DEFAULT_MAX_OUTPUT = 30_000
 
-      # The line between the command's bytes and this file's remarks.
-      # Everything below it is Terret talking, not the command, and it has to
-      # be impossible to mistake for output at a glance.
+      # The line between the command's bytes and this file's remarks. It is a
+      # fixed literal in a stream a command controls, so a command CAN print
+      # it — this is a readability device, not a security boundary, and it is
+      # not claimed as one. What it does deliver is that the genuine remarks
+      # are always the last thing in the result, appended after anything a
+      # command forged, and that the remarks are advisory data rather than
+      # instructions (docs/security.md): nothing downstream acts on them, so
+      # a forged line buys a confusing result and no authority.
       LEDGER = "--- terret ---"
 
       DESCRIPTION = "Run a command in this session's persistent bash. The same shell process " \
@@ -61,6 +66,13 @@ module Terret
         # someone else's — so the verdict is re-derived on any row's swap
         # rather than an id being guessed, and the tool is rebuilt only when
         # the answer actually moved.
+        #
+        # A provider whose `isolated?` raises during that re-derivation is
+        # isolated by the bus (listener errors do not escape an emit), which
+        # leaves the PREVIOUS approval standing rather than a wrong one.
+        # That is the safe direction while `:policy` on a mutating tool and
+        # `:always` park identically (docs/exec.md §5), and it becomes
+        # load-bearing the day a consumer tells those two apart.
         @ctx.on("config/updated") { |_id, _config| refresh! }
       end
 
@@ -119,9 +131,33 @@ module Terret
       # takes seconds. Keeping CC's units in the argument (a model that has
       # written this call before writes milliseconds) puts the conversion
       # here, in one line, instead of leaving a units mismatch in the wild.
-      def seconds(ms) = ms.nil? ? nil : ms / 1000.0
+      #
+      # Both branches below are about arguments a model actually writes.
+      # `"500"` is JSON it typed, so Integer() accepts the string forms and
+      # refuses the rest with a sentence rather than a NoMethodError. A zero
+      # or negative timeout falls back to the seam's default instead of
+      # firing at once: an immediate timeout would interrupt the command and
+      # kill the shell, so a model's own bad argument would cost it the cwd
+      # and variables it had built up — damage to the caller, from the
+      # caller, reported as a timeout nobody asked for.
+      def seconds(ms)
+        return nil if ms.nil?
 
-      def max_output = config[:max_output] || DEFAULT_MAX_OUTPUT
+        ms = begin
+          Integer(ms)
+        rescue TypeError, ArgumentError
+          raise Terret::Tools::Failure, "timeout must be a whole number of milliseconds"
+        end
+        ms.positive? ? ms / 1000.0 : nil
+      end
+
+      # Clamped rather than trusted: a row carrying a negative cap would
+      # otherwise byteslice its way to nil and raise on every single call,
+      # turning one bad config value into a tool that never works. Zero is
+      # then an honest answer — the result says it kept nothing and how much
+      # it dropped, which is visible in the very next tool result instead of
+      # in a crash a turn later.
+      def max_output = [config[:max_output] || DEFAULT_MAX_OUTPUT, 0].max
 
       def render(result)
         body, dropped = cap(scrub(result.stdout))
@@ -141,9 +177,17 @@ module Terret
         # silent by luck: the only two paths that produce one (an interrupted
         # command, a shell that ended) always carry a notice explaining it.
         remarks << "exit status #{result.status}" if result.status && !result.status.zero?
+        # Both counts measure the RENDERED text — what a model would have
+        # been shown — not the command's raw bytes. Two things separate the
+        # two: scrubbing has already replaced anything that was not valid
+        # UTF-8 (a replacement character is three bytes where the original
+        # may have been one), and the seam's own megabyte cap may have
+        # dropped output before this one ever saw it, reporting that
+        # separately in the notice. Saying "of rendered output" is what keeps
+        # this line from implying it counted what the command wrote.
         if dropped.positive?
           remarks << "output truncated at max_output: kept the first #{body.bytesize} bytes " \
-                     "and dropped #{dropped} more"
+                     "of rendered output and dropped #{dropped} more"
         end
         remarks << "notice: #{result.notice}" if result.notice
         remarks

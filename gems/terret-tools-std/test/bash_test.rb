@@ -142,14 +142,14 @@ class BashToolTest < Minitest::Test
 
     assert_nil result.error
     assert_equal "a" * 200, result.content.lines.first.chomp[0, 200]
-    assert_match(/kept the first 200 bytes and dropped 800 more/, result.content)
+    assert_match(/kept the first 200 bytes of rendered output and dropped 800 more/, result.content)
     assert_match(/^--- terret ---$/, result.content)
   end
 
   def test_the_cap_defaults_to_30_000_bytes
     ctx, = boot
     result = call(ctx, "Bash", command: "printf 'a%.0s' $(seq 1 40000)")
-    assert_match(/kept the first 30000 bytes and dropped 10000 more/, result.content)
+    assert_match(/kept the first 30000 bytes of rendered output and dropped 10000 more/, result.content)
   end
 
   def test_a_swapped_row_governs_the_very_next_call
@@ -157,7 +157,54 @@ class BashToolTest < Minitest::Test
     loader.reconfigure!("std_bash", { max_output: 50 })
 
     result = call(ctx, "Bash", command: "printf 'a%.0s' $(seq 1 1000)")
-    assert_match(/kept the first 50 bytes and dropped 950 more/, result.content)
+    assert_match(/kept the first 50 bytes of rendered output and dropped 950 more/, result.content)
+  end
+
+  # -- the model's own arguments ---------------------------------------------
+
+  # Everything a model writes arrives as JSON it typed, so these are ordinary
+  # inputs rather than exotic ones: the tool has to answer them, not crash on
+  # them and leave the turn to guess what happened.
+  def test_a_timeout_written_as_a_string_is_coerced_rather_than_crashing
+    ctx, = boot
+    result = call(ctx, "Bash", command: "echo before; sleep 30", timeout: "500")
+
+    assert_nil result.error
+    assert_match(/timed out after 0.5s/, result.content)
+  end
+
+  def test_a_timeout_that_is_not_a_number_is_refused
+    ctx, = boot
+    result = call(ctx, "Bash", command: "echo hi", timeout: "abc")
+
+    assert_nil result.content
+    assert_equal "timeout must be a whole number of milliseconds", result.error
+    refute_match(/NoMethodError|ArgumentError/, result.error, "a Failure renders message-only")
+  end
+
+  # A zero or negative timeout used to fire instantly, which killed the shell
+  # the model was working in and reported "timed out after 0.0s" — the worst
+  # possible answer, since the damage was to the caller's own session state.
+  def test_a_non_positive_timeout_falls_back_to_the_default_instead_of_killing_the_session
+    ctx, = boot
+    call(ctx, "Bash", command: "cd /tmp")
+
+    [0, -5].each do |ms|
+      result = call(ctx, "Bash", command: "echo hi", timeout: ms)
+      assert_nil result.error, "timeout: #{ms}"
+      assert_equal "hi\n", result.content, "timeout: #{ms} must not fire immediately"
+    end
+
+    assert_match(%r{/tmp}, call(ctx, "Bash", command: "pwd").content,
+                 "a bad argument must not cost the model the session it was working in")
+  end
+
+  def test_a_non_positive_max_output_cannot_crash_every_call
+    ctx, = boot(config: { max_output: -1 })
+    result = call(ctx, "Bash", command: "echo hi")
+
+    assert_nil result.error, "a nonsense cap degrades to showing nothing; it does not crash"
+    assert_match(/kept the first 0 bytes/, result.content)
   end
 
   # -- bytes a child wrote that are not text ---------------------------------

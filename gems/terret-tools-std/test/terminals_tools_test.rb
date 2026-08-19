@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "tmpdir"
 require_relative "../lib/terret/tools_std"
 require_relative "../../terret-exec/lib/terret/exec" # the seams these tools stand on
 
@@ -39,6 +40,13 @@ class TerminalToolsTest < Minitest::Test
   end
 
   def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+  def alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  end
 
   # Bounded, like the seam's own tests: a terminal that never says the
   # expected thing fails the assertion instead of hanging the suite.
@@ -160,6 +168,97 @@ class TerminalToolsTest < Minitest::Test
     assert_match(/terret-no-such-binary/, result.error)
     refute_match(/Errno|ENOENT/, result.error, "the model gets a sentence, not an errno")
     assert_empty ctx[:terminals].close_all_for("s1"), "a spawn that failed must leave no row behind"
+  end
+
+  # A spawn can fail for reasons other than a missing binary, and every one of
+  # them is the model's argv to fix. "Errno::EACCES: Permission denied - fork
+  # failed" tells it the harness broke — the fork did not fail, the exec did —
+  # so it retries instead of correcting itself.
+  def test_opening_a_file_that_is_not_executable_is_a_refusal
+    ctx, = boot
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "script.sh")
+      File.write(path, "#!/bin/sh\necho hi\n")
+      File.chmod(0o644, path)
+
+      result = call(ctx, "terminal_open", name: "ghost", argv: [path])
+      assert_nil result.content
+      assert_match(/not executable/, result.error)
+      refute_match(/Errno|fork failed/, result.error, "the fork did not fail; the exec did")
+    end
+  end
+
+  def test_opening_a_directory_is_a_refusal
+    ctx, = boot
+    Dir.mktmpdir do |dir|
+      result = call(ctx, "terminal_open", name: "ghost", argv: [dir])
+      assert_nil result.content
+      assert_match(/#{Regexp.escape(dir)}/, result.error)
+      refute_match(/Errno|fork failed/, result.error)
+    end
+  end
+
+  def test_an_empty_argv_is_refused_before_anything_is_spawned
+    ctx, = boot
+    result = call(ctx, "terminal_open", name: "ghost", argv: [])
+
+    assert_nil result.content
+    assert_match(/argv/, result.error)
+    refute_match(/TypeError/, result.error)
+  end
+
+  # Stringifying would turn a nil the model did not mean into an empty
+  # argument the kernel accepts, and the terminal would open around a command
+  # nobody wrote.
+  def test_an_argv_element_that_is_not_a_string_is_refused_rather_than_stringified
+    ctx, = boot
+    result = call(ctx, "terminal_open", name: "ghost", argv: ["echo", nil])
+
+    assert_nil result.content
+    refute_match(/TypeError/, result.error)
+    assert_empty ctx[:terminals].close_all_for("s1"), "a malformed argv opens nothing"
+  end
+
+  # -- a terminal whose process is gone --------------------------------------
+
+  def test_reading_a_terminal_whose_process_has_ended_says_so_and_keeps_the_name
+    ctx, = boot
+    call(ctx, "terminal_open", name: "brief", argv: ["bash", "-c", "exit 0"])
+
+    deadline = now + 5
+    content = ""
+    content = call(ctx, "terminal_read", name: "brief").content.to_s while now < deadline &&
+                                                                          !content.include?("ended")
+
+    assert_match(/ended/, content, "a dead child is not the same answer as a quiet one")
+    assert_match(/Closed terminal brief/, call(ctx, "terminal_close", name: "brief").content,
+                 "reading is not disposal: the name is still the owner's to close")
+  end
+
+  # -- the two tools that can destroy another agent's process ----------------
+
+  def test_one_session_cannot_type_into_anothers_terminal
+    ctx, = boot
+    call(ctx, "terminal_open", name: "repl", argv: ["cat"], session_id: "agent-a")
+
+    result = call(ctx, "terminal_input", name: "repl", text: "rm -rf /\n", session_id: "agent-b")
+    assert_nil result.content
+    assert_match(/no terminal named repl is open/, result.error)
+  end
+
+  def test_one_session_cannot_close_anothers_terminal
+    ctx, = boot
+    opened = call(ctx, "terminal_open", name: "repl", argv: ["cat"], session_id: "agent-a")
+    pid = Integer(opened.content[/pid (\d+)/, 1])
+
+    result = call(ctx, "terminal_close", name: "repl", session_id: "agent-b")
+    assert_nil result.error, "closing a name you do not hold is the seam's no-op"
+    assert_match(/No terminal named repl was open/, result.content)
+    assert alive?(pid), "another session's process must still be running"
+
+    assert_match(/Closed terminal repl/,
+                 call(ctx, "terminal_close", name: "repl", session_id: "agent-a").content,
+                 "and its owner can still close it")
   end
 
   # -- bytes a child wrote that are not text ---------------------------------

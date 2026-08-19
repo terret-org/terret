@@ -93,6 +93,24 @@ class ApprovalsGateTest < Minitest::Test
     end
   end
 
+  # Pins the collapse docs/exec.md §5 now states plainly: under this gate
+  # :policy on a mutating tool and :always are the same verdict — both park.
+  # It is why Bash's sandbox-derived approval changes what the Definition
+  # DECLARES rather than what a caller experiences today, and the day a
+  # consumer tells the two apart, this test is what makes that deliberate.
+  def test_policy_on_a_mutating_tool_parks_exactly_as_always_does
+    ctx, = boot(script: park_script)
+    register_deploy(ctx, approval: :policy, mutating: true)
+    agent, session = spawn(ctx)
+    turn = park_turn(ctx, agent)
+
+    assert ctx[:approvals].pending?(session.id, "tc1")
+    ctx[:sessions].append(session.id, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+    assert_equal :completed, turn.value
+    assert_equal "deployed to prod",
+                 session.events.find { |e| e.type == "tool/result" }.payload[:content]
+  end
+
   def test_always_parks_and_an_approval_unparks_and_executes
     ctx, = boot(script: park_script)
     register_deploy(ctx, approval: :always)

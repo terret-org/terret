@@ -172,12 +172,23 @@ their own convention.
 value: it is derived from `ctx[:sandbox].isolated?` **at registration
 time** (§13 — outside a sandbox, an agent that can run arbitrary shell
 commands needs a human every time; inside one, the container is already a
-backstop, so `Bash` is governed like any other mutating tool instead of
+backstop, so `Bash` is declared like any other mutating tool instead of
 specially). That derivation is captured once, at registration, not read
-live on every call — which matters when the sandbox row changes hot: the
-std-tools service listens for `config/updated` on the sandbox row and
-re-registers `Bash` with the freshly derived approval, rather than leaving
-a stale value in place after a live sandbox swap.
+live on every call — which matters when the sandbox changes hot: the
+std-tools service listens for `config/updated`, re-derives the verdict,
+and re-registers `Bash` when it has moved, rather than leaving a stale
+value in place after a live sandbox swap.
+
+What that derivation changes today is what the Definition **declares**,
+not what a caller experiences. The only consumer is the approvals gate,
+whose rule is `always || (policy && mutating)` — and `Bash` is mutating in
+both states, so `:policy` and `:always` park it identically. The
+distinction is real metadata that a future consumer can act on (an M8
+candidate: a gate that treats `:policy` as "ask once per session" or
+defers to per-agent policy while `:always` keeps asking every time), and
+`gems/terret-core/test/approvals_test.rb` pins the present collapse so
+that the day the two stop behaving alike is a deliberate one. Until then,
+do not read this row as "a sandbox makes `Bash` stop asking".
 
 `concurrency:` is declared metadata, not yet enforced. The loop keeps
 executing every call in a step sequentially in M7; the field exists so

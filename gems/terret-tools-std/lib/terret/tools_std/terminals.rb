@@ -44,6 +44,15 @@ module Terret
       # mounted into a forked agent scope would leave registrations behind
       # that outlive the fork — a disposed agent with a tool of its own that
       # can still spawn processes.
+      # All four are `mutating: true`, `terminal_read` included, and that is
+      # not a rounding-up. Reading a PTY CONSUMES the stream: the bytes it
+      # returns are gone for every later read, so two identical calls give
+      # different answers and neither can be replayed. It is not reading in
+      # the sense the Read tool means, where the file is still there
+      # afterwards. The cost is that a deployment gating mutations asks about
+      # terminal_read too, which is the right trade — an approvals deployment
+      # is interactive by definition, and the alternative is a tool that
+      # quietly drains another tool's output while claiming to observe it.
       def tool(name, description, params, &handler)
         @ctx[:tools].register(name: name, description: description, params: params,
                               mutating: true, approval: :policy, concurrency: :serial,
@@ -67,7 +76,7 @@ module Terret
                       "interprets the argv, so use [\"bash\", \"-lc\", \"...\"] for pipelines or " \
                       "redirection. The terminal keeps running until terminal_close."
         tool("terminal_open", description, params) do |name:, argv:, session_id:|
-          open_terminal(name, Array(argv).map(&:to_s), session_id)
+          open_terminal(name, argv!(argv), session_id)
         end
       end
 
@@ -119,19 +128,49 @@ module Terret
       # with a pipe. A private helper that shadows it is one rename away from
       # falling through to it, in the one class where that would hand a model
       # a spawn nobody gated.
+      # argv arrives as whatever JSON the model wrote, and two shapes of it
+      # reach the kernel as something worse than an error. An empty list
+      # becomes a nil program and surfaces as "TypeError: no implicit
+      # conversion of nil into String" from inside exec; a nil element
+      # stringifies into an empty argument the kernel accepts happily, so the
+      # terminal opens around a command nobody wrote. Both are refused rather
+      # than repaired — repairing an argv is a guess about what the caller
+      # meant, made at the moment it is spawning a process.
+      def argv!(argv)
+        list = argv.is_a?(Array) ? argv : [argv]
+        raise Terret::Tools::Failure, "argv must name a command to run" if list.empty?
+
+        bad = list.reject { |arg| arg.is_a?(String) }
+        return list if bad.empty?
+
+        raise Terret::Tools::Failure,
+              "every argv element must be a string; got #{bad.first.inspect}"
+      end
+
       def open_terminal(name, argv, session_id)
         terminal = @ctx[:terminals].open(name, argv, session: session_id)
         "Opened terminal #{terminal.name} (pid #{terminal.pid})"
       rescue Errno::ENOENT
-        # The direct spawn path raises this for a command that is not there.
-        # Left alone the pipeline would render "Errno::ENOENT: No such file
-        # or directory - ..." — a sentence about Ruby's exception hierarchy
-        # when what the caller got wrong is its own argv. A Failure renders
-        # message-only, and the seam registered nothing, so there is no
-        # half-open terminal to mention.
+        # The three errnos a spawn raises for an argv that cannot become a
+        # process. Left alone the pipeline renders Ruby's own wording, and
+        # EACCES's is actively misleading: "Permission denied - fork failed"
+        # names the one call that did NOT fail — the fork worked, the exec
+        # did not — so a model reads it as a broken harness and retries
+        # instead of fixing the argv it wrote. A Failure renders message-only,
+        # and the seam registers nothing before the spawn returns, so there is
+        # never a half-open terminal to mention.
+        #
+        # Deliberately not `SystemCallError`: EMFILE and ENFILE mean the
+        # harness is out of descriptors, which is not the caller's mistake to
+        # fix and must keep crashing loudly rather than being explained to a
+        # model as a bad command.
         raise Terret::Tools::Failure,
               "could not start #{argv.first.inspect}: no such command, or the terminal's " \
               "working directory is gone; nothing was opened"
+      rescue Errno::EACCES, Errno::ENOEXEC
+        raise Terret::Tools::Failure,
+              "could not start #{argv.first.inspect}: not executable — a directory, or a file " \
+              "without the execute bit; nothing was opened"
       end
 
       def read_terminal(name, session_id, timeout)
