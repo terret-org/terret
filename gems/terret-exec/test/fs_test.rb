@@ -178,6 +178,57 @@ class FSTest < Minitest::Test
     end
   end
 
+  # -- containment: DANGLING symlink (target does not exist yet) ------------
+
+  # The reproduced escape: File.exist? follows a symlink, so a symlink whose
+  # target does not exist yet reads as a to-be-created path and slips through
+  # containment; the syscall then follows it and writes OUTSIDE the workspace.
+  def test_a_dangling_symlink_leaf_pointing_outside_is_denied_and_creates_nothing
+    Dir.mktmpdir do |dir|
+      Dir.mktmpdir do |outside|
+        ctx, = boot(workspace: [dir])
+        target = File.join(outside, "planted.txt")
+        refute File.exist?(target)
+        link = File.join(dir, "link")
+        File.symlink(target, link) # dangling: target does not exist yet
+
+        assert_raises(Terret::Exec::Denied) { ctx[:fs].write(link, "escaped") }
+        refute File.exist?(target), "a dangling symlink must not let a write land outside the workspace"
+      end
+    end
+  end
+
+  # The mirror case: a dangling symlink whose target lands back inside the
+  # workspace is legitimate and must still be writable.
+  def test_a_dangling_symlink_pointing_inside_the_workspace_is_allowed
+    Dir.mktmpdir do |dir|
+      ctx, = boot(workspace: [dir])
+      inside = File.join(dir, "real.txt")
+      refute File.exist?(inside)
+      link = File.join(dir, "link")
+      File.symlink(inside, link) # dangling but points back inside
+
+      ctx[:fs].write(link, "fine")
+      assert_equal "fine", File.read(inside)
+    end
+  end
+
+  # A dangling symlink used as an intermediate path component must fail too,
+  # not just a symlink at the leaf.
+  def test_a_dangling_intermediate_symlink_escaping_is_denied
+    Dir.mktmpdir do |dir|
+      Dir.mktmpdir do |outside|
+        ctx, = boot(workspace: [dir])
+        link = File.join(dir, "link")
+        File.symlink(File.join(outside, "nope"), link) # dangling dir symlink
+        target = File.join(link, "sub", "file.txt")
+
+        assert_raises(Terret::Exec::Denied) { ctx[:fs].write(target, "escaped") }
+        refute File.exist?(File.join(outside, "nope")), "nothing outside the workspace may be created"
+      end
+    end
+  end
+
   # -- containment: sibling directory sharing the prefix --------------------
 
   def test_a_sibling_directory_sharing_the_prefix_is_denied

@@ -40,24 +40,24 @@ module Terret
         @workspace = resolve_workspace(config[:workspace])
       end
 
-      def read(path) = File.read(authorize!(:read, path))
+      def read(path) = read_contained(authorize!(:read, path))
 
       def write(path, content)
         p = authorize!(:write, path)
         FileUtils.mkdir_p(File.dirname(p))
-        File.write(p, content)
+        write_contained(p, content)
         p
       end
 
       def edit(path, old, new)
         p = authorize!(:write, path)
-        body = File.read(p)
+        body = read_contained(p)
         # #scan with a String argument (not a Regexp) matches literally, so
         # `old` is never interpreted as a regex source here.
         count = body.scan(old).length
         raise EditAmbiguous, "#{old.inspect} appears #{count} times in #{path}; must be exactly 1" unless count == 1
 
-        File.write(p, body.sub(old, new))
+        write_contained(p, body.sub(old, new))
         p
       end
 
@@ -103,21 +103,49 @@ module Terret
         resolved
       end
 
-      # Expand, then realpath the DEEPEST EXISTING prefix (the target itself
-      # may not exist yet — #write's whole point) and re-join whatever tail
-      # doesn't exist yet. Because the deepest existing prefix is realpath'd
-      # first, a `../` segment or a symlink anywhere in that prefix resolves
-      # to its real target before containment is ever checked.
+      # Resolve to where the syscall would ACTUALLY land, then containment-check
+      # that. The target itself may not exist yet (#write's whole point), so we
+      # can't blindly realpath it; instead #resolve_real walks up to the deepest
+      # prefix that exists OR is a symlink. A `../` segment or an already-real
+      # symlink in an existing prefix is followed by realpath; a DANGLING
+      # symlink — one File.exist? reports as absent because it follows the link
+      # to a missing target — is resolved to where it points instead of being
+      # waved through as a fresh path (the container-escape the earlier check
+      # missed, since the later File.write would follow it outside).
       def contain(path)
-        expanded = File.expand_path(path.to_s)
-        deepest = expanded
-        deepest = File.dirname(deepest) until File.exist?(deepest)
-        real_deepest = File.realpath(deepest)
-        tail = expanded[deepest.length..]
-        resolved = tail.nil? || tail.empty? ? real_deepest : File.join(real_deepest, tail)
+        resolved = resolve_real(File.expand_path(path.to_s))
         raise Denied, "#{path} is outside the granted workspace" unless contained?(resolved)
 
         resolved
+      end
+
+      def resolve_real(expanded)
+        deepest = expanded
+        deepest = File.dirname(deepest) until File.exist?(deepest) || File.symlink?(deepest)
+        tail = expanded[deepest.length..]
+        base =
+          if File.symlink?(deepest) && !File.exist?(deepest)
+            # Dangling symlink: resolve one hop to where it points (relative
+            # targets against the link's real directory), then keep resolving
+            # since the target may itself dangle, be relative, or be symlinked.
+            resolve_real(File.expand_path(File.readlink(deepest), File.realpath(File.dirname(deepest))))
+          else
+            File.realpath(deepest)
+          end
+        tail.nil? || tail.empty? ? base : File.join(base, tail)
+      end
+
+      # Read/write the final syscall with File::NOFOLLOW so a symlink swapped in
+      # at the leaf between #contain and here refuses at open rather than being
+      # followed. #resolve_real never returns a symlink as the final component
+      # (an existing target is realpath'd; a dangling one is resolved to where
+      # it points), so a legitimate regular file always opens cleanly. This
+      # guards only the leaf; intermediate components remain a small accepted
+      # TOCTOU window.
+      def read_contained(path) = File.open(path, File::RDONLY | File::NOFOLLOW, &:read)
+
+      def write_contained(path, content)
+        File.open(path, File::WRONLY | File::CREAT | File::TRUNC | File::NOFOLLOW) { |f| f.write(content) }
       end
 
       # Prefix match with a trailing-separator guard: a workspace granted at
