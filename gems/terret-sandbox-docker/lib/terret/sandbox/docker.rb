@@ -103,9 +103,14 @@ module Terret
         @workspace = resolve_workspace(config[:workspace])
         @container = nil
         @lock = Mutex.new
+        @docker_bin = resolve_docker_bin(config[:docker_bin])
       end
 
       def isolated? = true
+
+      # The absolute path every docker invocation here runs through. Public so
+      # a test (and an operator) can see which binary the row resolved to.
+      def docker_bin = @docker_bin
 
       # The wrapped argv. `workspace_ready!` is called from HERE, not by
       # ctx[:subprocess], because the seam's contract is only `wrap` — the
@@ -143,7 +148,7 @@ module Terret
       # that is the one call site that has to say so.
       def wrap(argv, cwd:, tty: false)
         workspace_ready!
-        ["docker", "exec", "-i", *(tty ? ["-t"] : []), "-w", workdir(cwd), @container, *argv]
+        [docker_bin, "exec", "-i", *(tty ? ["-t"] : []), "-w", workdir(cwd), @container, *argv]
       end
 
       # Idempotent, and the lock is what makes that true rather than nearly
@@ -216,11 +221,51 @@ module Terret
       # tidy-up into a second failure.
       def discard!
         @lock.synchronize do
-          id = @container
-          @container = nil
-          system("docker", "rm", "-f", id, out: File::NULL, err: File::NULL) if id
+          id = @container or next
+          # Removal is attempted FIRST, and the id is cleared only once it is
+          # gone: a genuine `docker rm -f` failure means `sleep infinity` may
+          # still be up holding its bind mount, so dropping the id here would
+          # strand a container nothing can name. A daemon that already removed
+          # the container (the ordinary `--rm` case) answers "No such
+          # container", which is success for our purposes, not a failure.
+          status, out = remove_container(id)
+          if status&.zero? || already_gone?(out)
+            @container = nil
+          else
+            warn "terret-sandbox-docker: docker rm -f #{id} failed (status #{status.inspect}); " \
+                 "the container may still be running: #{out.strip}"
+          end
         end
         nil
+      end
+
+      # Split out so #discard! can distinguish a removal that FAILED from one
+      # that found the container already gone, and so a test can drive the
+      # failure path without a daemon. Both streams are merged the way #capture
+      # does, because the message is what makes a failed removal visible.
+      def remove_container(id)
+        out = IO.popen([docker_bin, "rm", "-f", id], err: [:child, :out], &:read)
+        [$?&.exitstatus, out.to_s]
+      end
+
+      def already_gone?(out) = out.to_s.match?(/no such container/i)
+
+      # Resolved to an ABSOLUTE path once, at start, so the bare name never
+      # reaches an exec that would resolve it against PATH — a workspace
+      # directory sitting on PATH could otherwise shadow `docker` with an
+      # argv[0] the agent controls. An explicit `docker_bin:` row wins
+      # (expanded to absolute); otherwise the first executable `docker` on PATH
+      # is taken, and if none is found the bare name is kept so a missing docker
+      # fails loudly rather than resolving somewhere unexpected.
+      def resolve_docker_bin(configured)
+        return File.expand_path(configured.to_s) if configured && !configured.to_s.empty?
+
+        ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |dir|
+          next if dir.empty?
+
+          candidate = File.join(dir, "docker")
+          candidate if File.file?(candidate) && File.executable?(candidate)
+        end.first || "docker"
       end
 
       def image = config[:image] || DEFAULT_IMAGE
@@ -264,7 +309,7 @@ module Terret
                 "mounted and every wrapped path would be missing inside it"
         end
 
-        argv = ["docker", "run", "-d", "--rm", "--label", LABEL, "--network", network,
+        argv = [docker_bin, "run", "-d", "--rm", "--label", LABEL, "--network", network,
                 *(user ? ["--user", user] : []), *mounts, image, "sleep", "infinity"]
         status, out = capture(argv)
         raise ContainerUnavailable, "docker run failed (status #{status.inspect}): #{out}" unless status&.zero?

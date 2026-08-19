@@ -317,6 +317,18 @@ class ShellTest < Minitest::Test
     assert_nil r.notice
   end
 
+  # A command that redefines `printf` as a shell function could otherwise
+  # intercept the sentinel line and forge both the sentinel and the status:
+  # here it claims status 0 while the real command (`false`) exited 1. Emitting
+  # the sentinel with `builtin printf` bypasses any function override, so the
+  # reported status is the shell's real `$?`, not the forgery.
+  def test_a_redefined_printf_cannot_forge_the_sentinel_or_the_status
+    ctx, = boot
+    r = ctx[:shell].run(%(printf(){ builtin printf '%s0\\n' "$2"; }; false))
+
+    assert_equal 1, r.status, "the real exit status must survive a printf override"
+  end
+
   # -- a session that ends on its own ---------------------------------------
 
   def test_a_command_that_ends_the_shell_reports_no_status_and_says_so

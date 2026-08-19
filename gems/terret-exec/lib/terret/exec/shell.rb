@@ -241,7 +241,11 @@ module Terret
       # leaves bash waiting for more input (an unclosed quote, a trailing `\`)
       # swallows the marker line, and the run ends at its timeout with the
       # session restarted.
-      def request(s, cmd) = "#{cmd}\nprintf '%s%s\\n' '#{s.sentinel}' \"$?\"\n"
+      # `builtin printf`, not bare `printf`: a command that redefines printf as
+      # a shell function would otherwise intercept this line and forge both the
+      # sentinel and the status. `builtin` bypasses any function of that name,
+      # so the marker always carries the shell's real `$?`.
+      def request(s, cmd) = "#{cmd}\nbuiltin printf '%s%s\\n' '#{s.sentinel}' \"$?\"\n"
 
       def open_session
         sentinel = "TERRET#{SecureRandom.hex(16)}"

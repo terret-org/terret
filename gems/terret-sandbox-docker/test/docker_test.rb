@@ -126,7 +126,7 @@ class SandboxDockerTest < Minitest::Test
       sandbox = ctx_sandbox(ws)
       argv = sandbox.wrap(%w[uname -a], cwd: ws)
 
-      assert_equal ["docker", "exec", "-i", "-w", ws, sandbox.container, "uname", "-a"], argv
+      assert_equal [sandbox.docker_bin, "exec", "-i", "-w", ws, sandbox.container, "uname", "-a"], argv
     end
   end
 
@@ -137,7 +137,7 @@ class SandboxDockerTest < Minitest::Test
       sandbox = ctx_sandbox(ws)
       argv = sandbox.wrap(["pwd"], cwd: nil)
 
-      assert_equal ["docker", "exec", "-i", "-w", ws, sandbox.container, "pwd"], argv
+      assert_equal [sandbox.docker_bin, "exec", "-i", "-w", ws, sandbox.container, "pwd"], argv
     end
   end
 
@@ -163,7 +163,7 @@ class SandboxDockerTest < Minitest::Test
       sandbox = ctx_sandbox(ws)
 
       refute_includes sandbox.wrap(["pwd"], cwd: ws), "-t"
-      assert_equal ["docker", "exec", "-i", "-t", "-w", ws, sandbox.container, "pwd"],
+      assert_equal [sandbox.docker_bin, "exec", "-i", "-t", "-w", ws, sandbox.container, "pwd"],
                    sandbox.wrap(["pwd"], cwd: ws, tty: true)
     end
   end
@@ -519,6 +519,85 @@ class SandboxDockerTest < Minitest::Test
 
       assert_empty out
       assert_match(/remount/, err)
+    end
+  end
+
+  # -- the control plane, without a daemon ------------------------------------
+  #
+  # These drive the argv-building and disposal logic directly, so they run
+  # everywhere rather than gating on `docker?`. A stand-in for the daemon:
+  # run_container! hands back a fake id instead of starting anything, and
+  # remove_container is a stub the discard! tests fail on demand.
+  class FakelessDocker < Terret::Sandbox::Docker
+    attr_accessor :rm_result
+
+    def run_container! = "0" * 64
+    def remove_container(_id) = rm_result || [0, ""]
+  end
+
+  def boot_fake(workspace:, **overrides)
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    config = { image: IMAGE, network: "none", workspace: Array(workspace) }.merge(overrides)
+    loader.layer([{ id: "sandbox", plugin: FakelessDocker, config: config }])
+    loader.boot![:sandbox]
+  end
+
+  # A bare `docker` in argv[0] is resolved by the exec against PATH, so a
+  # workspace directory that happens to sit on PATH could shadow it with a
+  # binary the agent controls. Resolving to an absolute path at start closes
+  # that.
+  def test_wrap_resolves_docker_to_an_absolute_path
+    workspace do |ws|
+      sandbox = boot_fake(workspace: ws)
+      argv = sandbox.wrap(["true"], cwd: ws)
+
+      assert_equal sandbox.docker_bin, argv.first
+      assert File.absolute_path?(argv.first), "wrap's argv[0] must be absolute, not a bare name"
+    end
+  end
+
+  def test_a_docker_bin_config_override_is_honored
+    workspace do |ws|
+      sandbox = boot_fake(workspace: ws, docker_bin: "/opt/custom/docker")
+      argv = sandbox.wrap(["true"], cwd: ws)
+
+      assert_equal "/opt/custom/docker", argv.first
+    end
+  end
+
+  # A genuine `docker rm -f` failure means `sleep infinity` may still be up
+  # holding its bind mount, so discard! must surface it and keep the id rather
+  # than clearing it and returning a quiet success.
+  def test_discard_surfaces_a_failed_removal_instead_of_swallowing_it
+    workspace do |ws|
+      sandbox = boot_fake(workspace: ws)
+      sandbox.workspace_ready!
+      id = sandbox.container
+      sandbox.rm_result = [1, "Error response from daemon: could not remove #{id}"]
+
+      _out, err = capture_io { sandbox.stop(nil) }
+
+      assert_match(/failed/, err, "a failed removal must be surfaced")
+      assert_includes err, id, "the surfaced failure must name the container id"
+      assert_equal id, sandbox.container, "a failed removal must not silently drop the id"
+    end
+  end
+
+  # The mirror: a container the daemon already dropped (the ordinary `--rm`
+  # case) answers "No such container", which is success — the id is cleared
+  # and nothing is warned.
+  def test_discard_treats_an_already_gone_container_as_removed
+    workspace do |ws|
+      sandbox = boot_fake(workspace: ws)
+      sandbox.workspace_ready!
+      sandbox.rm_result = [1, "Error: No such container: #{sandbox.container}"]
+
+      _out, err = capture_io { sandbox.stop(nil) }
+
+      assert_empty err, "an already-gone container is not a failure to surface"
+      assert_nil sandbox.container
     end
   end
 end
