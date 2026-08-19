@@ -107,16 +107,26 @@ module Hames
     end
 
     # Hot config swap — wholesale, like layering, never a merge. Replaces the
-    # row's config, swaps the mounted service's, invokes its reconfigure hook,
-    # and emits config/updated when the app vocabulary declares it (hames
-    # itself declares no events and stays app-agnostic).
+    # row's config, swaps the mounted service's, invokes its reconfigure hook
+    # under with_owner(id) (so hook-registered effects are owned by the row,
+    # not left ownerless), and emits config/updated when the app vocabulary
+    # declares it (hames itself declares no events and stays app-agnostic). A
+    # raising hook rolls the row and the service's config back to what they
+    # were before the call and re-raises — the swap is atomic, never split-brain.
     def reconfigure!(id, config)
       id = id.to_s
-      row = @rows.fetch(id) { raise KeyError, "no row #{id.inspect}" }
+      old_row = @rows.fetch(id) { raise KeyError, "no row #{id.inspect}" }
       service = @mounted.fetch(id) { raise KeyError, "no mounted plugin #{id.inspect}" }
-      @rows[id] = Hames::Row.new(id: row.id, plugin: row.plugin, config: config, disabled: row.disabled)
+      old_config = old_row.config
+      @rows[id] = Hames::Row.new(id: old_row.id, plugin: old_row.plugin, config: config, disabled: old_row.disabled)
       service.replace_config!(config)
-      service.reconfigure(config)
+      begin
+        ctx.with_owner(id) { service.reconfigure(config) }
+      rescue StandardError
+        @rows[id] = old_row
+        service.replace_config!(old_config)
+        raise
+      end
       ctx.emit("config/updated", id, config) if Hames.declared?("config/updated")
       config
     end

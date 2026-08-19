@@ -392,6 +392,79 @@ class HamesReconfigureTest < Minitest::Test
   end
 end
 
+class HamesPatchSwapTest < Minitest::Test
+  class ProviderA < Hames::Service
+    service_key :greeter
+    def start(_ctx); end
+    def greet = "A:#{config[:tone]}"
+  end
+
+  class ProviderB < Hames::Service
+    service_key :greeter
+    def start(_ctx); end
+    def greet = "B:#{config[:tone]}"
+  end
+
+  def setup = Hames.reset_events!
+
+  def test_a_patch_row_swaps_the_plugin_class_wholesale
+    loader = Hames::Loader.new
+    loader.layer([{ id: "greeter", plugin: ProviderA, config: { tone: "warm" } }])
+    loader.layer([{ id: "greeter", plugin: ProviderB, config: { tone: "cold" } }])
+    ctx = loader.boot!
+    assert_equal "B:cold", ctx[:greeter].greet, "the later layer's plugin class must win"
+  end
+
+  def test_a_patch_row_without_a_plugin_keeps_the_class_and_replaces_config
+    loader = Hames::Loader.new
+    loader.layer([{ id: "greeter", plugin: ProviderA, config: { tone: "warm", extra: 1 } }])
+    loader.layer([{ id: "greeter", config: { tone: "cold" } }])
+    ctx = loader.boot!
+    assert_equal "A:cold", ctx[:greeter].greet
+    assert_equal({ tone: "cold" }, ctx[:greeter].config, "wholesale, not merged")
+  end
+end
+
+class HamesReconfigureAtomicityTest < Minitest::Test
+  class Fragile < Hames::Service
+    service_key :fragile
+    attr_reader :knob
+
+    def start(_ctx) = @knob = config[:knob]
+
+    def reconfigure(config)
+      raise "hook exploded" if config[:explode]
+
+      @knob = config[:knob]
+    end
+  end
+
+  def setup = Hames.reset_events!
+
+  def test_a_raising_hook_rolls_the_row_and_config_back
+    loader = Hames::Loader.new
+    loader.layer([{ id: "fragile", plugin: Fragile, config: { knob: 1 } }])
+    ctx = loader.boot!
+    assert_raises(RuntimeError) { loader.reconfigure!("fragile", { knob: 2, explode: true }) }
+    assert_equal({ knob: 1 }, ctx[:fragile].config, "config must roll back when the hook raises")
+    assert_equal 1, ctx[:fragile].knob
+    loader.reconfigure!("fragile", { knob: 3 }) # and the row still works afterward
+    assert_equal 3, ctx[:fragile].knob
+  end
+
+  def test_hook_registrations_are_owned_by_the_row
+    loader = Hames::Loader.new
+    loader.layer([{ id: "fragile", plugin: Fragile, config: { knob: 1 } }])
+    ctx = loader.boot!
+    owner_seen = nil
+    ctx[:fragile].define_singleton_method(:reconfigure) do |_config|
+      owner_seen = ctx.instance_variable_get(:@owner)
+    end
+    loader.reconfigure!("fragile", { knob: 9 })
+    assert_equal "fragile", owner_seen, "reconfigure hooks must run under with_owner(id)"
+  end
+end
+
 class HamesEmitIsolationTest < Minitest::Test
   def setup
     Hames.reset_events!
