@@ -22,8 +22,8 @@ class ShellTest < Minitest::Test
   class ProbeSandbox < Terret::Exec::SandboxNone
     def calls = @calls ||= []
 
-    def wrap(argv, cwd:)
-      calls << { argv: argv, cwd: cwd }
+    def wrap(argv, cwd:, tty: false)
+      calls << { argv: argv, cwd: cwd, tty: tty }
       ["env", "TERRET_WRAPPED=1", *argv]
     end
   end
@@ -31,7 +31,7 @@ class ShellTest < Minitest::Test
   # Whatever the shell asks to spawn, it gets a process that exits at once —
   # the shape of a bash that is not installed, or a container that refuses.
   class DeadShellSandbox < Terret::Exec::SandboxNone
-    def wrap(_argv, cwd:) = [RbConfig.ruby, "-e", "exit 0"]
+    def wrap(_argv, cwd:, tty: false) = [RbConfig.ruby, "-e", "exit 0"]
   end
 
   def boot(config: {}, sandbox: Terret::Exec::SandboxNone)

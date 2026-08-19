@@ -22,8 +22,8 @@ class SubprocessTest < Minitest::Test
   class ProbeSandbox < Terret::Exec::SandboxNone
     def calls = @calls ||= []
 
-    def wrap(argv, cwd:)
-      calls << { argv: argv, cwd: cwd }
+    def wrap(argv, cwd:, tty: false)
+      calls << { argv: argv, cwd: cwd, tty: tty }
       ["env", "TERRET_WRAPPED=1", *argv]
     end
   end
@@ -193,7 +193,7 @@ class SubprocessTest < Minitest::Test
       r = ctx[:subprocess].spawn(argv, cwd: dir)
 
       assert_equal "1", r.stdout, "the wrapped argv, not the original, must become the process"
-      assert_equal [{ argv: argv, cwd: dir }], ctx[:sandbox].calls
+      assert_equal [{ argv: argv, cwd: dir, tty: false }], ctx[:sandbox].calls
     end
   end
 
@@ -205,10 +205,26 @@ class SubprocessTest < Minitest::Test
       begin
         assert_includes read_until(handle, "W1"), "W1",
                         "the wrapped argv, not the original, must become the pty process"
-        assert_equal [{ argv: argv, cwd: dir }], ctx[:sandbox].calls
+        assert_equal [{ argv: argv, cwd: dir, tty: true }], ctx[:sandbox].calls
       ensure
         handle.close
       end
+    end
+  end
+
+  # The tty bit asks for terminal semantics on the FAR side of the sandbox,
+  # and only a pty consumer is in a position to ask: it has just made a
+  # terminal on this side. It must not ride the pipe path — `docker exec -i -t`
+  # against pipe stdin fails outright — so the two paths are asserted together,
+  # where a change to either one shows up as a change to this pair.
+  def test_only_the_pty_path_asks_its_sandbox_for_a_tty
+    Dir.mktmpdir do |dir|
+      ctx, = boot(sandbox: ProbeSandbox)
+      ctx[:subprocess].spawn([RUBY, "-e", ""], cwd: dir)
+      ctx[:subprocess].pty_spawn([RUBY, "-e", ""], cwd: dir).close
+
+      assert_equal [false, true], ctx[:sandbox].calls.map { |c| c[:tty] },
+                   "spawn must not ask for a tty; pty_spawn must"
     end
   end
 

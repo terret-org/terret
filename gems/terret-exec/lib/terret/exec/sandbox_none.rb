@@ -16,7 +16,11 @@ module Terret
 
       def start(_ctx); end
 
-      def wrap(argv, cwd:) = argv
+      # `tty:` is accepted and ignored. A provider that puts a terminal on the
+      # far side of the seam (docker, via `-t`) has to be told when one is
+      # wanted; here the host pty the caller already holds IS the terminal, so
+      # there is nothing left to arrange.
+      def wrap(argv, cwd:, tty: false) = argv
 
       def isolated? = false
 

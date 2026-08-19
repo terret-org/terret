@@ -14,8 +14,8 @@ class TerminalsTest < Minitest::Test
   class ProbeSandbox < Terret::Exec::SandboxNone
     def calls = @calls ||= []
 
-    def wrap(argv, cwd:)
-      calls << { argv: argv, cwd: cwd }
+    def wrap(argv, cwd:, tty: false)
+      calls << { argv: argv, cwd: cwd, tty: tty }
       ["env", "TERRET_WRAPPED=1", *argv]
     end
   end

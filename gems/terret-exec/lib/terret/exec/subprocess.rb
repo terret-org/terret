@@ -64,7 +64,16 @@ module Terret
       # close — because ctx[:terminals] holds these across turns and every
       # method on it is something a tool call can end up driving.
       def pty_spawn(argv, cwd: Dir.pwd, env: {})
-        argv = @ctx[:sandbox].wrap(argv, cwd: cwd) # the §6.6 contract; see #spawn
+        # The §6.6 contract; see #spawn. `tty: true` is this path declaring
+        # what it is: a caller reaching for a pty wants terminal semantics on
+        # the far side of the sandbox as well, and a provider that can arrange
+        # one (docker, via `-t`) has to be told. Without it a container hands
+        # bash a pipe while the host pty carries on echoing, and the echoed
+        # request line — session sentinel and all — lands in what ctx[:shell]
+        # reads back as the command's own output. The bit rides this path
+        # only: `docker exec -i -t` against pipe stdin fails outright, so
+        # #spawn must never ask for it.
+        argv = @ctx[:sandbox].wrap(argv, cwd: cwd, tty: true)
         reader, writer, pid = PTY.spawn(stringify(env), *exec_form(argv), chdir: cwd)
         writer.sync = true
         PTYHandle.new(reader: reader, writer: writer, pid: pid,
