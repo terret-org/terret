@@ -40,7 +40,7 @@ A **bundle** is a gem that ships `config/bundle.yml`, an ordered list of
 rows. It does not have to contain the code those rows mount — it has to
 make that code available, which for a Ruby gem means **depending on the
 gems the rows name**. That distinction is what lets `terret-base` (§6)
-live inside the meta-gem while mounting services from eight other gems: it
+live inside the meta-gem while mounting services from six other gems: it
 ships the rows and declares the dependencies, and the classes resolve
 because Bundler put them on the load path. A bundle declares itself in its
 gemspec:
@@ -387,7 +387,13 @@ rows:
     plugin: Terret::OpenRouter::Adapter
     config:                      # config: ~/.terret/patch.yml
       api_key: !env OPENROUTER_API_KEY
+      model: !setting model.main
 ```
+
+That `llm` row is the §4 example after the cure. A patch repointing the
+model has to carry the `api_key` along with it, because it replaces the
+base row's config whole — and this output is how you would have caught it
+had it not.
 
 Provenance is per **row**, not per key, and that falls straight out of §4:
 because a patch replaces a config wholesale, there is no per-key blame to
