@@ -212,6 +212,45 @@ class CLITest < Minitest::Test
     assert_match(/sessions.*Terret::Nope::Missing.*error/, out)
   end
 
+  # A plugin: that resolves to a live constant that is not a plugin (a typo
+  # hitting String, a module) is a wrong plugin:, not "a plugin with no schema"
+  # — it must be an error, not a green unschema'd row.
+  def test_doctor_flags_a_resolved_constant_that_is_not_a_plugin
+    profile_patch(demo_profile, "rows:\n  - id: sessions\n    plugin: String\n")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 1, status
+    assert_match(/sessions\s+String\s+error.*not a plugin/, out)
+    refute_match(/String\s+unschema'd/, out)
+  end
+
+  # A bad !ruby in a ROW is attributed to that row and does not abort the run;
+  # boot-level !ruby is covered elsewhere, this locks the per-row doctor path.
+  def test_doctor_attributes_a_bad_ruby_scalar_to_its_row
+    profile_patch(demo_profile, %(rows:\n  - id: loop\n    config: { max_agents: !ruby "1 +" }\n))
+    status, out, = run_cli("doctor", "--profile", "demo", "--allow-config-ruby")
+    assert_equal 1, status
+    assert_match(/loop.*error.*ruby/, out)
+    assert_match(/session_store\s+Terret::Store::SQLite\s+ok/, out, "the rest of the table still renders")
+  end
+
+  # A bad !ruby/!setting in settings: is reported as its own error line, and the
+  # row table still renders rather than the whole run aborting.
+  def test_doctor_reports_a_settings_level_failure_without_hiding_the_table
+    profile("badsettings", <<~YAML)
+      bundles: [terret]
+      settings:
+        workspace: []
+        store: { path: /tmp/x.db }
+        model: { main: openrouter/some/model }
+        sandbox: { image: x:latest }
+        danger: !ruby "1 + 1"
+    YAML
+    status, out, = run_cli("doctor", "--profile", "badsettings")
+    assert_equal 1, status
+    assert_match(/error\s+.*settings.*ruby/, out)
+    assert_match(/row\s+plugin\s+status/, out, "the row table must still render")
+  end
+
   # Config rows grow: a key from a newer gem version warns about drift rather
   # than failing a boot.
   def test_doctor_warns_on_an_extra_key_without_going_red

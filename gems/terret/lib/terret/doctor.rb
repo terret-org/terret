@@ -22,11 +22,20 @@ module Terret
     # 0 otherwise.
     def self.run(resolved, allow_config_ruby: false, out:)
       load_failures = require_code(resolved)
-      settings = Composition.materialize_settings(resolved.settings, allow_config_ruby: allow_config_ruby)
+      # Settings resolve once, but a bad !setting/!ruby in settings: must not
+      # abort the whole run and hide the row table. It becomes its own error
+      # line; rows then materialize against empty settings, so any !setting in a
+      # row surfaces as that row's own error rather than a swallowed one.
+      settings, settings_error = begin
+        [Composition.materialize_settings(resolved.settings, allow_config_ruby: allow_config_ruby), nil]
+      rescue Composition::Error => e
+        [{}, e.message]
+      end
       results = resolved.rows.map { |row| check(row, settings, allow_config_ruby) }
 
-      render(resolved, results, load_failures, out)
-      results.any? { |r| !r[:disabled] && r[:status] == :error } ? 1 : 0
+      render(resolved, results, load_failures, settings_error, out)
+      bad = settings_error || results.any? { |r| !r[:disabled] && r[:status] == :error }
+      bad ? 1 : 0
     end
 
     # Requiring the composition's code, best-effort: a require that fails does
@@ -52,6 +61,13 @@ module Terret
                                                    where: "row #{row.id.inspect}")
       klass = constantize(row.plugin)
       return base.merge(status: :error, detail: "#{row.plugin} does not resolve to a plugin class") unless klass
+      unless plugin_class?(klass)
+        # A name that resolves to a live constant that is not a plugin (String, a
+        # module, a typo hitting something real) is not "a plugin with no schema"
+        # — it is a wrong plugin:, and reporting it unschema'd would hide that.
+        return base.merge(status: :error, detail: "#{row.plugin} is not a plugin " \
+                                                   "(its instances do not respond to #apply)")
+      end
 
       schema = klass.respond_to?(:config_schema) ? klass.config_schema : nil
       return base.merge(status: :unschema, detail: nil) unless schema
@@ -76,11 +92,23 @@ module Terret
       nil
     end
 
+    # The plugin contract boot itself enforces (boot.rb): a class whose instances
+    # respond to #apply. Using the same test keeps doctor from red-flagging a
+    # composition boot would accept — including a third-party functional plugin
+    # that is not a Hames::Service.
+    def self.plugin_class?(klass)
+      klass.is_a?(Class) && klass.method_defined?(:apply)
+    end
+
     # -- output ----------------------------------------------------------------
 
-    def self.render(resolved, results, load_failures, out)
+    def self.render(resolved, results, load_failures, settings_error, out)
       out.puts "# doctor: profile #{resolved.profile.inspect}"
       out.puts
+      if settings_error
+        out.puts "error  #{settings_error}"
+        out.puts
+      end
 
       row_w = [results.map { |r| r[:id].length }.max || 3, 3].max
       plugin_w = [results.map { |r| r[:plugin].length }.max || 6, 6].max
