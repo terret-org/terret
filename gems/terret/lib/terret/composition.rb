@@ -165,12 +165,15 @@ module Terret
       def visit_Psych_Nodes_Mapping(node)
         refuse_collection_tag!(node, CORE_MAPPING_TAGS)
         mapping = super
-        # Psych merges `<<` only when it points at a mapping. Anything else it
-        # leaves as a literal "<<" key — a String among symbols, and a merge
-        # the author believed had happened.
+        # Psych merges `<<` when it points at a mapping or at a list of them.
+        # Anything else it leaves as a literal "<<" key — a String among
+        # symbols, and a merge the author believed had happened. Quoting the
+        # key does not opt out: Psych reads `"<<"` as a merge too, so the
+        # refusal names the spelling that does.
         if mapping.is_a?(Hash) && mapping.key?("<<")
           raise Error, "#{@label}: a << merge key must point at a mapping or a list of them; " \
-                       "anything else is not a merge, and would land as a literal \"<<\" key"
+                       "anything else is not a merge, and would land as a literal \"<<\" key. " \
+                       "For a key that is genuinely the characters <<, write !!str \"<<\":."
         end
 
         mapping

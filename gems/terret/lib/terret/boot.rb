@@ -103,15 +103,23 @@ module Terret
     # none of the hooks it does not happen to name, and grows a hole every time
     # a bundle mounts something new.
     #
-    # Reverse declaration order, so the session store — which everything else
-    # may still be writing to — closes last.
+    # Reverse MOUNT order, which is exact reverse-dependency order: a consumer
+    # comes down before the service it injects, and the session store — which
+    # everything else may still be writing to — closes last.
     #
     # Best-effort means each step is separately best-effort. One wedged seam
     # aborting the rest is how a container survives the process that owned it.
-    def self.shutdown(ctx)
-      loader = ctx[:loader] if ctx.service?(:loader)
-      loader&.rows&.values&.reject(&:disabled)&.reverse_each do |row|
-        step("row #{row.id}") { loader.unload!(row.id) }
+    #
+    # A context built by hand rather than by Terret.boot has no loader to find,
+    # and this says so rather than quietly disposing and running no hooks at
+    # all — pass `loader:` to get the real teardown.
+    def self.shutdown(ctx, loader: nil)
+      loader ||= ctx[:loader] if ctx.service?(:loader)
+      if loader
+        loader.mounted.keys.reverse_each { |id| step("row #{id}") { loader.unload!(id) } }
+      else
+        warn "terret: shutdown: no loader for this context, so no service's stop hook ran. " \
+             "Boot through Terret.boot, or pass shutdown(ctx, loader:) — disposing registrations only."
       end
       step("dispose") { ctx.dispose! }
     end

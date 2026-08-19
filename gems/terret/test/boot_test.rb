@@ -17,6 +17,25 @@ class BootTestWedgedSeam < Hames::Service
   end
 end
 
+# Two seams that record the order they were torn down in. A depends on B, so
+# the loader mounts B first whatever order the rows are declared in — which is
+# what makes reverse-mount and reverse-declaration order tell apart.
+module BootTestOrder
+  class << self; attr_accessor :stops; end
+  self.stops = []
+
+  class B < Hames::Service
+    service_key :order_b
+    def stop(_ctx) = BootTestOrder.stops << :order_b
+  end
+
+  class A < Hames::Service
+    service_key :order_a
+    inject :order_b
+    def stop(_ctx) = BootTestOrder.stops << :order_a
+  end
+end
+
 # Terret.boot is the whole embedding surface (docs/composition.md §7): resolve
 # the layers, hand the row list to the Hames loader, return the booted context.
 # A Rails app calls this in an initializer and holds the ctx; `trt` is one
@@ -231,6 +250,41 @@ class BootTest < Minitest::Test
     assert BootTestWedgedSeam.stopped, "the wedged seam's stop was attempted"
     assert_includes errs, "wedged"
     refute ctx.service?(:sessions), "every other row still came down"
+  end
+
+  # Declaration order is A then B; dependency order mounts B then A. Reverse
+  # mount order is therefore A then B, and reverse declaration order is B then
+  # A — only one of them tears a consumer down before the thing it consumes.
+  def test_teardown_follows_reverse_mount_order_not_reverse_declaration_order
+    name = offline_profile
+    profile_patch(name, "#{OFFLINE_PATCH}\n" \
+                        "  - id: order_a\n    plugin: BootTestOrder::A\n    after: sessions\n" \
+                        "  - id: order_b\n    plugin: BootTestOrder::B\n    after: order_a\n")
+    BootTestOrder.stops = []
+    Terret::Boot.shutdown(Terret.boot(profile: name))
+
+    assert_equal %i[order_a order_b], BootTestOrder.stops,
+                 "a consumer must come down before the service it injects"
+  end
+
+  def test_shutting_down_a_context_that_was_not_booted_here_says_so
+    loader = Hames::Loader.new.layer([{ id: "b", plugin: BootTestOrder::B }])
+    ctx = loader.boot!
+    BootTestOrder.stops = []
+
+    _out, errs = capture_io { Terret::Boot.shutdown(ctx) }
+    assert_includes errs, "loader", "a silent no-op would break the every-stop-hook-runs promise"
+    assert_empty BootTestOrder.stops
+  end
+
+  def test_a_hand_built_world_can_hand_shutdown_its_own_loader
+    loader = Hames::Loader.new.layer([{ id: "b", plugin: BootTestOrder::B }])
+    loader.boot!
+    BootTestOrder.stops = []
+
+    _out, errs = capture_io { Terret::Boot.shutdown(loader.ctx, loader: loader) }
+    assert_empty errs
+    assert_equal %i[order_b], BootTestOrder.stops
   end
 
   def test_the_loader_stays_reachable_from_the_context_it_booted

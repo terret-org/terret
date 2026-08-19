@@ -290,11 +290,10 @@ class CompositionTest < Minitest::Test
     ["bundle:\n  path: config/bundle.yml\n", "bundle: 7\n", "config/bun\0dle.yml", ""].each do |meta|
       found = C.discover_bundles(specs: [fixture_spec("odd-gem", @gems_dir, meta)])
       assert found.key?("terret"), "discovery must survive #{meta.inspect}"
-      if found.key?("odd-gem")
-        refute_nil found["odd-gem"].error, "a discovered-but-unreadable bundle carries its error"
-      else
-        assert true, "a gem naming no readable bundle is simply not a bundle"
-      end
+
+      entry = found["odd-gem"]
+      assert entry.nil? || entry.error,
+             "#{meta.inspect}: must be absent or marked broken, never a usable bundle"
     end
   end
 
@@ -607,6 +606,9 @@ class CompositionTest < Minitest::Test
     profile_patch("demo", "rows:\n  - id: llm\n    config:\n      <<: !env FOO\n      y: 2\n")
     err = assert_raises(C::Error) { resolve }
     assert_includes err.message, "<<"
+    # Quoting does not get you a literal "<<" key — Psych still reads it as a
+    # merge — so the refusal has to name the spelling that does.
+    assert_includes err.message, "!!str"
   end
 
   def test_a_well_formed_merge_key_still_merges
@@ -619,6 +621,27 @@ class CompositionTest < Minitest::Test
             b: 2
     YAML
     assert_equal({ a: 1, b: 2 }, resolve.rows.find { |r| r.id == "llm" }.config)
+  end
+
+  def test_a_merge_key_pointing_at_a_list_of_mappings_merges_all_of_them
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", <<~YAML)
+      rows:
+        - id: llm
+          config:
+            a: &a { x: 1 }
+            b: &b { y: 2 }
+            c:
+              <<: [*a, *b]
+              z: 3
+    YAML
+    assert_equal({ x: 1, y: 2, z: 3 }, resolve.rows.find { |r| r.id == "llm" }.config[:c])
+  end
+
+  def test_the_tag_the_refusal_recommends_actually_produces_a_literal_key
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: llm\n    config:\n      !!str "<<": literal\n      y: 2\n))
+    assert_equal({ :"<<" => "literal", y: 2 }, resolve.rows.find { |r| r.id == "llm" }.config)
   end
 
   # -- unreadable and misdescribed files -------------------------------------

@@ -64,7 +64,12 @@ module Hames
   # row with an existing id replaces that row's config wholesale (never a
   # deep merge); unknown ids append.
   class Loader
-    attr_reader :ctx, :rows
+    # `mounted` is insertion-ordered by boot!, which mounts in dependency
+    # order — so its reverse is exact reverse-dependency order, and that is
+    # what a teardown wants: a consumer comes down before what it injects.
+    # Row order cannot stand in for it, since an inserted row's position in
+    # the tree need not match where its dependencies put it.
+    attr_reader :ctx, :rows, :mounted
 
     def initialize(ctx = Context.new)
       @ctx = ctx
