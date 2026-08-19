@@ -588,6 +588,23 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   loopback floor never sees an IPv6 bracket literal such as `[::1]` because the resolver
   answers nothing for it and the connect then fails on its own — safe today by accident,
   which is the kind of safety worth pinning with a test in M8's security pass.
+- **Accepted in M8's job seam.** Two things the code and `docs/subagents.md` §6
+  both point here for. (1) *A grandchild can outlive its job's disposal.* Ending a
+  job signals its process group, and that signal is only sent while the leader is
+  alive or an unreaped zombie — which is what proves the pgid is still ours rather
+  than one the kernel has recycled into a stranger's group. A job whose leader
+  exited on its own and was already reaped has no such proof, so nothing is
+  signalled for it, and a background child it started survives. The exposure is
+  narrower than it sounds: closing the handle drops the pipe's read end, so any
+  survivor still holding the write end dies of SIGPIPE on its next write, which
+  confines the leak to grandchildren that are silent or have closed stdout.
+  Bounding the wait without collecting the leader is what would lift it. (2)
+  *Lineage-scoped job visibility.* A job's ledger is keyed by the session that
+  started it and a child's session is fresh, so "my parent's job" and "another
+  agent's live process" are the same shape to the seam and both fail closed —
+  which is why jobs and children do not mix in v1. Lifting it means a lineage link
+  the runtime does not have yet, and a decision about what a child may do with a
+  job it did not start; the fail-closed answer holds until both exist.
 - **MCP wire and fiber-safety, from M5.** v1 targets the deployed legacy wire (protocol
   revisions 2025-11-25/2025-06-18); the 2026-07-28 stateless revision stays out of scope
   until something actually deploys it. manceps' fiber-safety under the async scheduler is

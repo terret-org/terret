@@ -371,6 +371,22 @@ module Terret
       class PipeHandle
         attr_reader :pid
 
+        # What one close may hold. The grace #end_group spends is a window the
+        # job goes on writing into, and a job that ignores TERM writes into all
+        # of it: draining that with nothing bounding it held 952MB at the
+        # default two-second grace, measured, to hand back output the owner's
+        # own buffer caps at a mebibyte. The bound being protected is the HOST
+        # PROCESS's — a handle cannot see ctx[:jobs]' cap, every agent on the
+        # box shares the memory an OOM would take, and this sits comfortably
+        # above that mebibyte so the cap that shapes a result stays the owner's.
+        #
+        # Past it the bytes are read and DISCARDED rather than the reading
+        # stopping, which is the trade Jobs::Buffer makes for the same reason:
+        # a reader that stops blocks the writer on its next write, and a job
+        # frozen inside its own grace period is a worse answer than a job whose
+        # last words were cut short.
+        MAX_PENDING = 2 << 20
+
         def initialize(reader:, pid:, reaper:, grace:)
           @reader = reader
           @pid = pid
@@ -466,10 +482,16 @@ module Terret
             # be able to leave the row half-closed: an fd still open, a child
             # still in the process table, and an owner that thinks the job is
             # over.
+            #
+            # The value is an ASSUMPTION recorded so a second close is
+            # idempotent, not an observation of the process table: if the
+            # reaper raised, what became of the child is exactly what we do not
+            # know. Nothing reads it today, and anything that starts to should
+            # be told that first.
             @ended ||= :terminated
             @exited = true
             @pending ||= String.new(encoding: Encoding::BINARY)
-            drain(@pending, CHUNK) unless @eof
+            drain(@pending, CHUNK, cap: MAX_PENDING) unless @eof
             begin
               @reader.close unless @reader.closed?
             rescue IOError
@@ -497,24 +519,31 @@ module Terret
         # question without reaping anything, and answers it better: it means
         # the leader AND every child that inherited its output are gone. What
         # the job said on its way out lands in @pending while we wait, where
-        # the next #read hands it over.
+        # the next #read hands it over — under MAX_PENDING, because the same
+        # grace that lets a job leave politely lets a chatty one write for the
+        # whole of it.
         def end_group
           signal("TERM")
           deadline = now + @grace
           @pending ||= String.new(encoding: Encoding::BINARY)
           loop do
-            drain(@pending, CHUNK)
+            drain(@pending, CHUNK, cap: MAX_PENDING)
             break if @eof || now >= deadline
 
             sleep POLL
           end
+          # `:killed` here says the STREAM outlived the grace, which is not
+          # what the reaper means by it: the leader may well have gone on the
+          # TERM while a child of its own held the pipe open. It is the honest
+          # answer for a close whose sweep did the ending, and #reap!'s own
+          # contract stays about the single pid its other callers hand it.
           ended = @eof ? :terminated : :killed
           sweep
           @reaper.call(-@pid, @grace) # collects the leader; its own TERM is a no-op by now
           ended
         end
 
-        def drain(buf, max)
+        def drain(buf, max, cap: nil)
           loop do
             chunk = @reader.read_nonblock(max, exception: false)
             if chunk.nil?
@@ -523,10 +552,21 @@ module Terret
             end
             break if chunk == :wait_readable
 
-            buf << chunk
+            keep(buf, chunk, cap)
           end
         rescue IOError
           @eof = true
+        end
+
+        # Appends what fits and drops the rest on the floor, having read it:
+        # past the cap the bytes still come off the pipe, so the writer stays
+        # unblocked while this process stops growing. An uncapped drain (#read,
+        # where the caller is asking for what is there) keeps everything.
+        def keep(buf, chunk, cap)
+          return buf << chunk if cap.nil?
+
+          room = cap - buf.bytesize
+          buf << chunk.byteslice(0, room) if room.positive?
         end
 
         def sweep = signal("KILL")

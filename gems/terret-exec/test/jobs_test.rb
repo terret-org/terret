@@ -249,6 +249,34 @@ class JobsTest < Minitest::Test
     assert_nil r[:exit_status], "a signalled job has no exit status to report"
   end
 
+  # The grace is a window the job goes on writing into, and a job that ignores
+  # TERM writes into all of it. Draining that into one string with nothing
+  # bounding it is how a megabyte of collectable output costs the host
+  # gigabytes — measured at 2.45GB — and the host is one process, so the OOM
+  # would take every agent on the box rather than this one.
+  def test_a_job_writing_through_its_whole_grace_cannot_grow_the_handle_without_bound
+    Dir.mktmpdir do |dir|
+      ctx, = boot(subprocess_config: { term_grace: 0.3 })
+      flag = File.join(dir, "writing")
+      # The writer announces itself, so the grace is spent draining a job that
+      # is already going rather than waiting for a login shell to finish
+      # sourcing its profile.
+      id = ctx[:jobs].start(
+        "trap '' TERM; #{RUBY} -e 'File.write(%q{#{flag}}, 1); $stdout.sync = true; " \
+        "loop { print \"x\" * 65_536 }'", session: "s1"
+      )
+      handle = ctx[:jobs].instance_variable_get(:@jobs)[id].handle
+      await_file(flag)
+
+      ctx[:jobs].stop(id, session: "s1")
+
+      held = handle.instance_variable_get(:@pending).bytesize
+      assert_operator held, :>, 0, "what the job managed to say is still handed over"
+      assert_operator held, :<=, Terret::Exec::Subprocess::PipeHandle::MAX_PENDING,
+                      "the drain keeps reading past the cap, but it stops keeping"
+    end
+  end
+
   # The escalation is subprocess's own: TERM, then KILL after the grace. A job
   # that ignores the polite request is still ended.
   def test_a_job_that_ignores_sigterm_is_killed
