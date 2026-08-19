@@ -9,3 +9,4 @@ end
 require_relative "tools_std/files"
 require_relative "tools_std/bash"
 require_relative "tools_std/terminals"
+require_relative "tools_std/web_fetch"
