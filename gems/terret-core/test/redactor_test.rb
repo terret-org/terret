@@ -12,7 +12,8 @@ class RedactorTest < Minitest::Test
 
   LEAK_CALL = Terret::LLM::ToolCall.new(id: "tc1", name: "leak", args: {})
 
-  def boot(script:, config: { patterns: ["sk-[a-z0-9]+"] }, redactor: true, loop_config: {})
+  def boot(script:, config: { patterns: ["sk-[a-z0-9]+"] }, redactor: true, loop_config: {},
+           extra_rows: [])
     Hames.reset_events!
     Terret.declare_events!
     loader = Hames::Loader.new
@@ -23,7 +24,8 @@ class RedactorTest < Minitest::Test
       { id: "tools",    plugin: Terret::Tools::Registry },
       { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
       { id: "loop",     plugin: Terret::Loop, config: loop_config },
-      *(redactor ? [{ id: "redactor", plugin: Terret::Redactor, config: config }] : [])
+      *(redactor ? [{ id: "redactor", plugin: Terret::Redactor, config: config }] : []),
+      *extra_rows
     ])
     ctx = loader.boot!
     ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(script))
@@ -124,6 +126,60 @@ class RedactorTest < Minitest::Test
   def test_an_uncompilable_pattern_fails_at_boot
     err = assert_raises(RegexpError) { boot(script: [], config: { patterns: ["sk-["] }) }
     assert_match(/sk-\[/, err.message)
+  end
+
+  # The approvals gate matches a recorded verdict on CONTENT, not just on a
+  # call id — and one side of that comparison comes out of the log, which is
+  # now scrubbed. Compare a live secret argument against its redacted stored
+  # form and nothing ever matches: an approved call asks a second time.
+  def test_a_recorded_verdict_still_matches_a_call_whose_args_were_redacted
+    ctx, = boot(script: [], extra_rows: [{ id: "approvals", plugin: Terret::Tools::Approvals }])
+    ctx.with_owner("deploy-plugin") do
+      ctx[:tools].register(name: "deploy", description: "", params: {}, mutating: true,
+                           approval: :always) { |key:| "deployed with #{key}" }
+    end
+    session = ctx[:sessions].create
+    sid = session.id
+    agent = ctx[:loop].spawn_agent(session_id: sid)
+    args = { key: SECRET }
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    ctx[:sessions].append(sid, "approval/requested", { call_id: "tc1", name: "deploy", args: args })
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+
+    call = Terret::Tools::Call.new(id: "tc1", name: "deploy", args: args, session_id: sid)
+    t = Thread.new { ctx[:tools].execute(call, ctx: agent.ctx) }
+    assert t.join(2), "the gate re-parked: a recorded verdict no longer matches its stored args"
+    assert_equal "deployed with [REDACTED]", t.value.content
+  end
+
+  # Two paths into the log that no tool result passes through. Both are the
+  # reason the backstop exists rather than the post_execute layer alone.
+
+  class LeakySummarizer < Hames::Service
+    service_key :summarizer
+    def start(_ctx); end
+    def summarize(_history) = "the user's key is #{SECRET}"
+  end
+
+  def test_a_compaction_summary_is_scrubbed_at_its_own_append
+    ctx, = boot(script: [], extra_rows: [{ id: "summarizer", plugin: LeakySummarizer },
+                                         { id: "compactor", plugin: Terret::Compactor }])
+    session = ctx[:sessions].create
+    ctx[:sessions].append(session.id, "user/message", { text: "hello" })
+
+    ev = ctx[:compactor].compact!(session.id)
+    assert_equal "the user's key is [REDACTED]", ev.payload[:summary]
+  end
+
+  def test_an_injected_steer_is_scrubbed
+    ctx, = boot(script: [{ text: "ok" }])
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    agent.inject("remember #{SECRET}")
+    ctx[:loop].run_turn(agent, "go")
+
+    injected = session.events.find { |e| e.type == "context/injected" }
+    assert_equal "remember [REDACTED]", injected.payload[:text]
   end
 
   # -- streamed chunks ------------------------------------------------------

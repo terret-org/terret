@@ -136,6 +136,119 @@ class SessionsPrimitivesTest < Minitest::Test
     assert_equal "three", ev.payload[:text]
   end
 
+  # A deployment's patterns are written against secrets, not against the log's
+  # own plumbing, and a generic one (long hex) matches both. Scrubbing an
+  # identifier cannot protect anything — the harness minted it — and it can
+  # destroy the log: collapsed tool call ids collide, and a provider rejects a
+  # request carrying two calls with one id.
+  HEX = ->(t) { t.gsub(/[a-f0-9]{6,}/, "[REDACTED]") }
+
+  def scrubbing_ctx(scrubber = HEX)
+    ctx = sessions_ctx
+    ctx.with_owner("scrub") { ctx[:sessions].register_scrubber(scrubber) }
+    ctx
+  end
+
+  def test_structural_identifiers_survive_while_content_beside_them_is_scrubbed
+    ctx = scrubbing_ctx
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "tool/call",
+                               { id: "abc123", name: "deploy", args: { token: "abc123" } })
+    assert_equal "abc123", ev.payload[:id]
+    assert_equal "deploy", ev.payload[:name]
+    assert_equal "[REDACTED]", ev.payload[:args][:token]
+  end
+
+  def test_two_tool_calls_keep_distinct_ids_under_a_generic_pattern
+    ctx = scrubbing_ctx
+    s = ctx[:sessions].create
+    ids = %w[abc123 def456].map do |id|
+      ctx[:sessions].append(s.id, "tool/call", { id: id, name: "x", args: {} }).payload[:id]
+    end
+    assert_equal %w[abc123 def456], ids, "collapsed ids collide and a provider rejects the request"
+  end
+
+  # The encoded parts of an assistant message carry the same identifiers one
+  # level down, and decode_part raises on a mangled tag.
+  def test_encoded_parts_keep_their_tag_and_identifiers
+    ctx = scrubbing_ctx
+    s = ctx[:sessions].create
+    part = Terret::LLM.encode_part(
+      Terret::LLM::ToolCall.new(id: "abc123", name: "deploy", args: { token: "abc123" })
+    )
+    ev = ctx[:sessions].append(s.id, "assistant/message", { parts: [part] })
+    stored = ev.payload[:parts].first
+    assert_equal "tool_call", stored[:type]
+    assert_equal "abc123", stored[:id]
+    assert_equal "[REDACTED]", stored[:args][:token]
+    assert_equal [Terret::LLM::ToolCall], ctx[:sessions].fetch(s.id).events.last
+                 .payload[:parts].map { |p| Terret::LLM.decode_part(p).class }
+  end
+
+  # The exemption is positional, not by name: `args` and a Hash-valued
+  # `content` are shaped by the tool author and the model, and `Write` really
+  # does take an args[:content] holding a whole file.
+  def test_model_supplied_keys_that_shadow_structural_names_are_still_scrubbed
+    ctx = scrubbing_ctx
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "tool/call",
+                               { id: "abc123", name: "Write",
+                                 args: { name: "abc123", id: "abc123", content: "abc123" } })
+    assert_equal "abc123", ev.payload[:id]
+    assert_equal({ name: "[REDACTED]", id: "[REDACTED]", content: "[REDACTED]" }, ev.payload[:args])
+  end
+
+  def test_lineage_verdicts_and_policy_are_never_scrubbed
+    ctx = scrubbing_ctx
+    parent = ctx[:sessions].create(id: "abc123")
+    child = ctx[:sessions].fork("abc123", child_id: "def456")
+    assert_equal "abc123", child.events.last.payload[:from]
+    assert_equal "abc123", ctx[:sessions].resume("def456").parent_id
+
+    ctx[:sessions].append(parent.id, "approval/resolved",
+                          { call_id: "abc123", verdict: "approved", reason: "abc123 looked fine" })
+    resolved = parent.events.last.payload
+    assert_equal "abc123", resolved[:call_id]
+    assert_equal "approved", resolved[:verdict]
+    assert_equal "[REDACTED] looked fine", resolved[:reason], "a human's words are content"
+
+    ctx[:sessions].append(parent.id, "policy/updated", { patterns: ["abc123*"] })
+    assert_equal ["abc123*"], parent.events.last.payload[:patterns],
+                 "rewriting the allow list silently changes what the agent may run"
+  end
+
+  def test_symbol_values_are_scrubbed_and_stored_as_utf8
+    ctx = scrubbing_ctx(->(t) { t.gsub("secret", "[REDACTED]") })
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "user/message", { text: :"a secret" })
+    assert_equal "a [REDACTED]", ev.payload[:text]
+    assert_equal Encoding::UTF_8, ev.payload[:text].encoding
+  end
+
+  def test_a_raising_scrubber_propagates_and_stores_nothing
+    ctx = scrubbing_ctx(->(_t) { raise ArgumentError, "scrubber bug" })
+    s = ctx[:sessions].create
+    assert_raises(ArgumentError) { ctx[:sessions].append(s.id, "user/message", { text: "hi" }) }
+    assert_equal %w[session/created], s.events.map(&:type)
+    assert_equal s.events, ctx[:sessions].read(s.id)
+  end
+
+  # The same bleed Registry#register closed: a scrubber a forked agent scope
+  # registers must not outlive that scope.
+  def test_a_scrubber_can_be_scoped_to_a_forked_context
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    fork = ctx.fork
+    fork.with_owner("agent") do
+      ctx[:sessions].register_scrubber(->(t) { t.gsub("secret", "[REDACTED]") }, ctx: fork)
+    end
+    assert_equal "a [REDACTED]", ctx[:sessions].append(s.id, "user/message", { text: "a secret" })
+                                                .payload[:text]
+    fork.dispose!
+    assert_equal "a secret", ctx[:sessions].append(s.id, "user/message", { text: "a secret" })
+                                           .payload[:text]
+  end
+
   # A scrubber is a plugin, not model data: it may crash loudly, and it must,
   # because the alternative is a poisoned payload landing in the store with
   # nothing left to blame.

@@ -25,6 +25,24 @@ module Terret
 
     Session = Struct.new(:id, :events, :parent_id, keyword_init: true)
 
+    # Payload keys whose values the harness or the provider minted to point at
+    # something else: tool call ids and their approval foreign keys, the part
+    # tag decode_part dispatches on, lineage, verdicts, the live allow list.
+    # A pattern written for a credential — long hex, a UUID shape — matches
+    # these too, and rewriting one protects nothing (none of it is
+    # model-carried) while it can wreck the log for good: two tool calls that
+    # collapse to one id are a request providers reject, a mangled tag makes
+    # the session undecodable, and a rewritten pattern list silently changes
+    # what an agent may run. Add a key here only when the harness itself
+    # generates its value.
+    STRUCTURAL_KEYS = %i[id call_id name type verdict status agent parent_id
+                         from boundary upto_seq n patterns].freeze
+
+    # Keys whose value is a structural CONTAINER rather than a leaf: the
+    # exemption reaches through them to the identifiers inside, because an
+    # assistant message's encoded parts each carry their own tag and id.
+    STRUCTURAL_CONTAINERS = %i[parts].freeze
+
     def start(ctx)
       @ctx = ctx
       @store = ctx[:session_store]
@@ -50,13 +68,26 @@ module Terret
     #
     # Scrubbers fold in registration order: each is handed the previous one's
     # output, so a later one can rewrite what an earlier one produced.
+    # What a live in-memory value would look like once stored, for a caller
+    # that has to compare one against a payload already in the log — the
+    # approvals gate matches a recorded verdict on the call's args, and
+    # scrubbing rewrites one side of that comparison. CONTENT scope, because
+    # such a value always sits nested under a content key (`args`), so its own
+    # keys get no structural exemption.
+    def stored_form(value) = normalize_payload(value, structural: false)
+
     # Whether anything is registered. Callers that must reshape what they
     # append to give a scrubber a fair look at it — the loop's chunk carry —
     # ask this so they can stay exactly as they were when nobody is scrubbing.
     def scrubbing? = !@scrubbers.empty?
 
-    def register_scrubber(callable)
-      @ctx.effect do
+    # `ctx:` decides the registration's LIFETIME, not its reach: the scrubber
+    # list is the service's, so a scrubber always sees every append, but a
+    # caller passing its forked agent context ties ownership to that fork —
+    # the same bleed Registry#register closed, where a registration made by an
+    # agent outlived the agent that made it.
+    def register_scrubber(callable, ctx: @ctx)
+      ctx.effect do
         @scrubbers << callable
         # Identity, not ==: removing "the entry equal to this callable" would
         # take a twin down with it if the same object were registered twice,
@@ -256,7 +287,11 @@ module Terret
     # booleans, nil, arrays, and symbol-keyed hashes of the same. Symbols in
     # value position become strings; string keys become symbols. Anything
     # else raises — typed objects are encoded at the edges (LLM.encode_part).
-    def normalize_payload(value)
+    #
+    # `scrub` and `structural` carry the redaction scope down the recursion:
+    # see STRUCTURAL_KEYS for what the exemption is and #child_scope for
+    # where it stops.
+    def normalize_payload(value, scrub: true, structural: true)
       case value
       when Integer, true, false, nil then value
       when String
@@ -272,13 +307,17 @@ module Terret
 
         # After validation, so a scrubber is always handed storable UTF-8 —
         # and re-validated below, because it hands something back.
-        @scrubbers.empty? ? utf8 : scrub(utf8)
+        scrub && !@scrubbers.empty? ? scrub_string(utf8) : utf8
       when Float
         raise NonPrimitivePayload, "non-finite Float is not storable" unless value.finite?
 
         value
-      when Symbol then value.to_s
-      when Array then value.map { |v| normalize_payload(v) }
+        # Through the String arm rather than straight to the store: a symbol
+        # in value position is content like any other, and `to_s` on an
+        # ASCII-only symbol hands back a US-ASCII string that no scrubber
+        # would have seen and no encoding check would have normalized.
+      when Symbol then normalize_payload(value.to_s, scrub:, structural:)
+      when Array then value.map { |v| normalize_payload(v, scrub:, structural:) }
       when Hash
         value.each_with_object({}) do |(k, v), out|
           key = case k
@@ -288,11 +327,27 @@ module Terret
                 end
           raise NonPrimitivePayload, "duplicate key #{key.inspect} after coercion" if out.key?(key)
 
-          out[key] = normalize_payload(v)
+          child_scrub, child_structural = child_scope(key, scrub, structural)
+          out[key] = normalize_payload(v, scrub: child_scrub, structural: child_structural)
         end
       else
         raise NonPrimitivePayload, "#{value.class} is not storable; encode it first"
       end
+    end
+
+    # Where a key sits decides whether its value is exempt, because the same
+    # NAME means different things at different depths: `parts[0][:name]` is
+    # the tool a model called, while `args[:name]` is a terminal name the
+    # model itself wrote and `args[:content]` is a whole file. So the
+    # exemption holds only while nothing content-bearing has been entered:
+    # descending into anything outside these two lists turns it off for good,
+    # and everything below that point is scrubbed whatever it is called.
+    def child_scope(key, scrub, structural)
+      return [false, false] unless scrub # already inside an exempt subtree
+      return [false, false] if structural && STRUCTURAL_KEYS.include?(key)
+      return [true, true]   if structural && STRUCTURAL_CONTAINERS.include?(key)
+
+      [true, false]
     end
 
     # Fold a payload string through the registered scrubbers, checking each
@@ -303,7 +358,7 @@ module Terret
     # data must never crash the harness, but a broken PLUGIN may and should —
     # so this raises, naming the offender (a Proc's inspect carries its
     # source location) rather than repairing what it cannot guess at.
-    def scrub(text)
+    def scrub_string(text)
       @scrubbers.reduce(text) do |acc, scrubber|
         out = scrubber.call(acc)
         unless out.is_a?(String)

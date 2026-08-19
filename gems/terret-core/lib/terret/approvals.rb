@@ -120,9 +120,12 @@ module Terret
       end
 
       # Args reach the log through Sessions' primitives contract (symbol keys,
-      # symbols in value position stringified); a JSON round trip lands on the
-      # same shape, so the comparison above is against what was really stored.
-      def stored_form(args) = JSON.parse(JSON.generate(args), symbolize_names: true)
+      # symbols in value position stringified) AND through any registered
+      # scrubber, so the comparison above is against what was really stored.
+      # Asking Sessions rather than round-tripping JSON here is what keeps a
+      # redacted argument from making an approved call ask a second time:
+      # every rewrite the append applies has to be applied to this side too.
+      def stored_form(args) = @ctx[:sessions].stored_form(args)
 
       def park(call)
         q = Thread::Queue.new
