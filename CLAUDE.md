@@ -44,9 +44,13 @@ repo:
   boot, each workspace dir bind-mounted at the same absolute path, argv wrapped into
   `docker exec`, `--network none` by default. One patch row moves the execution world into
   it; docker-gated tests skip clean when the daemon is absent.
-- `gems/terret` is a placeholder holding the name. It will carry profiles and boot.
-  None of that is written. Do not add real behaviour here without reading §5 and §9 of
-  the plan first.
+- `gems/terret` is the meta-gem and the composition layer (M8, plan §7): bundles ship
+  ordered config rows, profiles stack bundles, patches adjust rows by id, and
+  `Terret.boot` hands the result to the Hames loader. It ships `terret-base`
+  (`config/bundle.yml`), the `headless` profile template, and the `trt` executable
+  (`boot`, `dump-config`, `doctor`). The contract is `docs/composition.md`; read it and
+  plan §7 before changing anything here. `Terret::Meta::VERSION` is the gem's version —
+  `Terret::VERSION` belongs to terret-core.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
 here covers M0–M7: kernel, session log with the invariant, tools pipeline, loop, the
@@ -75,6 +79,7 @@ bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture
 ruby examples/lifecycle_demo.rb   # park/resume, compaction, titling, cost, hot policy
 ruby examples/exec_demo.rb   # file tools, shell, terminals, redaction; the container act needs docker
 ruby examples/subagent_demo.rb   # Task delegation, background jobs, TodoWrite, the tool barrier
+ruby examples/boot_demo.rb   # bundles, profiles, patches; dump-config, boot, one turn
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and `terret-core` have zero

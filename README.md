@@ -54,8 +54,15 @@ Eleven gems in one repo:
   moves the whole execution world into a long-lived container, with each
   workspace directory bind-mounted at the same absolute path and
   `--network none` by default.
-- `gems/terret` is a placeholder holding the name. It will carry profiles
-  and boot. None of that is written yet.
+- `gems/terret` is the meta-gem: the composition layer and the `trt`
+  command. Bundles ship ordered config rows, profiles stack bundles,
+  patches adjust rows by id, and `Terret.boot` hands the result to the
+  Hames loader — so which plugins run, in what order, with what config is
+  a question YAML answers rather than Ruby. Ships `terret-base` (the log,
+  the harness, the model seam, the execution world sandboxed with the
+  network denied, the standard tool roster, and a policy floor that starts
+  closed), the `headless` profile template, and `trt boot` /
+  `trt dump-config` / `trt doctor`. Contract in `docs/composition.md`.
 
 ## Status
 
@@ -95,6 +102,7 @@ bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture
 ruby examples/lifecycle_demo.rb   # park/resume, compaction, titling, cost, hot policy
 ruby examples/exec_demo.rb   # file tools, shell, terminals, redaction; the container act needs docker
 ruby examples/subagent_demo.rb   # Task delegation, background jobs, TodoWrite, the tool barrier
+ruby examples/boot_demo.rb   # bundles, profiles, patches; dump-config, boot, one turn
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and
