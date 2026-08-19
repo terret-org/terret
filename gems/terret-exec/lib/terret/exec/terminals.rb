@@ -14,6 +14,15 @@ module Terret
     # owner should be able to learn about another's terminals.
     NoSuchTerminal = Class.new(Terret::Tools::Failure)
 
+    # The terminal is still registered, but the process behind it has exited.
+    # A typed refusal rather than a silent no-op, and rather than the raw
+    # Errno::EIO the pty master raises: the caller asked to type into
+    # something, nothing received it, and a model reading the result deserves
+    # a sentence naming the terminal instead of a device path. #read answers
+    # the same situation with nil, because "nothing to say" and "nothing left
+    # to say it" are the same shape to a reader.
+    TerminalGone = Class.new(Terret::Tools::Failure)
+
     # A name this owner is already using. Opening over it would drop the
     # handle to a running process — unreapable, since nothing would hold its
     # pid any more — so the refusal is what keeps disposal honest.
@@ -83,7 +92,11 @@ module Terret
         Terminal.new(name: name, owner: owner, pid: handle.pid)
       end
 
-      def input(name, text, session: DEFAULT_SESSION) = fetch(name, session).write(text)
+      def input(name, text, session: DEFAULT_SESSION)
+        fetch(name, session).write(text)
+      rescue Errno::EIO, Errno::EPIPE, IOError
+        raise TerminalGone, "the terminal named #{name} has no live process; close it and open another"
+      end
 
       # "" means the terminal is alive with nothing to say; nil means its child
       # is gone. The entry survives that EOF — reading is not disposal, and the

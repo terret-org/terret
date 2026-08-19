@@ -4,9 +4,12 @@ Gem::Specification.new do |s|
   s.summary = "The execution-world gem for Terret: workspace-scoped filesystem and process seams"
   s.description = "ctx[:fs]: workspace-contained file ops (read/write/edit/stat/glob) " \
                   "behind an fs/authorize waterfall, with realpath-based containment " \
-                  "that fails closed on traversal and symlink escapes. The subprocess, " \
-                  "shell, terminal, and sandbox seams land in this same gem next. Zero " \
-                  "runtime dependencies beyond stdlib."
+                  "that fails closed on traversal and symlink escapes. ctx[:subprocess] " \
+                  "spawns and captures under the fiber scheduler with cooperative " \
+                  "cancellation; ctx[:shell] keeps a bash per agent alive across calls; " \
+                  "ctx[:terminals] holds named long-lived PTYs; and every argv reaches a " \
+                  "process through the ctx[:sandbox] seam. Zero runtime dependencies " \
+                  "beyond stdlib."
   s.authors = ["Obie Fernandez"]
   s.email = ["obiefernandez@gmail.com"]
   s.homepage = "https://terret.org"

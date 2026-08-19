@@ -153,6 +153,26 @@ class TerminalsTest < Minitest::Test
     assert_kind_of Terret::Tools::Failure, err
   end
 
+  def test_input_to_a_terminal_whose_child_is_gone_is_refused
+    ctx, = boot
+    ctx[:terminals].open("brief", [RUBY, "-e", "exit 0"])
+    deadline = now + 5
+    chunk = +""
+    chunk = ctx[:terminals].read("brief") while chunk && now < deadline
+    assert_nil chunk, "the child has to be gone before this proves anything"
+
+    err = assert_raises(Terret::Exec::TerminalGone) { ctx[:terminals].input("brief", "hi\n") }
+    assert_kind_of Terret::Tools::Failure, err
+    assert_match(/brief/, err.message)
+  end
+
+  def test_close_all_twice_is_harmless
+    ctx, = boot
+    ctx[:terminals].open("repl", ["cat"])
+    ctx[:terminals].close_all
+    ctx[:terminals].close_all # must not raise
+  end
+
   def test_reading_an_unknown_terminal_is_refused
     ctx, = boot
     assert_raises(Terret::Exec::NoSuchTerminal) { ctx[:terminals].read("ghost") }

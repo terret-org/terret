@@ -27,6 +27,12 @@ class ShellTest < Minitest::Test
     end
   end
 
+  # Whatever the shell asks to spawn, it gets a process that exits at once —
+  # the shape of a bash that is not installed, or a container that refuses.
+  class DeadShellSandbox < Terret::Exec::SandboxNone
+    def wrap(_argv, cwd:) = [RbConfig.ruby, "-e", "exit 0"]
+  end
+
   def boot(config: {}, sandbox: Terret::Exec::SandboxNone)
     Hames.reset_events!
     Terret.declare_events!
@@ -219,6 +225,39 @@ class ShellTest < Minitest::Test
     assert_nil r.status
   end
 
+  # -- the output cap -------------------------------------------------------
+
+  def test_output_past_the_cap_is_truncated_and_the_run_still_completes
+    ctx, = boot(config: { max_output: 4096 })
+    r = ctx[:shell].run(%(#{RUBY} -e "print 'x' * 200_000"))
+
+    assert_equal 0, r.status, "the run must still reach its marker and report the real status"
+    assert_equal 4096, r.stdout.bytesize
+    assert_match(/truncated/, r.notice)
+    assert_match(/4096/, r.notice, "the notice must say how much was kept")
+    assert_match(/195904/, r.notice, "the notice must say how much was dropped, exactly")
+  end
+
+  def test_a_run_inside_the_cap_carries_no_truncation_notice
+    ctx, = boot(config: { max_output: 4096 })
+    assert_nil ctx[:shell].run("echo small").notice
+  end
+
+  def test_the_session_is_still_usable_after_a_truncated_run
+    ctx, = boot(config: { max_output: 4096 })
+    ctx[:shell].run(%(#{RUBY} -e "print 'x' * 200_000"))
+
+    assert_equal "after\n", ctx[:shell].run("echo after").stdout
+  end
+
+  def test_a_cap_smaller_than_the_marker_window_still_finds_the_marker
+    ctx, = boot(config: { max_output: 8 })
+    r = ctx[:shell].run(%(#{RUBY} -e "print 'x' * 50_000"))
+
+    assert_equal 0, r.status
+    assert_equal 8, r.stdout.bytesize
+  end
+
   # -- a session that ends on its own ---------------------------------------
 
   def test_a_command_that_ends_the_shell_reports_no_status_and_says_so
@@ -335,6 +374,26 @@ class ShellTest < Minitest::Test
     assert_nil ctx[:shell].pid(session: "cold")
     ctx[:shell].run("true", session: "cold")
     assert_kind_of Integer, ctx[:shell].pid(session: "cold")
+  end
+
+  def test_close_all_twice_is_harmless
+    ctx, = boot
+    ctx[:shell].run("true", session: "a")
+    ctx[:shell].close_all
+    ctx[:shell].close_all # must not raise
+
+    assert_nil ctx[:shell].pid(session: "a")
+  end
+
+  def test_a_shell_that_never_answers_its_handshake_is_a_typed_failure
+    ctx, = boot(sandbox: DeadShellSandbox)
+    err = assert_raises(Terret::Exec::ShellUnavailable) { ctx[:shell].run("echo hi") }
+
+    assert_kind_of Terret::Tools::Failure, err
+    assert_nil ctx[:shell].pid, "a session that never became usable must not be held"
+    # the in-flight guard has to be released on the raising path too, or the
+    # next attempt would report the wrong thing entirely
+    assert_raises(Terret::Exec::ShellUnavailable) { ctx[:shell].run("echo hi") }
   end
 
   def test_unloading_the_row_reaps_every_live_session

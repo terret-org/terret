@@ -34,6 +34,14 @@ module Terret
     # exact rather than lucky — the only other place the sentinel can appear
     # in the stream is a terminal echo of the request line, where `%s` follows
     # it instead of a status.
+    #
+    # There is deliberately no cap on the number of sessions, where
+    # ctx[:terminals] caps names hard. The difference is who supplies the key:
+    # a session key is an agent id the harness hands in, so the count is
+    # bounded by the agents the harness chose to run, while a terminal name
+    # comes from a tool call the model wrote and is therefore something a model
+    # can mint without limit. Capping the harness against itself would only
+    # move the failure somewhere less honest.
     class Shell < Hames::Service
       service_key :shell
       inject :subprocess
@@ -61,14 +69,36 @@ module Terret
       HANDSHAKE_TIMEOUT = 10
       CHUNK = 64 * 1024
 
+      # What one run may buffer. A command that writes without pause fills this
+      # process's memory at whatever rate the terminal will carry — measured
+      # here at 11.4MB in three seconds, so the default 120s timeout puts
+      # roughly 450MB within reach of a single `yes`. One mebibyte is far more
+      # than a model can read (the Bash tool caps what it shows at a fraction
+      # of it) and far less than a runaway command needs to hurt the host; the
+      # limit is a memory bound, not a display decision, which is why the tool
+      # layer still applies its own smaller one.
+      DEFAULT_MAX_OUTPUT = 1 << 20
+
+      # Once the cap is reached the tail of the stream is still scanned for the
+      # marker, in a window this size. It only has to be longer than a marker
+      # (a 38-byte sentinel, a status, a newline) for a marker split across two
+      # reads to survive the trim.
+      MARKER_WINDOW = 256
+
       # A session that is not reused is never left half-drained, so the budget
       # only bounds the pathological case: a background job spewing without
-      # pause between two runs.
+      # pause between two runs. When it does lose that race the remainder is
+      # not lost, it simply arrives inside the next run's output — the same
+      # thing a human sees when a background job prints over their next
+      # command, and a better answer than reading a spewing terminal forever.
       DRAIN_BUDGET = 0.1
 
       # How long a session gets to leave on its own before the handle's reaper
       # takes over. Bounded, because a shell still busy with a command will not
-      # read the request at all.
+      # read the request at all — and in exactly that case disposal costs this
+      # budget plus the reaper's own grace before the SIGKILL lands (measured:
+      # a close that would take 3s takes 6.01s when a child is still writing),
+      # because bash never gets to the `exit`.
       FAREWELL_BUDGET = 1.0
 
       # ETX — what a human's ^C is on the wire. The line discipline turns it
@@ -167,7 +197,12 @@ module Terret
 
         return ended(key, "", notices) unless write(s, request(s, cmd))
 
-        outcome, out = collect(s, monotonic + timeout)
+        outcome, out, dropped = collect(s, monotonic + timeout)
+        if dropped.positive?
+          notices << "output truncated at max_output: kept the first #{out.bytesize} bytes " \
+                     "and dropped #{dropped} more"
+        end
+
         case outcome
         when :timeout then timed_out(key, s, out, notices, timeout)
         when :eof then ended(key, out, notices)
@@ -176,6 +211,7 @@ module Terret
       end
 
       def default_timeout = config[:timeout] || DEFAULT_TIMEOUT
+      def max_output = config[:max_output] || DEFAULT_MAX_OUTPUT
       def cwd = config[:cwd] || Dir.pwd
       def env = config[:env] || {}
 
@@ -220,27 +256,58 @@ module Terret
       end
 
       # Reads until the marker, the deadline, or the end of the shell. Returns
-      # [status, stdout] for a command that reported one, or [:timeout, partial]
-      # / [:eof, partial] for the two ways it may not have.
+      # [status, stdout, dropped] for a command that reported one, or
+      # [:timeout, partial, dropped] / [:eof, partial, dropped] for the two
+      # ways it may not have.
       #
-      # The buffer stays BINARY until it is sliced: terminal bytes are not
+      # Past `max_output` the kept buffer stops growing, but reading does not:
+      # the marker arrives at the very end of a command's output, so a run that
+      # simply stopped reading would lose the status of every command that ever
+      # exceeded the cap, and would leave the unread bytes to be charged to the
+      # next run. Instead the overflow is counted and discarded, with a window
+      # of it kept so the marker is still found when it comes.
+      #
+      # The buffers stay BINARY until they are sliced: terminal bytes are not
       # guaranteed to be valid UTF-8, and matching against a BINARY string is
       # the one form that cannot raise on a child emitting whatever it likes.
       def collect(s, deadline)
-        buf = String.new(encoding: Encoding::BINARY)
+        kept = String.new(encoding: Encoding::BINARY)
+        tail = nil # the rolling window, once the cap is reached
+        seen = 0   # every output byte the command produced, kept or not
+        cap = max_output
+
         loop do
-          if (m = s.marker.match(buf))
-            return [Integer(m[1]), text(buf[0...m.begin(0)])]
+          if (m = s.marker.match(tail || kept))
+            out = tail ? kept : kept.byteslice(0, m.begin(0))
+            # everything from the marker on is protocol, not the command's
+            after = (tail || kept).bytesize - m.begin(0)
+            return [Integer(m[1]), text(out), seen - after - out.bytesize]
           end
 
           remaining = deadline - monotonic
-          return [:timeout, text(buf)] if remaining <= 0
+          return [:timeout, text(kept), seen - kept.bytesize] if remaining <= 0
 
           chunk = s.handle.read(CHUNK, timeout: remaining)
-          return [:eof, text(buf)] if chunk.nil?
+          return [:eof, text(kept), seen - kept.bytesize] if chunk.nil?
 
-          buf << chunk.b
+          seen += chunk.bytesize
+          if tail
+            window!(tail << chunk.b)
+          else
+            kept << chunk.b
+            next if kept.bytesize <= cap
+
+            # keep the first `cap` bytes; carry a window across the cut so a
+            # marker straddling it is still whole in the tail
+            tail = window!(kept.byteslice([cap - MARKER_WINDOW, 0].max..))
+            kept = kept.byteslice(0, cap)
+          end
         end
+      end
+
+      def window!(buf)
+        buf.slice!(0, buf.bytesize - MARKER_WINDOW) if buf.bytesize > MARKER_WINDOW
+        buf
       end
 
       # Bytes sitting on the terminal between two runs belong to whatever wrote
