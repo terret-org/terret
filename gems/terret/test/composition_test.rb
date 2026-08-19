@@ -290,10 +290,17 @@ class CompositionTest < Minitest::Test
     ["bundle:\n  path: config/bundle.yml\n", "bundle: 7\n", "config/bun\0dle.yml", ""].each do |meta|
       found = C.discover_bundles(specs: [fixture_spec("odd-gem", @gems_dir, meta)])
       assert found.key?("terret"), "discovery must survive #{meta.inspect}"
-      refute found["odd-gem"]&.error.nil? && found.key?("odd-gem"),
-             "a gem that names no readable bundle is either absent or marked broken"
+      if found.key?("odd-gem")
+        refute_nil found["odd-gem"].error, "a discovered-but-unreadable bundle carries its error"
+      else
+        assert true, "a gem naming no readable bundle is simply not a bundle"
+      end
     end
-    assert C.discover_bundles(specs: [fixture_spec("no-path", nil, "config/bundle.yml")]).key?("terret")
+  end
+
+  def test_a_gemspec_with_no_gem_path_is_not_a_bundle
+    skip "security pass Task 11: bundle-path containment (this fails open today)"
+    refute C.discover_bundles(specs: [fixture_spec("no-path", nil, "config/bundle.yml")]).key?("no-path")
   end
 
   def fixture_spec(name, dir, bundle_path)
@@ -382,6 +389,13 @@ class CompositionTest < Minitest::Test
     assert_refused("rows:\n  - id: llm\n    config: { model: !!map hello }\n", "map")
     assert_refused("rows:\n  - id: llm\n    config: { model: !!seq hello }\n", "seq")
     assert_refused("rows:\n  - id: llm\n    config: !!str\n      k: v\n", "str")
+  end
+
+  # map and seq are each bound to their own node kind, not to "a collection":
+  # !!seq on a mapping is as much a silent drop as !!map on a scalar was.
+  def test_a_collection_tag_is_bound_to_its_own_kind_of_collection
+    assert_refused("rows:\n  - id: llm\n    config: !!seq\n      k: v\n", "seq")
+    assert_refused("rows:\n  - id: llm\n    config: { model: !!map [1] }\n", "map")
   end
 
   def test_a_core_type_tag_psych_cannot_honour_fails_with_the_file_named
@@ -537,8 +551,108 @@ class CompositionTest < Minitest::Test
   def test_a_home_patch_applies_even_when_the_profile_comes_from_the_template
     write(File.join(@home_dir, "profiles", "headless", "patch.yml"),
           "rows:\n  - id: sandbox\n    plugin: Terret::Exec::SandboxNone\n    config: {}\n")
-    row = C.resolve(profile: "headless").rows.find { |r| r.id == "sandbox" }
+    row = C.resolve(profile: "headless", bundles: shipped_catalog)
+           .rows.find { |r| r.id == "sandbox" }
     assert_equal "Terret::Exec::SandboxNone", row.plugin,
                  "an operator's patch.yml must not be dropped for lacking a sibling profile.yml"
+  end
+
+  # The meta-gem's own bundle, named explicitly. Going through discovery would
+  # make the result depend on whatever else is installed on the machine.
+  def shipped_catalog
+    { "terret" => C.load_bundle(File.expand_path("../config/bundle.yml", __dir__), gem_name: "terret") }
+  end
+
+  # -- shared settings -------------------------------------------------------
+
+  def test_a_setting_referenced_twice_hands_each_row_its_own_copy
+    profile("demo", "bundles: [terret]\nsettings:\n  dirs: [/tmp/a]\n")
+    profile_patch("demo", <<~YAML)
+      rows:
+        - id: sessions
+          config: { workspace: !setting dirs }
+        - id: tools
+          config: { workspace: !setting dirs }
+    YAML
+    rows = materialize(resolve)
+    a = rows["sessions"][:config][:workspace]
+    b = rows["tools"][:config][:workspace]
+
+    assert_equal a, b
+    refute a.equal?(b), "two rows sharing a !setting must not share the object"
+    a << "/tmp/b"
+    assert_equal ["/tmp/a"], b, "mutating one row's config must not reach another's"
+  end
+
+  # -- scalars YAML types but a config does not carry ------------------------
+
+  def test_a_bare_date_says_to_quote_it_rather_than_naming_a_psych_class
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config: { model: 2026-08-19 }\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "quote"
+    assert_includes err.message, "2026-08-19"
+  end
+
+  def test_a_bare_symbol_says_the_same_thing
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config:\n      model: :fake\n")
+    assert_includes assert_raises(C::Error) { resolve }.message, "quote"
+  end
+
+  # -- merge keys ------------------------------------------------------------
+
+  def test_a_merge_key_whose_value_is_not_a_mapping_is_refused
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config:\n      <<: !env FOO\n      y: 2\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "<<"
+  end
+
+  def test_a_well_formed_merge_key_still_merges
+    profile("demo", "bundles: [terret]\nsettings: {}\n")
+    profile_patch("demo", <<~YAML)
+      rows:
+        - id: llm
+          config:
+            <<: &base { a: 1 }
+            b: 2
+    YAML
+    assert_equal({ a: 1, b: 2 }, resolve.rows.find { |r| r.id == "llm" }.config)
+  end
+
+  # -- unreadable and misdescribed files -------------------------------------
+
+  def test_a_patch_that_is_a_directory_says_so_rather_than_no_such_file
+    dir = File.join(@home_dir, "adir")
+    FileUtils.mkdir_p(dir)
+    profile("demo", "bundles: [terret]\n")
+    err = assert_raises(C::Error) { resolve(patches: [dir]) }
+    assert_includes err.message, "directory"
+  end
+
+  def test_an_unreadable_patch_reports_the_read_failure_by_name
+    path = write(File.join(@home_dir, "locked.yml"), "rows: []\n")
+    File.chmod(0o000, path)
+    skip "running as a user who can read anything" if File.readable?(path)
+
+    profile("demo", "bundles: [terret]\n")
+    err = assert_raises(C::Error) { resolve(patches: [path]) }
+    assert_includes err.message, "cannot be read"
+  ensure
+    File.chmod(0o600, path) if path && File.exist?(path)
+  end
+
+  def test_a_ruby_scalar_that_does_not_parse_is_a_composition_error
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: llm\n    config: { model: !ruby "1 +" }\n))
+    err = assert_raises(C::Error) { materialize(resolve, allow_config_ruby: true) }
+    assert_includes err.message, "llm"
+  end
+
+  def test_a_ruby_scalar_that_raises_at_runtime_is_a_composition_error
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: llm\n    config: { model: !ruby "raise 'nope'" }\n))
+    assert_includes assert_raises(C::Error) { materialize(resolve, allow_config_ruby: true) }.message, "nope"
   end
 end

@@ -24,9 +24,13 @@ module Terret
     # the node it is on (`!!map hello` is the string "hello") or dies inside
     # its own schema handler (`!!str` on a mapping). Both are the silent drop
     # this reader exists to refuse, one type system down.
+    # map and seq are bound to their own node kind rather than to "a
+    # collection": !!seq on a mapping is as much a silent drop as !!map on a
+    # scalar, and Psych ignores both the same way.
     CORE_SCALAR_TAGS = %w[null bool int float str binary].freeze
-    CORE_COLLECTION_TAGS = %w[map seq].freeze
-    CORE_TAGS = (CORE_SCALAR_TAGS + CORE_COLLECTION_TAGS).freeze
+    CORE_MAPPING_TAGS = %w[map].freeze
+    CORE_SEQUENCE_TAGS = %w[seq].freeze
+    CORE_TAGS = (CORE_SCALAR_TAGS + CORE_MAPPING_TAGS + CORE_SEQUENCE_TAGS).freeze
 
     YAML_SCHEMA = "tag:yaml.org,2002:"
 
@@ -65,6 +69,13 @@ module Terret
     # swap plugin: without touching config:, and that swap is the single most
     # consequential edit the format allows — it is how the sandbox gets turned
     # off. Attributing it to the bundle that shipped the row would hide it.
+    #
+    # And a swap that says nothing about config: FORWARDS THE OLD CONFIG to the
+    # new class, whatever that config held: an `!env`-resolved key, a workspace
+    # list, a path. That follows from replacement being per-field, and it is
+    # why the two layers are reported separately — a row whose plugin and
+    # config come from different layers is one worth reading twice. A swap that
+    # should not inherit has to say `config: {}` and mean it.
     Row = Data.define(:id, :plugin, :config, :disabled, :row_layer, :plugin_layer, :config_layer)
 
     # A gem's config/bundle.yml, parsed. `requires` is this implementation's
@@ -139,20 +150,34 @@ module Terret
       end
 
       def visit_Psych_Nodes_Scalar(node)
-        tag = terret_tag(node, CORE_SCALAR_TAGS) or return super
+        tag = terret_tag(node, CORE_SCALAR_TAGS)
+        return register(node, Tagged.new(tag: tag, argument: node.value)) if tag
 
-        register(node, Tagged.new(tag: tag, argument: node.value))
+        begin
+          super
+        rescue Psych::DisallowedClass => e
+          raise Error, needs_quoting(node, e)
+        end
       end
 
       # A collection carrying one of our tags is refused rather than silently
       # dropped, which is what the parent visitor does with one.
       def visit_Psych_Nodes_Mapping(node)
-        refuse_collection_tag!(node)
-        super
+        refuse_collection_tag!(node, CORE_MAPPING_TAGS)
+        mapping = super
+        # Psych merges `<<` only when it points at a mapping. Anything else it
+        # leaves as a literal "<<" key — a String among symbols, and a merge
+        # the author believed had happened.
+        if mapping.is_a?(Hash) && mapping.key?("<<")
+          raise Error, "#{@label}: a << merge key must point at a mapping or a list of them; " \
+                       "anything else is not a merge, and would land as a literal \"<<\" key"
+        end
+
+        mapping
       end
 
       def visit_Psych_Nodes_Sequence(node)
-        refuse_collection_tag!(node)
+        refuse_collection_tag!(node, CORE_SEQUENCE_TAGS)
         super
       end
 
@@ -169,10 +194,20 @@ module Terret
         raise Error, refusal(name, node.tag, core_allowed)
       end
 
-      def refuse_collection_tag!(node)
-        name = terret_tag(node, CORE_COLLECTION_TAGS) or return
+      def refuse_collection_tag!(node, core_allowed)
+        name = terret_tag(node, core_allowed) or return
 
         raise Error, "#{@label}: !#{name} tags a scalar, not a collection"
+      end
+
+      # YAML resolves an unquoted 2026-08-19 to a Date, :fake to a Symbol, and
+      # so on. A Terret config carries plain data, so the restricted loader
+      # refuses to build any of them — but "Tried to load unspecified class:
+      # Date" describes the machinery rather than the fix.
+      def needs_quoting(node, error)
+        klass = error.message[/unspecified class:\s*(\S+)/, 1] || "value"
+        "#{@label}: #{node.value.inspect} reads as a #{klass}, and a Terret config " \
+          "carries only plain data — quote it (\"#{node.value}\") to keep it a string."
       end
 
       def refusal(name, raw, core_allowed)
@@ -208,9 +243,16 @@ module Terret
 
     def self.parse_file(path, label: nil)
       label ||= path
+      raise Error, "#{label}: is a directory, not a config file" if File.directory?(path)
       raise Error, "#{label}: no such file" unless File.file?(path)
 
-      Visitor.load(File.read(path), label: label) || {}
+      body = begin
+        File.read(path)
+      rescue SystemCallError, IOError => e
+        raise Error, "#{label}: cannot be read: #{e.message}"
+      end
+
+      Visitor.load(body, label: label) || {}
     end
 
     # Every file that carries rows carries them the same way. A patch that is a
@@ -283,12 +325,26 @@ module Terret
       keys = path.to_s.split(".").map(&:to_sym)
       raise Error, "#{where}: !setting with an empty path" if keys.empty?
 
-      keys.reduce(settings) do |node, key|
+      found = keys.reduce(settings) do |node, key|
         unless node.is_a?(Hash) && node.key?(key)
           raise Error, "#{where}: !setting #{path} resolves to nothing in the profile's settings"
         end
 
         node[key]
+      end
+
+      # A copy per reference. `workspace:` is read by the fs row and the
+      # sandbox row, and handing both the same Array means one service
+      # mutating its own config silently rewrites another's.
+      deep_dup(found)
+    end
+
+    def self.deep_dup(value)
+      case value
+      when Hash then value.to_h { |k, v| [k, deep_dup(v)] }
+      when Array then value.map { |v| deep_dup(v) }
+      when String then value.dup
+      else value
       end
     end
 
@@ -301,7 +357,14 @@ module Terret
                      "(trt --allow-config-ruby) to let this profile run Ruby"
       end
 
-      Object.new.instance_eval { binding }.eval(source, "(!ruby)")
+      begin
+        Object.new.instance_eval { binding }.eval(source, "(!ruby)")
+      rescue ScriptError, StandardError => e
+        # ScriptError is not a StandardError, so a !ruby that does not even
+        # parse would otherwise walk past every rescue between here and the
+        # operator's terminal.
+        raise Error, "#{where}: !ruby #{source}: #{e.class}: #{e.message.lines.first.to_s.strip}"
+      end
     end
 
     # -- bundles ---------------------------------------------------------------
@@ -317,13 +380,16 @@ module Terret
                  requires: Array(doc[:requires]).map(&:to_s), rows: rows_in(doc, gem_name), error: nil)
     end
 
-    # Discovery scans loaded gemspecs for the metadata key and parses the
-    # referenced file. A third-party gem becomes discoverable by shipping
-    # normally — nothing to register, nothing to symlink.
+    # Discovery walks every gemspec Gem::Specification knows about — under
+    # Bundler that is the bundle, and outside it every gem installed on the
+    # machine, loaded or not — reads the metadata key, and parses the file it
+    # points at. A third-party gem becomes discoverable by shipping normally:
+    # nothing to register, nothing to symlink.
     #
-    # The meta-gem's own terret-base is seeded from this checkout first, so a
-    # monorepo run resolves `terret` with no gem installation; an installed
-    # terret gemspec then overwrites it with its own copy.
+    # The meta-gem's own terret-base is seeded from this checkout first, and an
+    # installed terret gemspec then overwrites it. So a monorepo run resolves
+    # `terret` with no gem installation, and an installed copy wins over the
+    # checkout when both are present.
     def self.discover_bundles(specs: Gem::Specification)
       found = {}
       own = File.expand_path("../../config/bundle.yml", __dir__)
@@ -467,7 +533,9 @@ module Terret
     def self.unknown_bundle_message(profile, name, catalog)
       "profile #{profile.to_s.inspect} names unknown bundle #{name.inspect}. " \
         "Discovered: #{catalog.keys.sort.join(', ')}. " \
-        "A bundle that is installed but not loaded will not appear here."
+        "Discovery reads every gemspec it can see, so a name missing from that " \
+        "list is a gem that is not installed here (or not in this Gemfile), " \
+        "or one that ships no terret bundle metadata."
     end
 
     # Fold the layers into one ordered row list. A bundle's rows append in

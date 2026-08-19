@@ -51,6 +51,13 @@ module Terret
       # requires it.
       err.puts "trt: #{e.message}"
       1
+    rescue SystemCallError, IOError, ScriptError => e
+      # Belt and braces. Resolution turns these into Composition::Error where
+      # it meets them, but a config file is a file on somebody's disk and a
+      # !ruby scalar is a compiler — neither is done surprising us, and a
+      # backtrace is not an error message.
+      err.puts "trt: #{e.class}: #{e.message.lines.first.to_s.strip}"
+      1
     rescue Interrupt
       err.puts "trt: interrupted"
       130

@@ -175,6 +175,45 @@ class CLITest < Minitest::Test
     assert_includes err, "ghost"
   end
 
+  # Every one of these used to leave a backtrace on the terminal: the first two
+  # raise outside Composition::Error, and a bad !ruby raises a ScriptError,
+  # which is not a StandardError at all.
+  def test_a_patch_that_does_not_exist_exits_one_with_a_message
+    status, _out, err = run_cli("dump-config", "--profile", demo_profile, "--patch", "/no/such/file.yml")
+    assert_equal 1, status
+    assert_includes err, "trt:"
+    refute_includes err, "cli.rb:"
+  end
+
+  def test_a_patch_that_is_a_directory_says_directory_not_missing
+    dir = File.join(@home_dir, "somedir")
+    FileUtils.mkdir_p(dir)
+    status, _out, err = run_cli("dump-config", "--profile", demo_profile, "--patch", dir)
+    assert_equal 1, status
+    assert_includes err, "directory"
+  end
+
+  def test_an_unreadable_patch_exits_one_with_a_message
+    path = write(File.join(@home_dir, "locked.yml"), "rows: []\n")
+    File.chmod(0o000, path)
+    skip "running as a user who can read anything" if File.readable?(path)
+
+    status, _out, err = run_cli("dump-config", "--profile", demo_profile, "--patch", path)
+    assert_equal 1, status
+    assert_includes err, "cannot be read"
+    refute_includes err, "cli.rb:"
+  ensure
+    File.chmod(0o600, path) if path && File.exist?(path)
+  end
+
+  def test_a_ruby_scalar_that_does_not_parse_exits_one_without_a_backtrace
+    profile_patch(demo_profile, %(rows:\n  - id: llm\n    config: { model: !ruby "1 +" }\n))
+    status, _out, err = run_cli("boot", "--profile", "demo", "--allow-config-ruby")
+    assert_equal 1, status
+    refute_includes err, "cli.rb:"
+    refute_empty err
+  end
+
   # -- the executable --------------------------------------------------------
 
   def test_the_shipped_executable_runs
