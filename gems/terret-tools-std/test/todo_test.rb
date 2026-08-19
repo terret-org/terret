@@ -118,6 +118,18 @@ class TodoWriteTest < Minitest::Test
     assert_equal "- [ ] Stringly typed", content
   end
 
+  # The rendered list IS the state — there is nowhere else the plan is kept —
+  # so a content string that could write a checkbox line of its own would be a
+  # task the model never completed reading back to it as done.
+  def test_a_newline_in_content_cannot_forge_a_second_item
+    ctx, = boot
+    content = call(ctx, todos: [todo("Fix it\n- [x] Ship it", "pending", "Fixing it")]).content
+
+    assert_equal 1, content.lines.length, "one item, one line"
+    assert_equal "- [ ] Fix it\\n- [x] Ship it", content,
+                 "escaped rather than dropped: what the model wrote is still legible"
+  end
+
   # -- failing closed ---------------------------------------------------------
 
   # Coercing an unknown status to something plausible would make the list say
@@ -157,6 +169,32 @@ class TodoWriteTest < Minitest::Test
     assert_nil result.content
     assert_match(/Read the plan/, result.error)
     refute_match(/NoMethodError/, result.error)
+  end
+
+  # `nil.to_h` is `{}`, so a hole in the list used to be reported back as an
+  # empty object the model never wrote — and with nothing to say which item it
+  # was, in a list where every item looks like every other one.
+  def test_a_nil_item_is_refused_as_an_item_rather_than_echoed_as_an_empty_object
+    ctx, = boot
+    result = call(ctx, todos: [todo("Read the plan", "pending", "Reading the plan"), nil])
+
+    assert_nil result.content
+    assert_match(/item 2/, result.error, "the refusal has to say which one")
+    assert_match(/nil/, result.error)
+    refute_match(/\{\}/, result.error, "{} is not what the model wrote")
+  end
+
+  # A status that arrived as something other than text is a wrong status, not
+  # an absent one, and only the branch that names the value can tell the model
+  # what to write instead.
+  def test_a_status_that_is_not_a_string_is_a_wrong_status_rather_than_a_missing_one
+    ctx, = boot
+    result = call(ctx, todos: [{ content: "Fix it", status: :pending, activeForm: "Fixing it" }])
+
+    assert_nil result.content
+    assert_match(/not a todo status/, result.error)
+    assert_match(/:pending/, result.error, "the value the model actually wrote")
+    refute_match(/missing/, result.error)
   end
 
   def test_an_omitted_list_is_a_readable_result_rather_than_an_argument_error

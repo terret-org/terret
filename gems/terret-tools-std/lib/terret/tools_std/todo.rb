@@ -92,32 +92,43 @@ module Terret
                 "{content, status, activeForm} objects"
         end
 
-        todos.map { |item| item!(item) }
+        todos.each_with_index.map { |item, index| item!(item, index + 1) }
       end
 
       # A model writes JSON, and which of the two key shapes an item arrives in
       # depends on the adapter that parsed it. Normalizing once here is cheaper
       # than a validation error nobody can act on for a list that was written
       # correctly.
-      def item!(item)
-        unless item.respond_to?(:to_h) && !item.is_a?(Array)
+      #
+      # Every refusal names the item's POSITION, because in a list of todos
+      # nothing else tells them apart — and a hole in the list has no content
+      # to be named by at all. `nil` is the case that needs saying twice: it
+      # answers `respond_to?(:to_h)` and `nil.to_h` is `{}`, so a missing item
+      # used to be reported back as an empty object the model never wrote.
+      def item!(item, position)
+        unless !item.nil? && item.respond_to?(:to_h) && !item.is_a?(Array)
           raise Terret::Tools::Failure,
                 "every todo must be an object with content, status and activeForm; " \
-                "got #{item.inspect}"
+                "item #{position} is #{item.inspect}"
         end
 
         item = item.to_h.transform_keys(&:to_s)
-        missing = FIELDS.reject { |f| item[f].is_a?(String) }
+
+        # `status` is deliberately not checked for being text here. A status
+        # that arrived as something else is a WRONG status rather than an
+        # absent one, and the branch below is the one that can say so while
+        # naming what the model actually wrote.
+        missing = %w[content activeForm].reject { |f| item[f].is_a?(String) }
         unless missing.empty?
           raise Terret::Tools::Failure,
-                "every todo needs #{FIELDS.join(', ')}; this one is missing " \
+                "every todo needs #{FIELDS.join(', ')}; item #{position} is missing " \
                 "#{missing.join(', ')}: #{item.inspect}"
         end
 
         unless BOXES.key?(item["status"])
           raise Terret::Tools::Failure,
-                "#{item['status'].inspect} is not a todo status; use one of " \
-                "#{BOXES.keys.join(', ')}"
+                "#{item['status'].inspect} is not a todo status (item #{position}); use one " \
+                "of #{BOXES.keys.join(', ')}"
         end
 
         item
@@ -126,8 +137,17 @@ module Terret
       def render(items)
         return "(the todo list is empty)" if items.empty?
 
-        items.map { |item| "- #{BOXES.fetch(item['status'])} #{label(item)}" }.join("\n")
+        items.map { |item| "- #{BOXES.fetch(item['status'])} #{line(item)}" }.join("\n")
       end
+
+      # One item, one line. This is the forgeability register the LEDGER
+      # literal keeps in tools_std/jobs.rb, and it is the one place in the
+      # roster where forging matters rather than merely misleading: the
+      # rendered list IS the state, so a content string carrying a newline
+      # could write a checkbox line of its own and hand the model back a task
+      # it never completed as done. Escaped rather than dropped — what the
+      # model wrote stays legible, it just cannot be a line.
+      def line(item) = label(item).gsub(/[\r\n]/) { |c| c == "\n" ? "\\n" : "\\r" }
 
       # The running item is shown in its active form, which is the one thing
       # activeForm is for; everything else is shown as what it is.
