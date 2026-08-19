@@ -253,6 +253,15 @@ provider sent. A stream that raises mid-run loses that run's chunks
 entirely; `run_turn` closes the failed turn, so no `assistant/message`
 lands for that step either and the two logs agree.
 
+One split survives that: a secret straddling a RUN boundary, where a model
+emits a tool call partway through a credential, still reassembles from the
+two chunks either side of it. What that costs is bounded — the
+authoritative `assistant/message` is scrubbed whole, so the model's own
+context never carries the secret, and only a reader concatenating raw
+chunk events can recover it. It is a far narrower hole than the
+token-boundary split it replaced, which leaked on every stream long enough
+to have one.
+
 Four more limits worth stating plainly. Enabling a redactor does not
 redact history already in the log — the log is append-only, so the
 scrubber governs what is appended from that moment on and nothing before
@@ -261,17 +270,29 @@ entirely, so a vetoed call's result is covered by the append backstop
 alone. Ordering among `post_execute` listeners is not pinned: middleware
 registered ahead of the redactor sees unredacted results, and a contract
 for that ordering is an M8 note rather than something to assume. And
-resume refuses to replay an owed tool call whose stored arguments carry
-the replacement token, because re-running a command with a substituted
-literal is a different command (§7); only the redactor's own token is
-recognized, so a scrubber registered directly with some other replacement
-does not trigger that refusal.
+resume refuses to replay an owed tool call whose stored name OR arguments
+carry the replacement token, because re-running a command with a
+substituted literal is a different command (§7) — and a redacted name
+would otherwise come back as "no such tool", telling a model its roster is
+broken when the log simply rewrote its own record. Only the redactor's own
+token is recognized, so a scrubber registered directly with some other
+replacement does not trigger that refusal.
 
 Patterns are config — regexp source strings, compiled by the redactor
 plugin — until `ctx[:credentials]` (plan §6.9) lands in M8 and can drive
 them from something more structured. State that limit rather than
 implying the redaction is comprehensive: it catches known shapes, not
 unknown ones.
+
+Pick the replacement token with tool names in mind. A deployment whose
+patterns could plausibly match a tool name wants a token matching
+`[A-Za-z0-9_-]+` rather than the default `[REDACTED]`, because a redacted
+name travels into the function names of projected assistant history —
+permanently, the log being append-only — and a provider may reject a
+function name carrying brackets. An over-broad pattern also rewrites words
+inside the refusal message resume appends, which is merely cosmetic and
+has the same cure: patterns narrow enough to match credentials and not
+prose.
 
 ## 7. Destructive tools and at-least-once
 

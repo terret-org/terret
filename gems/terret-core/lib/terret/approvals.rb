@@ -125,10 +125,12 @@ module Terret
         # A value the log refuses has no stored form to compare against — a
         # Time or some other object a plugin synthesized into args, which the
         # JSON round trip this used to do coerced silently. That is a
-        # comparison this method cannot make, not a verdict it found: answering
-        # nil parks the call, exactly as this path behaved before. The raise
-        # must not tear out through the tools pipeline, where it would fail the
-        # whole turn over a question about one call.
+        # comparison this method cannot make, not a verdict it found, so it
+        # answers nil and the call parks. Park re-uses a standing request where
+        # there is one; with no standing request, park's own append of these
+        # same args raises there instead — which is what this path has always
+        # done with a value the log cannot store, and is left alone. Provider
+        # args are JSON primitives, so a model's own call never reaches here.
         nil
       end
 
