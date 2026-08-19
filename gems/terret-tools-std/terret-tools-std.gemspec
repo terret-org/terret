@@ -2,12 +2,14 @@ Gem::Specification.new do |s|
   s.name = "terret-tools-std"
   s.version = "0.1.0"
   s.summary = "The standard tool roster for Terret agents"
-  s.description = "Claude Code's tool names, verbatim: Read, Write, Edit, Glob and " \
-                  "Grep registered on ctx[:tools] with honest mutating/approval/" \
-                  "concurrency metadata. Every handler reaches the filesystem only " \
-                  "through the ctx[:fs] seam, so swapping the sandbox row moves the " \
-                  "whole roster into a container untouched. Zero runtime dependencies " \
-                  "beyond stdlib; ripgrep is used as a fast path when it is present."
+  s.description = "Claude Code's tool names, verbatim wherever it has one: Read, Write, " \
+                  "Edit, Glob, Grep, Bash, WebFetch, Task and TodoWrite, plus snake_case " \
+                  "terminal_* and job_* for the seams it has no equivalent for — all " \
+                  "registered on ctx[:tools] with honest mutating/approval/concurrency " \
+                  "metadata. Every handler reaches the world only through a seam, so " \
+                  "swapping the sandbox row moves the whole roster into a container " \
+                  "untouched. Zero runtime dependencies beyond stdlib; ripgrep is used " \
+                  "as a fast path when it is present."
   s.authors = ["Obie Fernandez"]
   s.email = ["obiefernandez@gmail.com"]
   s.homepage = "https://terret.org"
