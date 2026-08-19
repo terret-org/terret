@@ -313,18 +313,26 @@ about *wrapping*, not about the seam: `Bash` wraps once when its session
 opens, while a job wraps per spawn.
 
 ```ruby
-ctx[:jobs].start(argv, session:, cwd: nil)  # => opaque job id
-ctx[:jobs].collect(id, session:)            # => {status:, exit_status:, output:, truncated:}
-ctx[:jobs].stop(id, session:)               # SIGTERM, escalating to SIGKILL
+ctx[:jobs].start(command, session:, cwd: nil) # => opaque job id
+ctx[:jobs].collect(id, session:)              # => {status:, exit_status:, output:, truncated:}
+ctx[:jobs].stop(id, session:)                 # SIGTERM, escalating to SIGKILL
 ```
+
+`start` takes the command as a string and turns it into the `bash -lc`
+argv above itself, so the one place a shell line becomes a process is the
+seam rather than each of its callers.
 
 `collect` drains the buffer: what it returns is what has accumulated since
 the last call, with `status:` either `:running` or `:exited`. Buffers are
 **byte-capped**, the same cap discipline M7 applied to command output, and
 `truncated:` says so rather than quietly handing back a lie. A per-session
 job cap (config, default 8) refuses the next `start` instead of letting an
-agent fill the process table. An unknown id, or an id belonging to another
-session, fails closed.
+agent fill the process table. A job is forgotten once it has exited and its
+last output has been handed over — everything it will ever say has been said
+by then, and letting the row go is what frees its slot against that cap. An
+unknown id, an id already collected out, and an id belonging to another
+session all fail closed, and all with the same answer: which of the three is
+true is not something one session should learn about another's jobs.
 
 Jobs are **reaped on `agent/disposed`**, the event M7 declared for exactly
 this class of state — per-agent runtime that no registration owns and
@@ -339,19 +347,26 @@ shells and its terminals do.
 | `job_stop` | `true` | `:policy` | `:serial` |
 
 `job_start` takes a `command` string, matching `Bash`'s parameter
-convention rather than inventing a second one; the seam turns it into the
-`bash -lc` argv above. Job tools are
+convention rather than inventing a second one, and hands it to the seam
+exactly as written. Job tools are
 snake_case because they have no Claude Code equivalent to be verbatim
 with — the same rule that produced `terminal_open` in M7.
 
 `job_start` and `job_stop` are `:policy` on a mutating tool, which means a
 **subagent cannot start or stop a job** in a profile where approvals are
-mounted: §2's fail-closed rule denies the call rather than parking it. A child
-can still `job_collect` — that one asks nobody. Delegating "run this long
-thing and watch it" therefore means the parent starts the job and the child
-reads it, which is the shape that was going to be wanted anyway: the job
-outlives the child, and a buffer nobody collects is the failure mode the other
-arrangement produces.
+mounted: §2's fail-closed rule denies the call rather than parking it. And a
+child cannot read its parent's either. A job's ledger is keyed by the session
+that started it, a child's session is fresh (§2), and an id from another
+session fails closed like any other stranger's.
+
+**Jobs and children therefore do not mix in v1.** A parent both starts a job
+and collects it, and hands the child whatever of the output the child needs in
+the prompt it delegates with — which is the only channel the two share anyway.
+The reason is the one §2 already gives for the approvals rule: nothing in the
+runtime links a child's session to its parent's. Until that lineage exists,
+"my parent's job" and "another agent's live process" are the same shape to the
+seam, and fail closed wins. Lineage-scoped job visibility is recorded in plan
+§14 as the design that would lift it.
 
 ### Session-scoped, and not durable
 
