@@ -402,25 +402,27 @@ Two semantics govern how strict this is, and both err the same direction:
   carrying a key from a newer version of a gem should be a warning about
   drift, not a boot that refuses.
 
-Environment probes — is the Docker daemon up, does `OPENROUTER_API_KEY`
-resolve — are printed as **informational lines and never as failures**.
-Doctor validates config, not the world. A doctor that goes red on a laptop
-with Docker Desktop closed is a doctor whose red means nothing within a
-week, and the entire value of the command is that its exit status can be
-trusted in CI. Exit status is 1 when a row's config is actually wrong, and
-0 otherwise.
+Environment probes are printed as **informational lines and never as
+failures**. Doctor validates config, not the world. Concretely, it reports
+each `!env` marker the composition reads and whether it resolves — the state
+a machine holding no secrets is in — because a doctor that goes red on a
+laptop without a key set is a doctor whose red means nothing within a week,
+and the entire value of the command is that its exit status can be trusted in
+CI. (A live daemon probe — is Docker up — is deliberately *not* run: it would
+be slow and non-deterministic, and doctor validates config, not the world.)
+Exit status is 1 when an enabled row's config is actually wrong, and 0
+otherwise; a disabled row cannot mount, so its config never flips the status.
 
 ```
 $ trt doctor --profile headless
 row            plugin                        status
 session_store  Terret::Store::SQLite         ok
 sandbox        Terret::Sandbox::Docker       ok
-llm            Terret::OpenRouter::Adapter   ok
+llm            Terret::LLM::Service          ok
 audit          Acme::Audit                   error: sink must be a String, got nil
 titler         Terret::Titler                unschema'd
 
-info  docker daemon: reachable
-info  OPENROUTER_API_KEY: set
+info  OPENROUTER_API_KEY: unset
 ```
 
 The same declarations generate `docs/config-catalog.md` via `rake

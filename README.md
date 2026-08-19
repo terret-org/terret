@@ -95,6 +95,8 @@ plan as intent.
 ```bash
 rake test              # all suites, plain minitest, no bundler needed
 rake events:catalog    # regenerates docs/events.md
+rake config:catalog    # regenerates docs/config-catalog.md
+trt doctor --profile headless   # validate a profile's config without booting
 ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
@@ -123,6 +125,10 @@ never in the kernel or core.
   against, and where its boundaries honestly stop.
 - `docs/events.md` — the generated event catalog; regenerate with
   `rake events:catalog` whenever an event's contract changes.
+- `docs/config-catalog.md` — the generated config catalog, one section per
+  service with a schema; regenerate with `rake config:catalog` whenever a
+  service's config surface changes. `trt doctor` validates a profile against
+  these same schemas.
 
 ## License
 

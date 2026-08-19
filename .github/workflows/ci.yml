@@ -33,3 +33,11 @@ jobs:
         run: |
           bundle exec rake events:catalog
           git diff --exit-code docs/events.md
+
+      # Every service's config surface is public contract too. docs/config-catalog.md
+      # is generated from each service's Hames::Schema, so a config key that
+      # changes shape shows up in review rather than in a support thread.
+      - name: Config catalog is current
+        run: |
+          bundle exec rake config:catalog
+          git diff --exit-code docs/config-catalog.md

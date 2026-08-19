@@ -151,12 +151,78 @@ class CLITest < Minitest::Test
 
   # -- doctor ----------------------------------------------------------------
 
-  def test_doctor_prints_the_rows_and_is_honest_about_what_it_did_not_check
+  def test_doctor_reports_a_healthy_profile_as_all_ok_and_exits_zero
     status, out, = run_cli("doctor", "--profile", demo_profile)
     assert_equal 0, status
-    assert_includes out, "session_store  Terret::Store::SQLite"
-    assert_includes out, "approvals"
-    assert_includes out, Terret::Doctor::PENDING
+    assert_match(/row\s+plugin\s+status/, out)
+    assert_match(/session_store\s+Terret::Store::SQLite\s+ok/, out)
+    refute_includes out, "error:"
+  end
+
+  # A service that declares no schema is reported, not failed — schemas arrive
+  # service by service (docs/composition.md §9).
+  def test_doctor_marks_an_unschemad_service_and_stays_green
+    status, out, = run_cli("doctor", "--profile", demo_profile)
+    assert_equal 0, status
+    assert_match(/sessions\s+Terret::Sessions\s+unschema'd/, out)
+  end
+
+  def test_doctor_flags_a_wrong_typed_value_naming_the_row_and_key_and_exits_one
+    profile_patch(demo_profile, "rows:\n  - id: session_store\n    config: { path: 123 }\n")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 1, status
+    assert_match(/session_store.*error/, out)
+    assert_includes out, "path must be a String"
+  end
+
+  def test_doctor_flags_a_missing_required_key
+    profile_patch(demo_profile, "rows:\n  - id: session_store\n    config: {}\n")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 1, status
+    assert_includes out, "path is required"
+  end
+
+  # A row whose plugin constant does not resolve is exactly what doctor is for
+  # (docs/composition.md §1), reported rather than discovered halfway through a
+  # boot.
+  def test_doctor_reports_a_plugin_that_does_not_resolve_and_exits_one
+    profile_patch(demo_profile, "rows:\n  - id: sessions\n    plugin: Terret::Nope::Missing\n")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 1, status
+    assert_match(/sessions.*Terret::Nope::Missing.*error/, out)
+  end
+
+  # Config rows grow: a key from a newer gem version warns about drift rather
+  # than failing a boot.
+  def test_doctor_warns_on_an_extra_key_without_going_red
+    profile_patch(demo_profile, "rows:\n  - id: loop\n    config: { max_agents: 4, surprise: 1 }\n")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 0, status
+    assert_match(/loop.*warn/, out)
+    assert_includes out, "surprise"
+  end
+
+  # Doctor validates config, not the world: an unset !env is an informational
+  # line, never a failure. The entire value of the command is that its exit
+  # status can be trusted in CI.
+  def test_doctor_reports_env_markers_as_informational_never_as_failures
+    demo_profile
+    ENV.delete("OPENROUTER_API_KEY")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 0, status
+    assert_match(/info\s+OPENROUTER_API_KEY: unset/, out)
+    refute_includes out, "error:"
+  end
+
+  def test_doctor_reports_a_set_env_marker_as_set
+    demo_profile
+    ENV["OPENROUTER_API_KEY"] = "sk-present"
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 0, status
+    assert_match(/info\s+OPENROUTER_API_KEY: set/, out)
+    refute_includes out, "sk-present", "doctor must not print the resolved secret"
+  ensure
+    ENV.delete("OPENROUTER_API_KEY")
   end
 
   # -- failure ---------------------------------------------------------------

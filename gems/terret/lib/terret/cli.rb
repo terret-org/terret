@@ -67,7 +67,7 @@ module Terret
       case opts.command
       when "boot" then boot(opts, out: out, err: err)
       when "dump-config" then dump_config(opts, out: out)
-      when "doctor" then Doctor.run(resolve(opts), out: out)
+      when "doctor" then Doctor.run(resolve(opts), allow_config_ruby: opts.allow_config_ruby, out: out)
       end
     end
 
