@@ -79,6 +79,28 @@ class JobsTest < Minitest::Test
     assert File.exist?(path), "the job never reached #{path}"
   end
 
+  # A job the harness spawned and never waited on becomes an unreaped zombie
+  # the moment it exits, and stays one until something collects it. `ps` is the
+  # only portable way to see that state: a zombie still answers `kill(0)`, so
+  # #alive? cannot tell one from a running process.
+  def zombie?(pid) = `ps -o stat= -p #{pid} 2>/dev/null`.strip.start_with?("Z")
+
+  def await_zombie(pid, timeout: 5)
+    deadline = now + timeout
+    sleep 0.02 while !zombie?(pid) && now < deadline
+    assert zombie?(pid), "pid #{pid} never became an unreaped zombie"
+  end
+
+  # The pid without a collect. #collect probes the handle, and probing it reaps
+  # a process that has already exited — which is the very state these tests are
+  # about, so they cannot ask the seam for the pid the way start_with_pid does.
+  def start_announcing_pid(ctx, command, dir, name: "pid", session: "s1")
+    path = File.join(dir, name)
+    id = ctx[:jobs].start("echo $$ > #{path}; #{command}", session: session)
+    await_file(path)
+    [id, Integer(File.read(path))]
+  end
+
   # A job that announces its own pid, so a test can watch the process itself
   # rather than take the seam's word for it.
   def start_with_pid(ctx, tail, session: "s1")
@@ -237,13 +259,110 @@ class JobsTest < Minitest::Test
     refute_alive pid
   end
 
-  def test_stopping_a_job_twice_is_refused_the_second_time_rather_than_signalling_a_stranger
+  # Stopping the same job twice with the row still there is one job being
+  # stopped, not two: the handle is idempotent, so the second call is a no-op
+  # that still names the job it was asked about.
+  def test_stopping_a_job_twice_is_idempotent_while_its_row_is_still_there
+    ctx, = boot
+    id, pid = start_with_pid(ctx, "sleep 30")
+
+    assert_equal id, ctx[:jobs].stop(id, session: "s1")
+    assert_equal id, ctx[:jobs].stop(id, session: "s1")
+    refute_alive pid
+  end
+
+  def test_stopping_a_job_after_it_is_collected_out_is_refused_rather_than_signalling_a_stranger
     ctx, = boot
     id, = start_with_pid(ctx, "sleep 30")
 
     ctx[:jobs].stop(id, session: "s1")
     ctx[:jobs].collect(id, session: "s1") # the collect that closes it out
     assert_raises(Terret::Exec::NoSuchJob) { ctx[:jobs].stop(id, session: "s1") }
+  end
+
+  # A job that finished on its own and was never collected is an unreaped
+  # zombie in a process group whose only member is itself. Darwin answers EPERM
+  # rather than ESRCH to a signal aimed at that group, and an errno raised out
+  # of #stop is a job left half-closed: the fd still open, the child still in
+  # the process table, and a raw errno on its way to the model.
+  def test_stopping_a_job_that_finished_on_its_own_and_was_never_collected_still_ends_it
+    Dir.mktmpdir do |dir|
+      ctx, = boot
+      id, pid = start_announcing_pid(ctx, "printf hi", dir)
+      await_zombie(pid)
+
+      assert_equal id, ctx[:jobs].stop(id, session: "s1")
+      refute zombie?(pid), "the stop must collect the child it ended"
+      # and the handle is fully closed: the stream has ended, so the collect
+      # that hands over its last words is also the one that closes the row out
+      assert_equal :exited, ctx[:jobs].collect(id, session: "s1")[:status]
+      assert_raises(Terret::Exec::NoSuchJob) { ctx[:jobs].collect(id, session: "s1") }
+    end
+  end
+
+  # The same corpse, met by disposal instead of by a stop. One job that cannot
+  # be signalled must not strand the ledger behind it — emit isolates the
+  # raise, so the agent is disposed and its live jobs keep running with nothing
+  # left in the harness able to name them.
+  def test_a_finished_job_first_in_the_ledger_does_not_strand_the_jobs_behind_it
+    Dir.mktmpdir do |dir|
+      ctx, = boot
+      _dead, dead_pid = start_announcing_pid(ctx, "printf bye", dir, name: "dead", session: "a")
+      await_zombie(dead_pid)
+      _live, live_pid = start_announcing_pid(ctx, "sleep 60", dir, name: "live", session: "a")
+
+      ctx.emit("agent/disposed", "a")
+
+      refute_alive live_pid
+      refute zombie?(dead_pid), "the finished job's child must be reaped, not left in the table"
+    end
+  end
+
+  # The sweep is what reaches a job's own children, and it has to land while
+  # the pid is provably ours — before anything reaps the leader, exactly as
+  # Shell#discard sweeps before it closes.
+  def test_stopping_a_job_ends_the_children_it_left_behind
+    Dir.mktmpdir do |dir|
+      ctx, = boot
+      path = File.join(dir, "child")
+      id = ctx[:jobs].start("sleep 60 & echo $! > #{path}; sleep 60", session: "s1")
+      await_file(path)
+      child = Integer(File.read(path))
+
+      assert alive?(child)
+      ctx[:jobs].stop(id, session: "s1")
+      refute_alive child
+    end
+  end
+
+  # The other branch: an earlier collect already reaped the leader while a
+  # child of its own kept the pipe open. Nothing may be signalled there — the
+  # pgid stopped being provably ours the moment the leader was reaped — and the
+  # close must still be a clean one that ends the stream.
+  def test_stopping_a_job_whose_leader_was_already_reaped_closes_cleanly
+    child = nil
+    Dir.mktmpdir do |dir|
+      ctx, = boot
+      path = File.join(dir, "child")
+      id = ctx[:jobs].start("sleep 60 & echo $! > #{path}; exit 0", session: "s1")
+      await_file(path)
+      child = Integer(File.read(path))
+
+      deadline = now + 5
+      sleep 0.02 while ctx[:jobs].collect(id, session: "s1")[:status] != :exited && now < deadline
+      assert_equal :exited, ctx[:jobs].collect(id, session: "s1")[:status],
+                   "the leader never exited, so this is not the branch under test"
+
+      assert_equal id, ctx[:jobs].stop(id, session: "s1")
+      assert_equal :exited, ctx[:jobs].collect(id, session: "s1")[:status]
+      assert_raises(Terret::Exec::NoSuchJob) { ctx[:jobs].collect(id, session: "s1") }
+    end
+  ensure
+    begin
+      Process.kill("KILL", child) if child
+    rescue Errno::ESRCH
+      nil
+    end
   end
 
   # -- the cap ----------------------------------------------------------------

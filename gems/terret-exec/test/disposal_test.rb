@@ -6,10 +6,11 @@ require_relative "../lib/terret/exec"
 
 # A disposed agent's forked context reaps its own registrations, but the
 # runtime process state its tool calls created — ctx[:shell]'s bash,
-# ctx[:terminals]' PTYs — is root-mounted and keyed by the agent's session, so
-# nothing in fork disposal reaps it. Without the agent/disposed reaping wired
-# up, every disposed agent leaks a bash (backgrounded jobs and all) plus a PTY
-# per terminal, unboundedly. This exercises the whole loop -> exec path.
+# ctx[:terminals]' PTYs, ctx[:jobs]' background processes — is root-mounted and
+# keyed by the agent's session, so nothing in fork disposal reaps it. Without
+# the agent/disposed reaping wired up, every disposed agent leaks a bash
+# (backgrounded jobs and all) plus a PTY per terminal plus every job it
+# started, unboundedly. This exercises the whole loop -> exec path.
 class DisposalTest < Minitest::Test
   def boot(workspace:)
     Hames.reset_events!
@@ -24,6 +25,7 @@ class DisposalTest < Minitest::Test
       { id: "subprocess", plugin: Terret::Exec::Subprocess },
       { id: "shell",      plugin: Terret::Exec::Shell },
       { id: "terminals",  plugin: Terret::Exec::Terminals },
+      { id: "jobs",       plugin: Terret::Exec::Jobs },
       { id: "llm",  plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
       { id: "loop", plugin: Terret::Loop }
     ])
@@ -48,6 +50,18 @@ class DisposalTest < Minitest::Test
     deadline = now + timeout
     sleep 0.02 while alive?(pid) && now < deadline
     refute alive?(pid), "pid #{pid} should have been reaped on disposal"
+  end
+
+  # A zombie still answers kill(0), so #alive? cannot see the state a finished
+  # job is left in: the harness never waited on it, so it sits in the process
+  # table until something collects it.
+  def zombie?(pid) = `ps -o stat= -p #{pid} 2>/dev/null`.strip.start_with?("Z")
+
+  def await(path, timeout: 5)
+    deadline = now + timeout
+    sleep 0.02 while !File.exist?(path) && now < deadline
+    assert File.exist?(path), "the job never reached #{path}"
+    Integer(File.read(path))
   end
 
   def test_disposing_an_agent_reaps_its_shell_and_terminals
@@ -76,6 +90,37 @@ class DisposalTest < Minitest::Test
       refute_alive_within(t1.pid)
       refute_alive_within(t2.pid)
       assert_nil ctx[:shell].pid(session: sid), "the shell session is no longer registered"
+    end
+  end
+
+  # Jobs are the third piece of per-agent process state, and the only one that
+  # can already be a corpse when disposal arrives: a job that finished on its
+  # own was never waited on, so it is an unreaped zombie alone in its process
+  # group, and Darwin answers a signal aimed at that group with EPERM. One
+  # raise there is isolated by emit — which means the agent is disposed while
+  # every job behind it in the ledger keeps running, holding the agent's
+  # authority with nothing left in the harness able to name it.
+  def test_disposing_an_agent_reaps_its_jobs_including_one_that_already_finished
+    Dir.mktmpdir do |ws|
+      ctx, = boot(workspace: [ws])
+      session = ctx[:sessions].create
+      agent = ctx[:loop].spawn_agent(session_id: session.id)
+      sid = agent.session_id
+
+      ctx[:jobs].start("echo $$ > #{ws}/done", session: sid) # finishes, and nobody collects it
+      finished = await("#{ws}/done")
+      deadline = now + 5
+      sleep 0.02 while !zombie?(finished) && now < deadline
+      ctx[:jobs].start("echo $$ > #{ws}/live; sleep 300", session: sid)
+      live = await("#{ws}/live")
+
+      assert zombie?(finished), "the finished job was never left unreaped; this is not the case"
+      assert alive?(live)
+
+      ctx[:loop].dispose_agent(agent.id)
+
+      refute_alive_within(live)
+      refute zombie?(finished), "the finished job's child must be reaped, not left in the table"
     end
   end
 

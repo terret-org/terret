@@ -397,6 +397,18 @@ finds out: two ids where it expected one, or output that does not match
 what it thinks it started. Harness-level idempotency keys remain a plan §14
 item.
 
+One limit belongs to the seam itself. A `stop` ends the job's whole
+process group — SIGTERM, then SIGKILL after the grace — and that signal
+goes out while the leader is still alive or an unreaped zombie, which is
+what proves the process group is still ours to signal rather than a pgid
+the kernel has since recycled. A job whose leader **exited on its own and
+was already reaped** (a collect noticed it, or the drain fiber did) has no
+such proof left, so nothing is signalled for it at all: a background child
+that job started can outlive the job's disposal. Killing some other
+process that inherited the recycled pgid is the worse of the two failures.
+Bounding the wait without collecting the leader is what would lift it, and
+it is recorded in plan §14 rather than patched around here.
+
 One inherited limit from the Docker provider applies here more than
 anywhere. Signals go to the host-side `docker exec` CLI, not to the
 process inside the container (docs/exec.md §4), so `job_stop` in a

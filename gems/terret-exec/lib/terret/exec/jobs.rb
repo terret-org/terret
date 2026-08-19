@@ -155,13 +155,12 @@ module Terret
       # forgotten. Another session's jobs are untouched.
       def stop_all_for(session)
         owner = session.to_s
-        @jobs.values.select { |job| job.owner == owner }.map do |job|
-          forget(job)
-          job.id
-        end
+        end_each(@jobs.values.select { |job| job.owner == owner })
       end
 
-      def stop_all = @jobs.values.each { |job| forget(job) }
+      # Everything, every session's: the row is going away, so no job it holds
+      # has an owner left to collect it.
+      def stop_all = end_each(@jobs.values)
 
       private
 
@@ -188,6 +187,25 @@ module Terret
       def forget(job)
         @jobs.delete(job.id)
         job.handle.close
+      end
+
+      # Ends a whole list of jobs, and every one of them gets its turn: a job
+      # whose close cannot be completed is one job's problem, and a raise that
+      # escaped here would leave every job behind it in the ledger running with
+      # the agent that owned it already gone. The failures are reported once,
+      # after the ledger is clear, because the caller is a disposal listener
+      # rather than somebody who can act on them.
+      def end_each(jobs)
+        failed = []
+        jobs.each do |job|
+          forget(job)
+        rescue StandardError => e
+          failed << "#{job.id} (#{e.class}: #{e.message})"
+        end
+        unless failed.empty?
+          warn "terret: #{failed.size} job(s) would not close: #{failed.join(', ')}"
+        end
+        jobs.map(&:id)
       end
 
       # Moves whatever the pipe holds into the buffer. Never blocks: the handle

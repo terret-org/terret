@@ -190,10 +190,18 @@ module Terret
       end
 
       # A child that has already exited but is not yet reaped is not an error
-      # here — the next wait collects it.
+      # here — the next wait collects it. Neither is EPERM, and that one is not
+      # a permission problem: this seam signals process GROUPS as well as pids
+      # (PipeHandle hands the reaper a `-pgid`), and Darwin answers EPERM
+      # rather than ESRCH for a group whose every remaining member is a zombie
+      # — which is exactly the state of a job that finished on its own and was
+      # never collected. Both errnos mean the same thing at this call site:
+      # nobody signalable of ours is left. The one case EPERM could hide is a
+      # live process under another uid, which no signal of ours could have
+      # ended anyway. Shell#sweep rescues the pair for the same reason.
       def signal(pid, name)
         Process.kill(name, pid)
-      rescue Errno::ESRCH
+      rescue Errno::ESRCH, Errno::EPERM
         nil
       end
 
@@ -422,16 +430,22 @@ module Terret
         # owner's disposal must not raise, and must not wait on a child that
         # is already reaped.
         #
-        # The reaper is handed the process GROUP rather than the pid. #spawn's
-        # child leads its own group, so TERM and KILL reach whatever the job
-        # spawned as well as the job itself, and `Process.wait2(-pgid)` reaps
-        # the one member of it that is our child. The trailing sweep covers
-        # the case the escalation cannot see: a leader that left politely on
-        # the TERM while a child of its own ignored it, where the reaper's
-        # first successful wait ends the escalation before any KILL is sent. A
-        # group with a member left is still ours to signal; an empty one
-        # answers ESRCH, and Darwin answers EPERM when everything left in it
-        # is a zombie (Shell#sweep measured both).
+        # The whole process GROUP goes, not just the pid. #pipe_spawn's child
+        # leads its own group, so a signal reaches whatever the job spawned as
+        # well as the job itself — a surviving background child would otherwise
+        # hold the agent's authority with nothing left in the harness able to
+        # name it — and the reaper, handed `-pgid`, collects the one member of
+        # that group that is our child. #end_group is the ordering; it is
+        # Shell#discard's, step for step, and for its reasons.
+        #
+        # The branch where the leader has ALREADY been reaped — by the drain
+        # fiber's probe, or by a collect that found it exited — signals
+        # nothing at all. Survivors of a reaped leader keep its pgid reserved
+        # only for as long as they live, so nothing here can tell "our group,
+        # now empty" from "a stranger's recycled pgid", and leaking a
+        # grandchild is the honest answer over killing somebody else's
+        # process. docs/subagents.md §6 says so out loud; plan §14 is where
+        # the fix would live.
         #
         # Unlike PTYHandle the fd is dropped last, because a pipe has no
         # equivalent of the pty wedge: bytes nobody read are discarded by the
@@ -443,20 +457,62 @@ module Terret
           return @ended if @closed
 
           @closed = true
-          @ended = @exited ? :terminated : @reaper.call(-@pid, @grace)
-          @exited = true
-          sweep
-          @pending = String.new(encoding: Encoding::BINARY)
-          drain(@pending, CHUNK) unless @eof
           begin
-            @reader.close unless @reader.closed?
-          rescue IOError
-            nil
+            @ended = @exited ? :terminated : end_group
+          ensure
+            # A handle this call touched is a handle this call finishes. The
+            # reaper is somebody else's method and the fd is the only thing
+            # holding this pipe open, so a raise on the way through must not
+            # be able to leave the row half-closed: an fd still open, a child
+            # still in the process table, and an owner that thinks the job is
+            # over.
+            @ended ||= :terminated
+            @exited = true
+            @pending ||= String.new(encoding: Encoding::BINARY)
+            drain(@pending, CHUNK) unless @eof
+            begin
+              @reader.close unless @reader.closed?
+            rescue IOError
+              nil
+            end
           end
           @ended
         end
 
         private
+
+        # Shell#discard's three steps, applied to a process group: ask it to
+        # leave, read it to EOF within the grace, then KILL what is still there
+        # — all before anything is reaped. Same escalation the reaper applies
+        # to a single pid (TERM, then SIGKILL after the grace), which is what
+        # the seam promises a `stop` does.
+        #
+        # The ask is a TERM to the whole group, because a job has no protocol
+        # to say `exit` down the way ctx[:shell] does, and the read is what
+        # tells us it worked. Waiting on the leader would be the obvious way to
+        # bound the wait, and it is the one thing that cannot happen here: a
+        # wait that collected it would free the pgid, and the KILL below would
+        # then be aimed at a pid the kernel is free to have handed to a
+        # stranger — the invariant Shell#sweep spells out. EOF answers the same
+        # question without reaping anything, and answers it better: it means
+        # the leader AND every child that inherited its output are gone. What
+        # the job said on its way out lands in @pending while we wait, where
+        # the next #read hands it over.
+        def end_group
+          signal("TERM")
+          deadline = now + @grace
+          @pending ||= String.new(encoding: Encoding::BINARY)
+          loop do
+            drain(@pending, CHUNK)
+            break if @eof || now >= deadline
+
+            sleep POLL
+          end
+          ended = @eof ? :terminated : :killed
+          sweep
+          @reaper.call(-@pid, @grace) # collects the leader; its own TERM is a no-op by now
+          ended
+        end
 
         def drain(buf, max)
           loop do
@@ -473,11 +529,17 @@ module Terret
           @eof = true
         end
 
-        def sweep
-          Process.kill("KILL", -@pid)
+        def sweep = signal("KILL")
+
+        # Both refusals mean there was nothing of ours left to signal;
+        # Subprocess#signal says which is which and why neither is an error.
+        def signal(name)
+          Process.kill(name, -@pid)
         rescue Errno::ESRCH, Errno::EPERM
           nil
         end
+
+        def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
         def decode(bytes) = bytes.force_encoding(Encoding::UTF_8)
       end
