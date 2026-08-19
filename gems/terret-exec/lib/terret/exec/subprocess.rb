@@ -80,6 +80,41 @@ module Terret
                       reaper: method(:reap!), grace: term_grace)
       end
 
+      # A process the caller does not wait for. #spawn captures to completion
+      # and #pty_spawn hands back a terminal; this hands back a plain pipe and
+      # a pid, which is what ctx[:jobs] needs and neither of the others can be
+      # (docs/subagents.md §6). A job's whole point is output read while it is
+      # still running, so a capture loop is the wrong shape — and a pty is the
+      # wrong shape too, because a terminal rewrites the newlines of anything
+      # written through it (the CR-LF ctx[:shell] spends a `stty -onlcr` on)
+      # and there is nobody to run an stty in a buffer.
+      def pipe_spawn(argv, cwd: Dir.pwd, env: {})
+        # The §6.6 contract; see #spawn. No `tty:` — a job is not a terminal.
+        argv = @ctx[:sandbox].wrap(argv, cwd: cwd)
+
+        out_r, out_w = IO.pipe
+        begin
+          # One pipe for both streams, the way a terminal has one: a job's
+          # diagnostics are part of what it said, and a second pipe would need
+          # a second drain to stay deadlock-free for output that renders as a
+          # single stream anyway. stdin is /dev/null rather than inherited, so
+          # a background job that reads it sees EOF instead of racing the
+          # harness for the console. `pgroup: true` makes the child a process
+          # group leader, which is what lets the handle's close reach whatever
+          # the job spawned rather than only the job (the same reasoning as
+          # Shell#sweep: a surviving background child holds the agent's
+          # authority with nothing left in the harness able to name it).
+          pid = Process.spawn(stringify(env), *exec_form(argv), chdir: cwd,
+                              in: File::NULL, out: out_w, err: out_w, pgroup: true)
+        rescue StandardError
+          close!(out_r)
+          raise
+        ensure
+          close!(out_w)
+        end
+        PipeHandle.new(reader: out_r, pid: pid, reaper: method(:reap!), grace: term_grace)
+      end
+
       private
 
       def term_grace = config[:term_grace] || 2
@@ -317,6 +352,132 @@ module Terret
         end
 
         private
+
+        def decode(bytes) = bytes.force_encoding(Encoding::UTF_8)
+      end
+
+      # What a caller holds for a process it started and did not wait for. The
+      # surface is deliberately as small as PTYHandle's — read, status, close —
+      # because ctx[:jobs] keeps these across turns and every method on one is
+      # something a tool call can end up driving.
+      class PipeHandle
+        attr_reader :pid
+
+        def initialize(reader:, pid:, reaper:, grace:)
+          @reader = reader
+          @pid = pid
+          @reaper = reaper
+          @grace = grace
+          @eof = false
+          @exited = false
+          @status = nil
+          @closed = false
+        end
+
+        # Everything the process has written since the last read: "" while it
+        # is alive with nothing to say, nil once the stream has ended. Never
+        # blocks and never waits — the fiber reading this one has other jobs
+        # to drain — so a caller polls it rather than being pushed to.
+        #
+        # Bytes read in the same pass that hits EOF are returned; the nil
+        # comes on the pass after, so the end of a stream never swallows the
+        # last thing the process said.
+        def read(max = CHUNK)
+          buf = @pending || String.new(encoding: Encoding::BINARY)
+          @pending = nil
+          drain(buf, max) unless @eof
+          buf.empty? && @eof ? nil : decode(buf)
+        end
+
+        # Whether the stream has ended — the process is gone and the pipe has
+        # been read to its end. An owner asks this rather than #exited? when
+        # the question is "can anything else still arrive", because a job's
+        # own children can outlive it holding the write end.
+        def eof? = @eof
+
+        # Whether the process is gone, probed with a non-blocking wait that
+        # reaps it when it finds one exited. Asked rather than #exit_status
+        # because a signalled process HAS no exit status: `nil` there means
+        # "still running" and "killed" both, and only this tells them apart.
+        def exited?
+          return true if @exited
+
+          if (reaped = Process.wait2(@pid, Process::WNOHANG))
+            @exited = true
+            @status = reaped.last.exitstatus
+          end
+          @exited
+        rescue Errno::ECHILD
+          @exited = true
+        end
+
+        # nil until the process has exited, and nil afterwards too when a
+        # signal ended it rather than an `exit`.
+        def exit_status
+          exited?
+          @status
+        end
+
+        # Idempotent: a job explicitly stopped and then closed again by its
+        # owner's disposal must not raise, and must not wait on a child that
+        # is already reaped.
+        #
+        # The reaper is handed the process GROUP rather than the pid. #spawn's
+        # child leads its own group, so TERM and KILL reach whatever the job
+        # spawned as well as the job itself, and `Process.wait2(-pgid)` reaps
+        # the one member of it that is our child. The trailing sweep covers
+        # the case the escalation cannot see: a leader that left politely on
+        # the TERM while a child of its own ignored it, where the reaper's
+        # first successful wait ends the escalation before any KILL is sent. A
+        # group with a member left is still ours to signal; an empty one
+        # answers ESRCH, and Darwin answers EPERM when everything left in it
+        # is a zombie (Shell#sweep measured both).
+        #
+        # Unlike PTYHandle the fd is dropped last, because a pipe has no
+        # equivalent of the pty wedge: bytes nobody read are discarded by the
+        # kernel when the writer dies, so nothing here can stick in exit. What
+        # the process managed to say before it went is drained into the handle
+        # on the way past, so closing a job never swallows its last words —
+        # #read hands them over afterwards exactly as if it were still open.
+        def close
+          return @ended if @closed
+
+          @closed = true
+          @ended = @exited ? :terminated : @reaper.call(-@pid, @grace)
+          @exited = true
+          sweep
+          @pending = String.new(encoding: Encoding::BINARY)
+          drain(@pending, CHUNK) unless @eof
+          begin
+            @reader.close unless @reader.closed?
+          rescue IOError
+            nil
+          end
+          @ended
+        end
+
+        private
+
+        def drain(buf, max)
+          loop do
+            chunk = @reader.read_nonblock(max, exception: false)
+            if chunk.nil?
+              @eof = true
+              break
+            end
+            break if chunk == :wait_readable
+
+            buf << chunk
+          end
+        rescue IOError
+          @eof = true
+        end
+
+        def sweep
+          Process.kill("KILL", -@pid)
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
 
         def decode(bytes) = bytes.force_encoding(Encoding::UTF_8)
       end

@@ -7,7 +7,8 @@ Gem::Specification.new do |s|
                   "that fails closed on traversal and symlink escapes. ctx[:subprocess] " \
                   "spawns and captures under the fiber scheduler with cooperative " \
                   "cancellation; ctx[:shell] keeps a bash per agent alive across calls; " \
-                  "ctx[:terminals] holds named long-lived PTYs; and every argv reaches a " \
+                  "ctx[:terminals] holds named long-lived PTYs; ctx[:jobs] runs a command " \
+                  "past the turn that started it; and every argv reaches a " \
                   "process through the ctx[:sandbox] seam. Zero runtime dependencies " \
                   "beyond stdlib."
   s.authors = ["Obie Fernandez"]
