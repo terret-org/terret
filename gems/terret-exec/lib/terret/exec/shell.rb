@@ -43,8 +43,15 @@ module Terret
       # have is not invented. `stdout` is the terminal's stream: a pty has one,
       # so a command's stderr arrives interleaved here rather than separately.
       # `notice` is nil unless something happened that the caller did not ask
-      # for (a restart); it is a field rather than text appended to stdout so
-      # that stdout stays exactly what the command wrote.
+      # for (a restart, a truncation); it is a field rather than text appended
+      # to stdout so that stdout stays exactly what the terminal carried.
+      #
+      # "Exactly" is worth pinning down: no echo of the request, no prompt, no
+      # separator this file injected. It does not mean only the command's own
+      # bytes — the shell's own lines (`[1] 1234` when a job is backgrounded, a
+      # syntax error it complains about) are written to the same terminal at
+      # the same time, and reporting them is more honest than guessing which
+      # lines a caller did not mean to ask for.
       Result = Data.define(:status, :stdout, :notice)
 
       Session = Data.define(:handle, :sentinel, :marker)
@@ -65,9 +72,10 @@ module Terret
       FAREWELL_BUDGET = 1.0
 
       # ETX — what a human's ^C is on the wire. The line discipline turns it
-      # into SIGINT for the terminal's foreground process group, which is where
-      # the command's own children live; closing the pty instead would reap
-      # bash and orphan them.
+      # into SIGINT for the terminal's foreground process group; with job
+      # control off (see HANDSHAKE) that group is the session's own, so the
+      # signal reaches the command's children as well as bash. It is the
+      # gentler half of ending a run: #sweep is what guarantees the rest.
       INTERRUPT = "\u0003"
 
       # `--noediting` is load-bearing, not tidiness: on a pty bash is
@@ -86,7 +94,19 @@ module Terret
       # a stray ^S in a command cannot wedge the stream. Failure is tolerated
       # (`2>/dev/null`): under a sandbox whose exec has no tty there is nothing
       # to configure, and bash is then non-interactive, which needs none of it.
-      HANDSHAKE = "stty -echo -onlcr -icanon -ixon min 1 time 0 2>/dev/null; PS1=; PS2="
+      #
+      # `set +m` turns job control off, and that is a disposal decision rather
+      # than a cosmetic one. With job control on, bash puts every job in a
+      # process group of its own, so a `&` job's group id is one nothing here
+      # ever learns — and a background job that outlives its session is a
+      # process holding the agent's authority that no part of the harness can
+      # still name. Without job control every child stays in the session's own
+      # process group, which #sweep can end as a unit. The trade-off, stated
+      # rather than discovered: the session has no `fg`, `bg`, or `%1`. What it
+      # does NOT buy is a quieter terminal — bash still prints its "[1] 1234"
+      # notice when a job is backgrounded (measured, not assumed), and that
+      # line lands in the run's output like anything else the shell says.
+      HANDSHAKE = "stty -echo -onlcr -icanon -ixon min 1 time 0 2>/dev/null; set +m; PS1=; PS2="
 
       def start(ctx)
         @ctx = ctx
@@ -276,7 +296,36 @@ module Terret
       def discard(key)
         s = @sessions.delete(key) or return nil
         farewell(s)
+        sweep(s.handle.pid)
         s.handle.close
+      end
+
+      # End everything still running in the session's process group. Reaping
+      # bash is not enough on its own: a `&` job is not bash's business once
+      # started, and it survives the shell's exit to be reparented to init —
+      # a process with the agent's authority, outside the sandbox's lifecycle,
+      # that nothing in the harness can name any more. `set +m` (see HANDSHAKE)
+      # is what makes one signal reach all of them: without job control every
+      # child stays in the group bash leads, and PTY.spawn made bash a session
+      # leader, so its pid IS that group's id.
+      #
+      # Deliberately before the handle is closed: at this point bash is either
+      # alive or an unreaped zombie, so the pid is still ours and cannot have
+      # been recycled into somebody else's process group by the time the signal
+      # lands. KILL rather than TERM because this runs after the session has
+      # already been asked to leave politely.
+      #
+      # Both refusals mean the same thing here — there was nothing left to end.
+      # ESRCH is an empty group; EPERM is what Darwin answers when every member
+      # left is a zombie (measured: a group holding one live child signals
+      # fine, the same group once only the exited leader remains raises EPERM).
+      # The one case EPERM could hide is a live child running under another
+      # uid, which a setuid command could produce and which no signal of ours
+      # could have ended anyway.
+      def sweep(pgid)
+        Process.kill("KILL", -pgid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
       end
 
       # Ask the shell to leave, and read it to EOF before the handle is closed.

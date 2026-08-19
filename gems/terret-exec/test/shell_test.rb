@@ -58,6 +58,14 @@ class ShellTest < Minitest::Test
     false
   end
 
+  # A handshake rather than a fixed sleep: the child writes its pid as its
+  # first act, so waiting for the file is waiting for the child to exist.
+  def await_pidfile(path, timeout: 5)
+    deadline = now + timeout
+    sleep 0.02 while (!File.exist?(path) || File.read(path).empty?) && now < deadline
+    Integer(File.read(path))
+  end
+
   # Bounded so a child that never dies fails the assertion instead of hanging
   # the suite; signal delivery and reaping are asynchronous, so a bare check
   # right after the call under test would be a race.
@@ -241,6 +249,66 @@ class ShellTest < Minitest::Test
     ctx[:shell].run("( (sleep 0.3; echo stray) & )")
     sleep 0.6
     assert_equal "clean\n", ctx[:shell].run("echo clean").stdout
+  end
+
+  # -- background jobs ------------------------------------------------------
+  #
+  # A `&` job outlives the command that started it by definition, so nothing
+  # about the run's own end reaps it. It must not outlive the SESSION: it holds
+  # the agent's authority and, once the shell is gone, nothing in the harness
+  # is left holding a reference to it.
+
+  def test_a_backgrounded_child_dies_with_the_session
+    Dir.mktmpdir do |dir|
+      pidfile = File.join(dir, "pid")
+      ctx, = boot
+      ctx[:shell].run(%(#{RUBY} -e "File.write(ARGV[0], Process.pid); sleep 45" #{pidfile} &))
+      pid = await_pidfile(pidfile)
+      assert alive?(pid), "the background child should be running before disposal"
+
+      ctx[:shell].close_all
+      refute_alive pid
+    end
+  end
+
+  def test_a_backgrounded_child_dies_when_a_timeout_restarts_the_session
+    Dir.mktmpdir do |dir|
+      pidfile = File.join(dir, "pid")
+      ctx, = boot
+      ctx[:shell].run(%(#{RUBY} -e "File.write(ARGV[0], Process.pid); sleep 45" #{pidfile} &))
+      pid = await_pidfile(pidfile)
+
+      ctx[:shell].run("sleep 30", timeout: 0.5) # kills the session and respawns
+      refute_alive pid
+    end
+  end
+
+  # Turning job control off does NOT silence the job-start notice: bash still
+  # announces a background job, and the line is written to the terminal by the
+  # shell itself, indistinguishable from what the command wrote. It is reported
+  # as output rather than filtered, so this pins what a caller actually sees.
+  def test_backgrounding_a_job_reports_bashs_own_job_notice_as_output
+    ctx, = boot
+    r = ctx[:shell].run("sleep 5 &")
+
+    assert_equal 0, r.status
+    assert_match(/\A\[1\] \d+\n\z/, r.stdout)
+  end
+
+  def test_a_backgrounded_child_dies_when_its_session_alone_is_closed
+    Dir.mktmpdir do |dir|
+      pidfile = File.join(dir, "pid")
+      ctx, = boot
+      ctx[:shell].run(%(#{RUBY} -e "File.write(ARGV[0], Process.pid); sleep 45" #{pidfile} &),
+                      session: "agent-a")
+      pid = await_pidfile(pidfile)
+      ctx[:shell].run("true", session: "agent-b")
+      pid_b = ctx[:shell].pid(session: "agent-b")
+
+      ctx[:shell].close(session: "agent-a")
+      refute_alive pid
+      assert alive?(pid_b), "another session's shell must survive"
+    end
   end
 
   # -- disposal -------------------------------------------------------------
