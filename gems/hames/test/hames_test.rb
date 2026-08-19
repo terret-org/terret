@@ -200,6 +200,81 @@ class HamesLoaderTest < Minitest::Test
   end
 end
 
+class HamesMountUnloadSafetyTest < Minitest::Test
+  # Registers a service and a listener (both owner effects) and THEN raises, so
+  # a mount that does not roll back leaves those registrations live with no
+  # entry in @mounted for any teardown to find them by.
+  class Exploder < Hames::Service
+    service_key :exploder
+    def start(ctx)
+      ctx.on("boom") { }
+      raise "start exploded"
+    end
+  end
+
+  class StubbornStop < Hames::Service
+    service_key :stubborn_stop
+    def start(_ctx); end
+    def stop(_ctx) = raise "stop exploded"
+  end
+
+  # Raises on the first stop, succeeds on the second: a failed unload has to
+  # leave the entry behind so a retry can actually finish the teardown.
+  class FlakyStop < Hames::Service
+    service_key :flaky_stop
+    def start(_ctx) = @stops = 0
+    def stop(_ctx)
+      @stops += 1
+      raise "stop flaked" if @stops == 1
+    end
+  end
+
+  def setup
+    Hames.reset_events!
+    Hames.event "boom", mode: :emit
+  end
+
+  def effects_count(ctx) = ctx.instance_variable_get(:@effects).size
+
+  def test_apply_raising_mid_mount_rolls_back_and_leaves_nothing_live
+    loader = Hames::Loader.new
+    loader.layer([{ id: "exploder", plugin: Exploder }])
+    err = assert_raises(RuntimeError) { loader.boot! }
+    assert_equal "start exploded", err.message
+
+    ctx = loader.ctx
+    refute ctx.service?(:exploder), "a service registered before the raise must not survive a failed mount"
+    assert_equal 0, effects_count(ctx), "a failed mount must leave no live registrations"
+    refute loader.mounted.key?("exploder"), "a plugin that failed to mount is not in @mounted"
+  end
+
+  def test_unload_disposes_owner_effects_even_when_stop_raises
+    loader = Hames::Loader.new
+    loader.layer([{ id: "ss", plugin: StubbornStop }])
+    ctx = loader.boot!
+    assert ctx.service?(:stubborn_stop)
+
+    err = assert_raises(RuntimeError) { loader.unload!("ss") }
+    assert_equal "stop exploded", err.message
+    refute ctx.service?(:stubborn_stop),
+           "owner effects must be disposed even when stop raises"
+    assert_equal 0, effects_count(ctx)
+  end
+
+  def test_a_failed_unload_keeps_the_entry_so_it_can_be_retried_to_completion
+    loader = Hames::Loader.new
+    loader.layer([{ id: "fs", plugin: FlakyStop }])
+    ctx = loader.boot!
+
+    assert_raises(RuntimeError) { loader.unload!("fs") } # stop raises the first time
+    refute ctx.service?(:flaky_stop), "owner effects disposed despite the raise"
+    assert loader.mounted.key?("fs"), "a stop that raised must not lose the entry a retry needs"
+
+    loader.unload!("fs") # the retry: stop succeeds, the entry finally goes
+    refute loader.mounted.key?("fs")
+  end
+end
+
 class HamesServiceInheritanceTest < Minitest::Test
   def test_service_key_and_inject_are_inherited_by_subclasses
     parent = Class.new(Hames::Service) do

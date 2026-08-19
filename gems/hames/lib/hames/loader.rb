@@ -137,9 +137,18 @@ module Hames
     end
 
     def unload!(id)
-      plugin = @mounted.delete(id) or raise ArgumentError, "no mounted plugin #{id}"
-      plugin.stop(ctx) if plugin.respond_to?(:stop)
-      ctx.dispose_owner!(id)
+      plugin = @mounted.fetch(id) { raise ArgumentError, "no mounted plugin #{id}" }
+      # Owner effects are disposed even when stop raises, so a wedged stop hook
+      # cannot strand this row's service registration and listeners; and the
+      # @mounted entry is dropped only AFTER a clean teardown, so a stop that
+      # raised keeps the row unloadable (a retry re-runs stop) rather than
+      # vanishing behind a misleading "no mounted plugin".
+      begin
+        plugin.stop(ctx) if plugin.respond_to?(:stop)
+      ensure
+        ctx.dispose_owner!(id)
+      end
+      @mounted.delete(id)
     end
 
     # Resolved tree, layer-agnostic view (for --dump-config).
@@ -166,6 +175,19 @@ module Hames
     def mount(row, plugin)
       ctx.with_owner(row.id) { plugin.apply(ctx) }
       @mounted[row.id] = plugin
+    rescue Exception # rubocop:disable Lint/RescueException
+      # apply raised partway through: whatever it registered before the raise is
+      # owned by this row, and this row is NOT in @mounted, so no unload! or
+      # shutdown could ever find those registrations to dispose them. Roll them
+      # back here so a failed mount leaves nothing live, then let the boot
+      # failure out unchanged. A raising disposer during rollback is warned
+      # rather than allowed to mask the failure that started it.
+      begin
+        ctx.dispose_owner!(row.id)
+      rescue StandardError => e
+        warn "hames: mount rollback for #{row.id}: a disposer raised: #{e.class}: #{e.message}"
+      end
+      raise
     end
   end
 end
