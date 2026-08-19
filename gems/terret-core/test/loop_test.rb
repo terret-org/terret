@@ -932,6 +932,40 @@ class HotPolicyTest < Minitest::Test
     assert_match(/not-a-session/, warned)
   end
 
+  def test_a_warm_session_is_served_from_cache_without_rescanning
+    ctx, = boot(script: [{ text: "Pinging.", tool_calls: [PING] }, { text: "done" },
+                         { text: "Pinging.", tool_calls: [PING.with(id: "tp2")] }, { text: "done" }])
+    register_ping(ctx)
+    agent, session = spawn(ctx)
+    Terret::Tools::AllowList.install(agent.ctx, ["ping"]) # floor allows; never updated
+
+    scans = count_scans do
+      ctx[:loop].run_turn(agent, "ping please")
+      ctx[:loop].run_turn(agent, "again")
+    end
+
+    results = session.events.select { |e| e.type == "tool/result" }.map { |e| e.payload[:content] }
+    assert_equal %w[pong pong], results, "both calls run under the floor policy"
+    assert_equal 1, scans[session.id],
+                 "the log is scanned once; the second call is served from the per-install cache"
+  end
+
+  def test_a_hot_update_primes_the_cache_so_the_next_call_does_not_rescan
+    ctx, = boot(script: [{ text: "Pinging.", tool_calls: [PING] }, { text: "done" }])
+    register_ping(ctx)
+    agent, session = spawn(ctx)
+    Terret::Tools::AllowList.install(agent.ctx, ["nothing"]) # floor denies
+
+    Terret::Tools::AllowList.update(ctx, session.id, ["ping"]) # fan-out primes the cache
+
+    scans = count_scans { ctx[:loop].run_turn(agent, "ping now") }
+
+    last = session.events.select { |e| e.type == "tool/result" }.last
+    assert_equal "pong", last.payload[:content], "the hot-updated policy governs the call"
+    assert_equal 0, scans[session.id],
+                 "policy/updated primed the cache via session/event; the call reads it, no rescan"
+  end
+
   def capture_warn
     old = $stderr
     $stderr = StringIO.new
@@ -939,6 +973,24 @@ class HotPolicyTest < Minitest::Test
     $stderr.string
   ensure
     $stderr = old
+  end
+
+  # Observable for "no rescan": wrap the pure log derivation and tally it per
+  # session. active_patterns calls current_patterns only on a cache miss, so a
+  # session scanned once and never again is the cache doing its job. Restores
+  # the method in ensure so the swap never escapes the block.
+  def count_scans
+    scans = Hash.new(0)
+    mod = Terret::Tools::AllowList
+    original = mod.method(:current_patterns)
+    mod.singleton_class.send(:define_method, :current_patterns) do |ctx, sid|
+      scans[sid] += 1
+      original.call(ctx, sid)
+    end
+    yield
+    scans
+  ensure
+    mod.singleton_class.send(:define_method, :current_patterns, original)
   end
 
   private

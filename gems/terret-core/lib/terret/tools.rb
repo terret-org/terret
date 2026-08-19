@@ -125,13 +125,51 @@ module Terret
     module AllowList
       def self.install(ctx, patterns)
         floor = Array(patterns).map(&:to_s)
-        ctx.on("tools/pre_execute") do |call, next_|
-          active = current_patterns(ctx, call.session_id) || floor
+
+        # Per-install, never global: this cache is a closure local of THIS
+        # install, so a forked agent scope or a hot policy swap that installs
+        # its own AllowList gets its own cache. Two installs sharing one would
+        # leak one agent's policy into another's — the cross-agent bleed this
+        # milestone closed. Keyed by session id; the value is the patterns from
+        # that session's last policy/updated, or nil for "no policy yet, fall
+        # to the floor" (nil is cached too, so a never-updated session also
+        # stops rescanning the log).
+        cache = {}
+
+        pre = ctx.on("tools/pre_execute") do |call, next_|
+          active = active_patterns(ctx, call.session_id, cache) || floor
           if active.any? { |p| File.fnmatch(p, call.name) }
             next_.(call)
           else
             Veto.new(reason: "#{call.name} is not on the allow list")
           end
+        end
+
+        # Log-first invalidation. The cache is a read-through of the durable
+        # log, never a second source of truth, so the ONLY write besides a
+        # miss is a policy/updated landing in the log. session/event is emitted
+        # on the context that mounts Sessions — the root of the fork chain, NOT
+        # this forked ctx — and a fork-registered listener would never see it,
+        # so we listen on root. Lifetime still follows the fork: wrapping
+        # root.on in ctx.effect records the teardown as an effect of THIS
+        # context, so disposing the agent (Loop#dispose_agent -> fork.dispose!)
+        # reaps the root listener too, and it also rides the composite disposer
+        # below. Fan-out is synchronous and in seq order, so update's append has
+        # refreshed the entry before the next call reads it.
+        root = ctx
+        root = root.parent while root.parent
+        inval = ctx.effect do
+          root.on("session/event") do |ev|
+            cache[ev.session_id] = ev.payload[:patterns] if ev.type == "policy/updated"
+          end
+        end
+
+        # Composite: tear the gate and its invalidation down together. Both are
+        # already recorded as effects of this context (so fork.dispose! reaps
+        # them); this is the handle a caller pulls to remove its list early.
+        lambda do
+          pre.call
+          inval.call
         end
       end
 
@@ -141,16 +179,31 @@ module Terret
                               { patterns: Array(patterns).map(&:to_s) })
       end
 
+      # Read-through cache over the log projection. A hit returns the cached
+      # patterns-or-nil without touching the log; a miss derives once and
+      # stores the result. Concurrency: under the fiber scheduler a fiber
+      # yields only at an await, and neither this read/write nor the
+      # session/event writer awaits between touching the Hash — so same-sid
+      # operations cannot interleave and distinct sids are independent; a plain
+      # Hash needs no lock. An unknown session raises KeyError out of the
+      # derivation before any scan and before anything is stored, so it is NOT
+      # cached: the call re-derives (and re-warns) each time, and a deny-all
+      # never ossifies into an allow.
+      def self.active_patterns(ctx, session_id, cache)
+        cache.fetch(session_id) { cache[session_id] = current_patterns(ctx, session_id) }
+      rescue KeyError
+        warn "terret: no policy readable for session #{session_id.inspect}; denying every tool call"
+        []
+      end
+
+      # The pure log derivation the cache reads through: the patterns of the
+      # last durable policy/updated in the session, or nil if it never updated.
+      # Raises KeyError for a session this context cannot read (handled in
+      # active_patterns), which is why the rescue lives there and not here.
       def self.current_patterns(ctx, session_id)
         ctx[:sessions].fetch(session_id).events.reverse_each
                       .find { |e| e.type == "policy/updated" }
                       &.payload&.[](:patterns)
-      rescue KeyError
-        # A session this context cannot read may carry a policy far stricter
-        # than the boot floor, so falling back to the floor would grant more
-        # authority than anyone configured. Deny everything instead.
-        warn "terret: no policy readable for session #{session_id.inspect}; denying every tool call"
-        []
       end
     end
   end

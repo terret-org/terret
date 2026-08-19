@@ -273,6 +273,16 @@ survives a restart for free, the same way compaction and titling do. The
 last `policy/updated` event in the log always wins; superseded ones simply
 stop being the one `current_patterns` finds.
 
+That derivation is a reverse scan of the whole session log, and it runs on
+every tool call, so the active set is memoised per session in a read-through
+cache the install owns. A cache miss derives from the log exactly as above; a
+`session/event` listener refreshes the entry the moment a `policy/updated`
+lands. Invalidation therefore stays a function of the durable log and never
+becomes a second source of truth, an unknown session is never cached so its
+deny-all can never ossify into an allow, and the cache is a closure local of
+one install — a forked agent's own AllowList caches on its own, so nothing
+leaks a policy across agents.
+
 The socket drives it with the `set_policy` frame (docs/protocol.md), which
 appends `policy/updated` the same way `set_model` repoints a model role —
 seam-first, no bespoke wiring. Deny-by-default is unchanged: a call that
