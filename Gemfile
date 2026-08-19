@@ -11,6 +11,7 @@ gem "terret-mcp", path: "gems/terret-mcp"
 gem "terret-morph", path: "gems/terret-morph"
 gem "terret-exec", path: "gems/terret-exec"
 gem "terret-tools-std", path: "gems/terret-tools-std"
+gem "terret-sandbox-docker", path: "gems/terret-sandbox-docker"
 gem "terret", path: "gems/terret"
 
 group :development, :test do
