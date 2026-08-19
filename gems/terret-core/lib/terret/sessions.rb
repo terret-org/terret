@@ -50,6 +50,11 @@ module Terret
     #
     # Scrubbers fold in registration order: each is handed the previous one's
     # output, so a later one can rewrite what an earlier one produced.
+    # Whether anything is registered. Callers that must reshape what they
+    # append to give a scrubber a fair look at it — the loop's chunk carry —
+    # ask this so they can stay exactly as they were when nobody is scrubbing.
+    def scrubbing? = !@scrubbers.empty?
+
     def register_scrubber(callable)
       @ctx.effect do
         @scrubbers << callable

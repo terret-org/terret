@@ -257,14 +257,31 @@ module Terret
         sessions.assert_log_invariant!(sid, request.messages)
 
         usage = nil
+        # A provider's deltas break at token boundaries, so a credential can
+        # straddle two of them: "...is sk-a" + "bc123def" defeats a pattern
+        # that matches the whole secret perfectly, and the tail lands in the
+        # log verbatim. The carry holds the last `hold` bytes back until more
+        # text arrives, so a scrubber sees the shape whole (§13, docs/exec.md
+        # §6). Chunks are replay/UI fidelity and are NOT projected by
+        # derive_messages, so re-chunking cannot move the digest — only their
+        # concatenation is contractual, and that is unchanged.
+        carry = +""
+        hold  = sessions.scrubbing? ? scrub_carry : 0
         message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
           case ev
           when LLM::TextDelta
-            sessions.append(sid, "assistant/chunk", { text: ev.text })
+            carry << ev.text
+            flush_chunks(sessions, sid, carry, hold: hold)
+          when LLM::ToolCallEnd, LLM::MessageStop
+            flush_chunks(sessions, sid, carry, hold: 0) # the text stream ended here
           when LLM::Usage
             usage = ev
           end
         end
+        # Belt and braces for an adapter that ends without a MessageStop. A
+        # stream that RAISES loses the held-back tail, which is honest: its
+        # assistant/message never lands either, and resume re-requests the step.
+        flush_chunks(sessions, sid, carry, hold: 0)
         sessions.append(sid, "assistant/message",
                         { parts: message.parts.map { |p| LLM.encode_part(p) } })
         step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
@@ -295,6 +312,37 @@ module Terret
         end
         # tools owe another request -> next step
       end
+    end
+
+    # How much streamed text is held back so a scrubber can see a secret that
+    # spans two deltas. Read per turn, so a hot-swapped row governs the next
+    # one; a secret longer than this window can still straddle the boundary,
+    # which is the honest limit of the mechanism (docs/exec.md §6).
+    DEFAULT_SCRUB_CARRY = 256
+
+    def scrub_carry = config[:scrub_carry] || DEFAULT_SCRUB_CARRY
+
+    # Append everything but the last `hold` bytes of the buffer as one chunk,
+    # consuming exactly what it appended. The cut lands on a character
+    # boundary: slicing by bytes can split a multibyte character in half, and
+    # those halves are bytes no provider sent — the append boundary refuses
+    # them, a layer away from the code that made them.
+    def flush_chunks(sessions, sid, buffer, hold:)
+      cut = buffer.bytesize - hold
+      return if cut <= 0
+
+      prefix = whole_characters(buffer.byteslice(0, cut))
+      return if prefix.empty?
+
+      # Consumed first: the buffer is the record of what has NOT been logged,
+      # and it must not still claim text that an append is already carrying.
+      buffer.slice!(0, prefix.length)
+      sessions.append(sid, "assistant/chunk", { text: prefix })
+    end
+
+    def whole_characters(text)
+      text = text.byteslice(0, text.bytesize - 1) until text.valid_encoding?
+      text
     end
 
     def execute_and_record(ctx, sessions, sid, tc)

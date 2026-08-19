@@ -12,7 +12,7 @@ class RedactorTest < Minitest::Test
 
   LEAK_CALL = Terret::LLM::ToolCall.new(id: "tc1", name: "leak", args: {})
 
-  def boot(script:, config: { patterns: ["sk-[a-z0-9]+"] })
+  def boot(script:, config: { patterns: ["sk-[a-z0-9]+"] }, redactor: true, loop_config: {})
     Hames.reset_events!
     Terret.declare_events!
     loader = Hames::Loader.new
@@ -22,8 +22,8 @@ class RedactorTest < Minitest::Test
       { id: "prompt",   plugin: Terret::Prompt },
       { id: "tools",    plugin: Terret::Tools::Registry },
       { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
-      { id: "loop",     plugin: Terret::Loop },
-      { id: "redactor", plugin: Terret::Redactor, config: config }
+      { id: "loop",     plugin: Terret::Loop, config: loop_config },
+      *(redactor ? [{ id: "redactor", plugin: Terret::Redactor, config: config }] : [])
     ])
     ctx = loader.boot!
     ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(script))
@@ -124,6 +124,77 @@ class RedactorTest < Minitest::Test
   def test_an_uncompilable_pattern_fails_at_boot
     err = assert_raises(RegexpError) { boot(script: [], config: { patterns: ["sk-["] }) }
     assert_match(/sk-\[/, err.message)
+  end
+
+  # -- streamed chunks ------------------------------------------------------
+
+  # FakeAdapter slices text into 8-character deltas, which is exactly what a
+  # real provider does at token boundaries: "sk-abc123def" arrives as
+  # " is sk-a" + "bc123def", and a per-delta append redacts the first half
+  # while storing the second verbatim. The pattern is perfect; the chunking
+  # defeats it.
+  SPLIT_TEXT = "your key is sk-abc123def and it works"
+
+  def chunks_of(session)
+    session.events.select { |e| e.type == "assistant/chunk" }.map { |e| e.payload[:text] }
+  end
+
+  def assistant_text(session)
+    session.events.select { |e| e.type == "assistant/message" }
+           .flat_map { |e| e.payload[:parts] }
+           .select { |p| p[:type] == "text" }.map { |p| p[:text] }.join
+  end
+
+  def test_a_secret_split_across_deltas_never_lands_in_a_durable_chunk
+    ctx, = boot(script: [{ text: SPLIT_TEXT }])
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    ctx[:loop].run_turn(agent, "go")
+
+    stored = chunks_of(session)
+    refute(stored.any? { |c| c.include?("bc123def") },
+           "a delta boundary carried the tail of the secret into the log: #{stored.inspect}")
+    refute(stored.any? { |c| c.include?("sk-abc") }, stored.inspect)
+    assert_equal "your key is [REDACTED] and it works", assistant_text(session)
+    assert_equal assistant_text(session), stored.join,
+                 "re-chunked text must still reassemble to the authoritative message"
+  end
+
+  # The carry costs nothing when nothing is scrubbing: chunks are the deltas.
+  def test_with_no_scrubbers_chunks_pass_through_unbuffered
+    ctx, = boot(script: [{ text: SPLIT_TEXT }], redactor: false)
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    ctx[:loop].run_turn(agent, "go")
+
+    assert_equal SPLIT_TEXT.chars.each_slice(8).map(&:join), chunks_of(session)
+  end
+
+  # Text longer than the carry window still streams: the window is what is
+  # held back, not what is buffered forever.
+  def test_a_long_stream_flushes_prefixes_while_holding_only_the_window
+    long = ("filler " * 60) + "and sk-abc123def ends it"
+    ctx, = boot(script: [{ text: long }], loop_config: { scrub_carry: 32 })
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    ctx[:loop].run_turn(agent, "go")
+
+    stored = chunks_of(session)
+    assert_operator stored.length, :>, 1, "a long stream must flush before it ends"
+    refute(stored.any? { |c| c.include?("bc123def") }, stored.inspect)
+    assert_equal assistant_text(session), stored.join
+  end
+
+  # Re-chunking is only safe because chunks are replay/UI fidelity and never
+  # model history — nothing here reaches derive_messages or the digest.
+  def test_chunks_are_invisible_to_the_projection
+    ctx, = boot(script: [{ text: SPLIT_TEXT }])
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    ctx[:loop].run_turn(agent, "go")
+
+    refute_empty chunks_of(session)
+    assert_equal %i[user assistant], ctx[:sessions].derive_messages(session.id).map(&:role)
   end
 
   # Both layers install through ctx.effect under the row's ownership, so
