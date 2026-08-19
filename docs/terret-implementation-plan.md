@@ -517,6 +517,30 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   `current_patterns` is an O(events) linear scan of the session log on every call; fine at
   M6's scale, a caching candidate if a very long session ever makes it show up in a
   profile.
+- **Recorded, not fixed, at M6's final gates.** Seven findings from the closing
+  cross-model review that are real but not M6's problem, each with the reason it waited.
+  (1) `Context#register`'s service entry is recorded on the ROOT context rather than the
+  registering fork, so a forked agent's service registration bleeds upward — pre-existing,
+  invisible at M6's usage, an M7 kernel pass. (2) Nothing evicts: `Sessions`' `@cache`
+  (and now its per-session lock map) grows for the life of the process, and the agent pool
+  never auto-disposes an idle agent, so a box serving thousands of long-lived sessions
+  leaks both. Long-lived memory lifecycle is an M7 topic in its own right, alongside the
+  §9.1 blast-radius work. (3) Cost accounting undercounts twice: utility calls (the
+  compactor's and titler's own model requests) never reach a `step/end`, and a step whose
+  process died before its `step/end` loses its usage entirely — `Sessions#usage` is
+  honestly "what the log recorded", not "what the vendor billed". (4) Both the policy scan
+  and the pending-approvals scan are O(events) per call, and `pending` inside a long park
+  loop is quadratic in the requests of one turn; fine at M6's scale, caching candidates
+  the moment a profile shows them. (5) `Loader#reconfigure!` is not atomic: a service
+  whose `reconfigure` hook raises leaves the row's config swapped and the service half-
+  updated, and the hooks themselves run ownerless, so an effect one registers is not
+  recorded against the row. (6) The at-least-once tool contract has a narrower cousin
+  worth naming: a tool that performs its side effect and dies before its `tool/result`
+  appends is genuinely ambiguous on resume, not merely repeated. Idempotency stays the
+  tool's concern in v1; harness-level idempotency keys are an M7+ candidate. (7)
+  `set_policy` carries the whole of a connection's authority — a client that can steer an
+  agent can also rewrite its allow list. Splitting per-frame capabilities from the bearer
+  token is a real design question and belongs with the multi-tenant work, not here.
 - **MCP wire and fiber-safety, from M5.** v1 targets the deployed legacy wire (protocol
   revisions 2025-11-25/2025-06-18); the 2026-07-28 stateless revision stays out of scope
   until something actually deploys it. manceps' fiber-safety under the async scheduler is

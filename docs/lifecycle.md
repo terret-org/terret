@@ -36,6 +36,29 @@ exactly like a running one does. Plan §6.4 also names `waiting_input`,
 `stopping`, and `done`/`failed`. Those arrive with M7/M8 work; this
 milestone builds only `idle`, `running`, and `waiting_approval`.
 
+A turn is a bounded number of steps: `Loop::MAX_STEPS` is 25, and a turn
+that would log a 26th raises rather than looping on a model that will not
+stop calling tools. Every turn closes with a durable `turn/end {status}`,
+and the status is one of five: `completed` (nothing more is owed),
+`cancelled` (a cancel was honored at a step boundary), `rejected` (an
+`agent/pre_step` listener refused the claim), `empty` (the turn had nothing
+to say — no input, no steer, no owed call), or `failed` (an exception left
+the turn). The one case with no `turn/end` at all is a failed **resume**,
+which deliberately leaves its turn open; see "Resuming an open turn".
+
+## Appends and fan-out
+
+Everything below hangs off `session/event` listeners, several of which
+append while handling an event — the compactor and the titler both react to
+`turn/end` by writing to the same log. Two properties make that safe.
+Seq assignment, the durable write, and the in-memory push are one critical
+section per session, so two appenders (a connection's frame and a turn, say)
+can never claim the same seq even though the store write yields. And
+fan-out is queued rather than nested: an event a listener appends is
+delivered after the event it reacted to, never before, so a subscriber sees
+the log in the order it was written. The price, worth naming: a listener's
+own append returns before that event has fanned out.
+
 ## Durable approvals
 
 A tool `Definition`'s `approval:` field (docs/terret-implementation-plan.md
@@ -61,6 +84,16 @@ that append; `ctx[:approvals].pending(session_id)` lists the call ids still
 awaiting a verdict, which is what a reconnecting client, and `resume_turn`,
 need in order to find outstanding asks.
 
+**An approval belongs to the turn that asked for it.** `pending` and the
+gate's verdict lookup both read only the open turn — the events after the
+last `turn/start`, and nothing at all once a `turn/end` follows it — and the
+lookup is bound to content as well as to the id: the verdict must follow a
+request in that turn naming the same call id, tool, and arguments. Provider
+tool call ids are not contractually unique, so without both scopings an id
+reused in a later turn would silently inherit a decision a human made about
+something else. A closed turn's approvals settle with the turn; a call that
+comes back afterwards is asked about again.
+
 Both sides of an approval are in the log, so a parked call survives a
 restart. On resume, the gate re-reads the log: if a verdict is already
 recorded it never parks again; if none is recorded yet, the open turn sits
@@ -68,9 +101,10 @@ resumable until `Loop#resume_turn` re-enters it the moment a verdict lands.
 
 There is no timeout. A parked approval is parked until a human decides, by
 design. `deny_pending!` is the escape hatch: cancelling a turn while
-approvals are parked denies every one of them durably first, then cancels
-the turn — a cancelled turn never leaves an approval dangling for a future
-resume to trip over.
+approvals are parked marks the turn cancelled first and only then denies
+every standing request durably, so the parked call unparks into a turn that
+already knows it is stopping — and a cancelled turn never leaves an approval
+dangling for a future resume to trip over.
 
 ## Resuming an open turn
 
@@ -78,6 +112,19 @@ resume to trip over.
 no `turn/end` after it — the signature of a turn a process died in the
 middle of. `resume_turn` does not append a second `turn/start`: it treats
 the existing turn as still open.
+
+Resuming is the only way back into such a session. `run_turn` on an idle
+agent whose log holds an open turn raises `TurnOpenInLog` and appends
+nothing: a second `turn/start` would strand whatever the open turn owes
+(`resumable?` reads from the *last* `turn/start`) and leave the projection
+carrying an assistant tool call with no result — which a real provider
+rejects outright, on every request, forever. Every caller that can meet a
+resumed session therefore branches: resumable means `inject` the new text
+and `resume_turn`; otherwise `run_turn`. The socket does this on a waking
+`inject` (docs/protocol.md), and so does `examples/web_chat.rb`. An agent
+that is already mid-turn is a different matter and still raises the older
+`TurnAlreadyRunning` — that open turn is its own, and the wake race below
+depends on that distinction.
 
 It first closes the open step: any tool call owed by the last assistant
 message that has no matching `tool/result` yet gets re-executed (reading
@@ -106,6 +153,13 @@ Three edges are left visible rather than papered over:
   `:empty` on resume: the input that triggered it was never durably logged,
   so there is nothing to recover.
 
+A resume that *fails* — the model provider is down, say — leaves the turn
+open rather than closing it `failed`. That is the deliberate difference
+from `run_turn`, where a failure is terminal for the turn and the log says
+so. A resumed turn still owes a tool call; closing it would strand that
+call permanently for what is usually a transient outage, so the turn stays
+resumable and the next stimulus picks it up again.
+
 ## Compaction
 
 `session/compacted {upto_seq, summary}` is a durable, model-visible event
@@ -117,12 +171,23 @@ the projection.
 
 **The boundary contract:** `upto_seq` is always the seq immediately
 preceding the `session/compacted` event itself, computed at append time —
-after the summarizer has already returned. Only projection-invisible
-events (a raced `approval/resolved`, say) can land during summarization at
-all, because the agent is still mid-turn while it summarizes and nothing
-model-visible can interleave with an open turn. An invisible event that
-falls below the boundary loses nothing, since it was never part of the
-projection the summary stands in for.
+after the summarizer has already returned. Summarizing is a round trip, so
+the compactor records the last seq before it starts and checks again after:
+if anything **model-visible** landed meanwhile (`user/message`,
+`context/injected`, `assistant/message`, `tool/result`, `session/compacted`),
+it declines and appends no boundary, because that history would otherwise be
+swept under a summary that never read it. Projection-invisible arrivals — a
+raced `approval/resolved`, a `policy/updated` — still fall under the
+boundary and lose nothing, since they were never part of the projection the
+summary stands in for.
+
+**Compaction is a between-turns operation.** The trigger owns the safe
+window: it fires on `turn/end`, when the agent is idle and no step is
+mid-flight. `compact!` called by hand mid-turn is not safe in the same way —
+the running turn's own next `assistant/message` is exactly the kind of
+model-visible event the check above will refuse on, so a manual compaction
+racing a live turn declines rather than corrupting anything, but it also
+does not accomplish what the caller asked for.
 
 Triggering is automatic and manual both. `ctx[:compactor]`, configured
 with `config[:budget]`, compacts a session after any turn whose last
@@ -135,10 +200,18 @@ derived from the log — not a session request the loop's invariant assert
 ever sees (docs/terret-implementation-plan.md §2). `terret-morph` is the
 other provider: it calls out to Morph's Compact API on the wire proven in
 the deployed agora integration, extractive-compressing the rendered
-history instead of asking a model to write a summary. Either provider may
-decline (return nil/empty) on any failure, which is non-fatal: the listener
-is isolated, the turn that triggered it already closed successfully, and
-the next overweight turn simply retries compaction.
+history — every message part on its own role-tagged line, tool calls and
+results included, so a compacted session keeps the deploy ids and errors
+its transcript earned — instead of asking a model to write a summary.
+
+The two providers fail differently, and the difference is worth knowing.
+Morph declines to `nil` on every failure, warning as it goes: no key, an
+HTTP error, a torn response. `RoleSummarizer` raises instead when its
+`:compactor` role is unconfigured — inside the budget trigger that is
+isolated by `emit` dispatch and the turn survives untouched, but a manual
+`compact!` raises it through to the caller. Either way a decline is
+non-fatal: the turn that triggered it already closed successfully, and the
+next overweight turn simply retries compaction.
 
 ## Titling
 
@@ -146,7 +219,9 @@ Every session gets exactly one durable `session/titled {title}` event,
 appended by `ctx[:titler]` at the first `turn/end` it sees. Titling uses
 the `:titler` model role when one is configured in `config[:roles]`; absent
 that, it falls back to the session's first user message truncated to 40
-characters. Like an approval event, a title is metadata: it never enters
+characters. Whichever produced it, the stored title is capped at 80
+characters — a model asked for six words can always answer with sixty.
+Like an approval event, a title is metadata: it never enters
 `derive_messages`'s projection. `Sessions#title(session_id)` reads the
 latest one recorded.
 
@@ -184,7 +259,11 @@ enforces is not frozen in that listener's closure. The **active** set is a
 log projection: the patterns from the last durable `policy/updated` event
 in the call's session, falling back to the patterns `install` was called
 with — the install-time set is a floor, not a ceiling, and it only governs
-sessions that have never hot-updated.
+sessions that have never hot-updated. A session this context cannot read at
+all is a third case, and it fails closed: no policy is readable, so nothing
+is permitted and every call is vetoed with a warning. Falling back to the
+floor there would hand an unknown session more authority than the floor was
+ever meant to grant.
 
 `AllowList.update(ctx, session_id, patterns)` is an ordinary durable
 append. It takes effect on the very next tool call — no reinstall, no

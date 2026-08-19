@@ -96,8 +96,12 @@ mid-stream should discard incoming events until it sees `seq == from_seq`
 `wake: true` on an idle agent starts a turn with `text` as its input. On a
 busy agent (or with `wake: false`) the text is queued in the agent's inbox and
 rides into the next step of the current or next turn — that is the mid-turn
-steer. Injection is acknowledged by the log itself: the text appears as a
-durable `user/message` when it lands in a step.
+steer. Injection is acknowledged by the log itself, and the event type records
+which of the two it was: the waking text that starts a turn lands as that
+turn's own durable `user/message`, while a steer drained from the inbox lands
+as durable `context/injected`. Both project into model history as user
+messages; the distinction is provenance, kept because the log is the record of
+what actually happened.
 
 If the log holds an **open turn** (a `turn/start` with no `turn/end` after it —
 the process died mid-turn, or was deployed over), `wake: true` on an idle agent
@@ -118,6 +122,16 @@ boundaries: a cancel that races a tool result loses the race to the log entry
 but wins the turn — the `tool/result` is recorded, then the turn closes with
 `turn/end {status: "cancelled", reason: ...}`. A cancel with no turn running
 is answered `not_running`.
+
+A cancel observed part-way through a step's tool batch truncates the rest of
+that batch: every remaining call in it still logs its `tool/call` and a
+`tool/result` carrying the error `cancelled before execution`, so nothing runs
+but the projection never holds a call without a result.
+
+`turn/end`'s `status` is one of `completed`, `cancelled`, `rejected`, `empty`,
+or `failed` (see docs/lifecycle.md, "The status machine"). A failed *resume*
+is the one case that logs no `turn/end` at all: it leaves the turn open so the
+next stimulus can pick it up.
 
 A turn parked on an approval also cancels: the turn is marked cancelled first,
 then every standing request for the session is denied durably (one
@@ -142,7 +156,11 @@ approval's own identifier, not the call it references.
 Verdicts are validated against the log, not taken on faith: only a `call_id`
 with a standing request and no verdict yet is accepted. Anything else — an
 already-resolved call, a call that never asked, a typo — answers `stale_call`
-and appends nothing, so a double approve cannot pollute the log.
+and appends nothing, so a double approve cannot pollute the log. "Standing"
+means within the **open turn**: a request whose turn has since closed is
+settled, and a verdict arriving for it answers `stale_call` too. Provider
+tool call ids are not contractually unique, so a decision never carries
+across a turn boundary.
 
 Both sides being durable is what survives a process death. If the server
 restarted while a call was parked, no fiber is waiting when the verdict lands;
