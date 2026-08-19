@@ -173,4 +173,3 @@ does not extend to "a tool never runs twice." Idempotency is the tool's
 own concern in v1. Harness-level idempotency keys — a way to let a tool
 declare "this call, if seen again with the same id, is a no-op" — are a
 recorded M7+ candidate (plan §14), not something this milestone builds.
-</content>

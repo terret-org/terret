@@ -128,6 +128,15 @@ that batch: every remaining call in it still logs its `tool/call` and a
 `tool/result` carrying the error `cancelled before execution`, so nothing runs
 but the projection never holds a call without a result.
 
+The M8 tool barrier moves where that truncation can land without changing the
+guarantee. Calls declared `concurrency: :parallel` execute in maximal runs
+under one barrier (docs/subagents.md §5), and a run is not interruptible from
+outside once it starts — so a cancel is observed *between* runs rather than
+between individual calls, and a batch cancelled mid-run produces fewer
+`cancelled before execution` results than the same batch would have before the
+barrier existed. Every call in the batch still ends with a `tool/result`
+either way.
+
 `turn/end`'s `status` is one of `completed`, `cancelled`, `rejected`, `empty`,
 or `failed` (see docs/lifecycle.md, "The status machine"). A failed *resume*
 is the one case that logs no `turn/end` at all: it leaves the turn open so the

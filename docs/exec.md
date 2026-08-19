@@ -234,9 +234,12 @@ do not read this row as "a sandbox makes `Bash` stop asking".
 `concurrency:` is declared metadata, not yet enforced. The loop keeps
 executing every call in a step sequentially in M7; the field exists so
 M8's tool barrier has something honest to read when it starts letting
-`:parallel`-declared calls actually run concurrently. `task`, `job_*`, and
-`todo` are M8 tools (they need `ctx[:jobs]` and the subagent seam) and are
-not in this roster.
+`:parallel`-declared calls actually run concurrently. `Task`, `job_*`, and
+`TodoWrite` are M8 tools (they need `ctx[:jobs]` and the subagent seam)
+and are not in this roster. Their names follow the same rule as the rest
+of it: Claude Code's spelling verbatim where CC has the tool, snake_case
+where it does not — which is why `Task` and `TodoWrite` are capitalized
+and the job tools are not (docs/subagents.md).
 
 ## 6. Redaction
 
@@ -371,4 +374,3 @@ tool barrier is what will let `:parallel`-declared calls (`Read`, `Glob`,
 bounds a turn the same way it always has; a tool-heavy turn that leans on
 Bash and terminals in a loop is bounded by the same 25-step ceiling as any
 other.
-</content>
