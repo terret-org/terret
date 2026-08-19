@@ -45,7 +45,9 @@ realpath-contained to the granted workspace list before the op runs (§3),
 and every op that passes containment also dispatches an `fs/authorize`
 waterfall (`{op:, path:}`) that any plugin can veto; a `Tools::Veto` there
 renders as a `Terret::Exec::Denied` tool error, the same shape containment
-failures use. `edit` is a uniqueness-checked string replace: it raises
+failures use. A listener may veto or admit only — a rewritten `:path` in a
+listener's return value is ignored, so containment is never delegated to a
+listener. `edit` is a uniqueness-checked string replace: it raises
 `Terret::Exec::EditAmbiguous` rather than guessing when the target string
 appears zero times or more than once in the file — an ambiguous edit is a
 bug in the caller's plan, not something to resolve by picking the first

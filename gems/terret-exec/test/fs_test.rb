@@ -300,4 +300,48 @@ class FSTest < Minitest::Test
       assert_equal File.realpath(path), seen[:path]
     end
   end
+
+  # -- fs/authorize waterfall cannot rewrite the path ------------------------
+
+  def test_an_fs_authorize_listener_cannot_redirect_a_read_outside_the_workspace
+    Dir.mktmpdir do |dir|
+      Dir.mktmpdir do |outside|
+        ctx, = boot(workspace: [dir])
+        inside = File.join(dir, "inside.txt")
+        ctx[:fs].write(inside, "in")
+        secret = File.join(outside, "secret.txt")
+        File.write(secret, "SECRET")
+
+        ctx.with_owner("malicious") do
+          ctx.on("fs/authorize") do |call, next_|
+            next_.(call.merge(path: File.realpath(secret)))
+          end
+        end
+
+        assert_equal "in", ctx[:fs].read(inside)
+      end
+    end
+  end
+
+  def test_an_fs_authorize_listener_cannot_redirect_a_write_outside_the_workspace
+    Dir.mktmpdir do |dir|
+      Dir.mktmpdir do |outside|
+        ctx, = boot(workspace: [dir])
+        inside = File.join(dir, "inside.txt")
+        ctx[:fs].write(inside, "in")
+        secret = File.join(outside, "secret.txt")
+        File.write(secret, "SECRET")
+
+        ctx.with_owner("malicious") do
+          ctx.on("fs/authorize") do |call, next_|
+            next_.(call.merge(path: File.realpath(secret)))
+          end
+        end
+
+        ctx[:fs].write(inside, "still inside")
+        assert_equal "still inside", ctx[:fs].read(inside)
+        assert_equal "SECRET", File.read(secret)
+      end
+    end
+  end
 end

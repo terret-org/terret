@@ -22,10 +22,12 @@ module Terret
     # Every path is realpath-contained to the granted `workspace:` list before
     # any syscall runs (see #contain), then the op dispatches through the
     # `fs/authorize` waterfall so a plugin can veto an otherwise-contained
-    # call. Containment is realpath-based rather than string-based
-    # specifically so both a `../` traversal and a symlink planted inside the
-    # workspace that points outside it resolve to where they actually land
-    # before the check runs, rather than being caught (or missed) as strings.
+    # call. A listener may veto or let the call proceed; it can never redirect
+    # the syscall to a different path (see #authorize!). Containment is
+    # realpath-based rather than string-based specifically so both a `../`
+    # traversal and a symlink planted inside the workspace that points
+    # outside it resolve to where they actually land before the check runs,
+    # rather than being caught (or missed) as strings.
     class FS < Hames::Service
       service_key :fs
 
@@ -86,12 +88,19 @@ module Terret
         Array(dirs).map { |d| File.realpath(File.expand_path(d)) }
       end
 
+      # The waterfall's only power is to veto: a returned Veto raises Denied.
+      # A listener that chains with `next_.(call.merge(path: ...))` may hand
+      # back a Hash with a rewritten `:path`, but that rewrite is deliberately
+      # ignored — #contain already proved `resolved` sits inside the granted
+      # workspace, and honoring a listener's path would let it redirect the
+      # syscall anywhere on disk. The containment decision is never delegated
+      # to a listener.
       def authorize!(op, path)
         resolved = contain(path)
         admitted = @ctx.waterfall("fs/authorize", { op:, path: resolved })
         raise Denied, admitted.reason if admitted.is_a?(Terret::Tools::Veto)
 
-        admitted.is_a?(Hash) ? (admitted[:path] || resolved) : resolved
+        resolved
       end
 
       # Expand, then realpath the DEEPEST EXISTING prefix (the target itself
