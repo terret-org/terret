@@ -17,6 +17,7 @@ module Terret
     # (truncate / redact).
     class Registry < Hames::Service
       service_key :tools
+      config_schema({}) # the tool registry takes no config
 
       def start(ctx)
         @ctx = ctx

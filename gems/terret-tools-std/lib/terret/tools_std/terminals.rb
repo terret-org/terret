@@ -22,6 +22,7 @@ module Terret
     class Terminals < Hames::Service
       service_key :tools_std_terminals
       inject :tools, :terminals
+      config_schema({}) # the terminal tools take no config (see the :terminals seam)
 
       def start(ctx)
         @ctx = ctx

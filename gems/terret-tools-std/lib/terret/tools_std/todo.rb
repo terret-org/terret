@@ -27,6 +27,7 @@ module Terret
     class Todo < Hames::Service
       service_key :tools_std_todo
       inject :tools
+      config_schema({}) # the TodoWrite tool takes no config
 
       # The rendering, and the whole of this tool's vocabulary. An unknown
       # status is refused against exactly this set rather than coerced to

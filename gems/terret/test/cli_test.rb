@@ -6,6 +6,15 @@ require "tmpdir"
 require "fileutils"
 require_relative "../lib/terret/boot"
 
+# A third-party-style plugin: a real Hames::Service that declares NO schema. It
+# stands in for the genuine unaudited case doctor's `unschema'd` now signals,
+# since every first-party service declares a schema (an empty one when it reads
+# no config). Named at the top level because a plugin: is a constant resolved
+# out of YAML, same as any other row's.
+class CLITestUnauditedPlugin < Hames::Service
+  service_key :cli_test_unaudited
+end
+
 # trt, driven in-process with captured IO. start returns an exit status rather
 # than calling exit, which is what makes that possible; exactly one test below
 # spawns the real executable, to prove the wiring exists.
@@ -159,12 +168,23 @@ class CLITest < Minitest::Test
     refute_includes out, "error:"
   end
 
-  # A service that declares no schema is reported, not failed — schemas arrive
-  # service by service (docs/composition.md §9).
-  def test_doctor_marks_an_unschemad_service_and_stays_green
+  # A plugin that declares no schema is reported, not failed. Every first-party
+  # service now declares one, so unschema'd signals an external/unaudited plugin
+  # — exercised here with a fixture that resolves but carries no schema.
+  def test_doctor_marks_an_unaudited_plugin_unschemad_and_stays_green
+    profile_patch(demo_profile, "rows:\n  - id: audit\n    plugin: CLITestUnauditedPlugin\n    after: sessions\n")
+    status, out, = run_cli("doctor", "--profile", "demo")
+    assert_equal 0, status
+    assert_match(/audit\s+CLITestUnauditedPlugin\s+unschema'd/, out)
+  end
+
+  # The other half of that semantic: a first-party service that reads no config
+  # declares an empty schema, so doctor calls it ok — audited, not unschema'd.
+  def test_doctor_reports_a_no_config_first_party_service_as_ok
     status, out, = run_cli("doctor", "--profile", demo_profile)
     assert_equal 0, status
-    assert_match(/sessions\s+Terret::Sessions\s+unschema'd/, out)
+    assert_match(/sessions\s+Terret::Sessions\s+ok/, out)
+    refute_includes out, "unschema'd"
   end
 
   def test_doctor_flags_a_wrong_typed_value_naming_the_row_and_key_and_exits_one

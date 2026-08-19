@@ -395,9 +395,12 @@ end
 Two semantics govern how strict this is, and both err the same direction:
 
 - **A service with no schema is reported, not failed.** Doctor marks it
-  `unschema'd` and moves on. Schemas arrive service by service; a doctor
-  that failed on every un-annotated row would be a doctor nobody could run
-  during the milestone that introduces schemas.
+  `unschema'd` and moves on. Every first-party service declares a schema —
+  an empty one (`config_schema({})`) when it reads no config, which still
+  reads as audited, `ok` — so `unschema'd` now carries real signal: an
+  external or unaudited plugin that declared none. A doctor that failed on
+  every un-annotated row would be a doctor nobody could run when a
+  third-party bundle ships one.
 - **Extra keys warn rather than fail.** Config rows grow, and a row
   carrying a key from a newer version of a gem should be a warning about
   drift, not a boot that refuses.
@@ -419,8 +422,9 @@ row            plugin                        status
 session_store  Terret::Store::SQLite         ok
 sandbox        Terret::Sandbox::Docker       ok
 llm            Terret::LLM::Service          ok
+titler         Terret::Titler                ok
 audit          Acme::Audit                   error: sink must be a String, got nil
-titler         Terret::Titler                unschema'd
+metrics        Acme::Metrics                 unschema'd
 
 info  OPENROUTER_API_KEY: unset
 ```

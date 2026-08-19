@@ -22,6 +22,7 @@ module Terret
   class Sessions < Hames::Service
     service_key :sessions
     inject :session_store
+    config_schema({}) # the session log takes no config
 
     Session = Struct.new(:id, :events, :parent_id, keyword_init: true)
 

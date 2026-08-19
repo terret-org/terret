@@ -22,6 +22,7 @@ module Terret
     class Task < Hames::Service
       service_key :tools_std_task
       inject :tools, :loop, :subagents
+      config_schema({}) # the Task tool takes no config (see the :subagents seam)
 
       # The same literal Bash and WebFetch separate their output with, and it
       # carries the same caveats: a readability device rather than a security

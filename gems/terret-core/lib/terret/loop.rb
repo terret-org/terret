@@ -627,6 +627,7 @@ module Terret
   # per step; registration is an effect.
   class Prompt < Hames::Service
     service_key :prompt
+    config_schema({}) # the prompt assembler takes no config
 
     def start(ctx)
       @ctx = ctx

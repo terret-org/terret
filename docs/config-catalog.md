@@ -27,6 +27,10 @@ with no schema is not listed; doctor reports it as `unschema'd`.
 |---|---|---|---|---|
 | `max_agents` | Integer |  | `128` | cap on concurrently live agents in this loop |
 
+## terret-core — `Terret::Prompt` (`prompt`)
+
+No configurable keys.
+
 ## terret-core — `Terret::Redactor` (`redactor`)
 
 | Key | Type | Required | Default | Description |
@@ -39,6 +43,10 @@ with no schema is not listed; doctor reports it as `unschema'd`.
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `role` | String or Symbol |  | `:compactor` | llm role a summary is produced under |
+
+## terret-core — `Terret::Sessions` (`sessions`)
+
+No configurable keys.
 
 ## terret-core — `Terret::Store::JSONL` (`session_store`)
 
@@ -67,6 +75,10 @@ No configurable keys.
 | `patterns` | Array |  | `[]` | tool-name globs the deny-by-default floor permits |
 
 ## terret-core — `Terret::Tools::Approvals` (`approvals`)
+
+No configurable keys.
+
+## terret-core — `Terret::Tools::Registry` (`tools`)
 
 No configurable keys.
 
@@ -172,6 +184,18 @@ No configurable keys.
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `max_output` | Integer |  | `30000` | bytes of collected job output returned to the model before truncation |
+
+## terret-tools-std — `Terret::ToolsStd::Task` (`tools_std_task`)
+
+No configurable keys.
+
+## terret-tools-std — `Terret::ToolsStd::Terminals` (`tools_std_terminals`)
+
+No configurable keys.
+
+## terret-tools-std — `Terret::ToolsStd::Todo` (`tools_std_todo`)
+
+No configurable keys.
 
 ## terret-tools-std — `Terret::ToolsStd::WebFetch` (`tools_std_web_fetch`)
 
