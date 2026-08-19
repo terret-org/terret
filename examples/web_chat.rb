@@ -51,9 +51,19 @@ end
 
 # The sidebar is cross-session state derived from store queries, deliberately
 # separate from the per-session Renderer, which stays replay-pure.
-def session_label(events)
-  first = events.find { |ev| ev.type == "user/message" }
-  first ? first.payload[:text][0, 40] : "untitled"
+#
+# Prefers Sessions#title (the durable, once-per-session title); falls back to
+# the first-user-message truncation for a session with no title yet. #title
+# reads the in-memory cache (fetch), which only holds sessions this process
+# has created or resumed — a session listed here from a prior run that was
+# never selected raises KeyError, so that's the fallback's other job.
+def session_label(sessions, id, events)
+  title = begin
+    sessions.title(id)
+  rescue KeyError
+    nil
+  end
+  title || events.find { |ev| ev.type == "user/message" }&.payload&.[](:text)&.[](0, 40) || "untitled"
 end
 
 def sidebar_html(sessions, active_id)
@@ -66,7 +76,7 @@ def sidebar_html(sessions, active_id)
     <<~HTML
       <form action="/session/select" method="post" data-turbo="false">
         <input type="hidden" name="id" value="#{h(id)}">
-        <button class="session#{active}" type="submit">#{h(session_label(events))}</button>
+        <button class="session#{active}" type="submit">#{h(session_label(sessions, id, events))}</button>
       </form>
     HTML
   end
@@ -80,6 +90,16 @@ def sidebar_frame(sessions, active_id)
   turbo_tag("update", "sessions", sidebar_html(sessions, active_id))
 end
 
+# The session's lifetime spend (Sessions#usage's rollup), rendered as the
+# header badge.
+def usage_html(usage)
+  "$#{format('%.4f', usage[:cost])} · #{usage[:prompt_tokens] + usage[:completion_tokens]} tokens"
+end
+
+def usage_frame(sessions, session_id)
+  turbo_tag("update", "usage", usage_html(sessions.usage(session_id)))
+end
+
 # Rebuild every connected tab after a session switch: clear, replay the
 # active session through a fresh Renderer, refresh the sidebar, then send
 # the authoritative composer state (covers logs that end mid-turn).
@@ -91,6 +111,7 @@ def broadcast_session(hub, sessions, host)
     hub.broadcast(html) if html
   end
   hub.broadcast(sidebar_frame(sessions, host.session.id))
+  hub.broadcast(usage_frame(sessions, host.session.id))
   hub.broadcast(turbo_tag("replace", "composer", composer_html(disabled: host.busy?)))
 end
 
@@ -226,7 +247,7 @@ class AgentHost
   end
 end
 
-def page_html(model)
+def page_html(model, usage)
   <<~HTML
     <!doctype html>
     <html>
@@ -257,7 +278,7 @@ def page_html(model)
     <body>
       <nav id="sessions"></nav>
       <main>
-        <header><span>terret · #{h(model)}</span></header>
+        <header><span>terret · #{h(model)}</span><span id="usage">#{h(usage_html(usage))}</span></header>
         <div id="transcript"></div>
         #{composer_html}
         <script type="module">
@@ -292,6 +313,7 @@ def sse_response(hub, host, sessions)
       body.write(sse_frame(html)) if html
     end
     body.write(sse_frame(sidebar_frame(sessions, host.session.id)))
+    body.write(sse_frame(usage_frame(sessions, host.session.id)))
     body.write(sse_frame(turbo_tag("replace", "composer", composer_html(disabled: host.busy?))))
     loop { body.write(sse_frame(queue.dequeue)) }
   rescue StandardError
@@ -315,6 +337,7 @@ loader.layer([
   { id: "tools",      plugin: Terret::Tools::Registry },
   { id: "llm",        plugin: Terret::LLM::Service, config: { roles: { main: "openrouter/#{model}" } } },
   { id: "loop",       plugin: Terret::Loop },
+  { id: "titler",     plugin: Terret::Titler }, # no :titler role configured — the fallback carries it
   { id: "openrouter", plugin: Terret::OpenRouter::Plugin,
     config: { title: "Terret web chat", referer: "https://terret.org" } }
 ])
@@ -342,6 +365,7 @@ ctx.with_owner("web-chat") do
   ctx.on("session/event") do |ev|
     html = live.render(ev)
     hub.broadcast(html) if html
+    hub.broadcast(usage_frame(ctx[:sessions], ev.session_id)) if ev.type == "turn/end"
   end
 end
 
@@ -353,7 +377,7 @@ Sync do
     case [request.method, request.path]
     when ["GET", "/"]
       Protocol::HTTP::Response[200, { "content-type" => "text/html; charset=utf-8" },
-                               [page_html(model)]]
+                               [page_html(model, ctx[:sessions].usage(host.session.id))]]
     when ["GET", "/events"]
       sse_response(hub, host, ctx[:sessions])
     when ["POST", "/messages"]
