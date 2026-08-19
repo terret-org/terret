@@ -32,9 +32,15 @@ end unless defined?(ASYNC_AVAILABLE)
 # §13 approval (`:always` unsandboxed, `:policy` sandboxed). Every handler even
 # came from the same source_location, so the same block ran in both worlds.
 #
-# The discriminator is `uname`: the local Bash sees the host's kernel (Darwin on
-# this mac, computed rather than hardcoded), the docker Bash sees `Linux`, and
-# the two must not agree — that inequality is the whole proof the world moved.
+# The discriminator is container membership, which is OS-independent: a Bash
+# probe of /.dockerenv — a file the docker runtime creates inside every
+# container and that exists on no host — reads ON-HOST locally and IN-CONTAINER
+# under docker, and that inequality is the whole proof the world moved. It holds
+# whatever the host OS is: on a Linux runner (the live CI lane) both kernels
+# report "Linux", so a `uname` comparison could not tell the worlds apart, but
+# ON-HOST still differs from IN-CONTAINER. `uname` is kept as corroborating
+# evidence, exact rather than substring — the local world genuinely sees the
+# host kernel, the docker world genuinely sees the container's "Linux".
 # The shell sentinel must appear in NEITHER (the tty-wrapped-pty regression the
 # Task 12 work fixed); the Write/Read round-trip must hold in BOTH worlds on the
 # same workspace file (ctx[:fs] writes through the bind mount, so one world);
@@ -131,19 +137,37 @@ class SandboxAcceptanceTest < Minitest::Test
     assert ctx_docker[:sandbox].isolated?, "the docker provider must report itself isolated"
     refute_nil ctx_docker[:sandbox].container, "the docker world must have started a real container"
 
-    # -- the discriminator: local sees the host kernel, docker sees Linux --
+    # -- the discriminator: which side of the container boundary each world ran on --
+    #
+    # OS-independent on purpose. On this mac the kernels alone would give it away
+    # (Darwin vs Linux), but the live CI lane is a Linux runner where BOTH worlds
+    # report "Linux" — so kernel-name inequality would falsely read as "nothing
+    # moved". /.dockerenv exists only inside a container the docker runtime
+    # started and on no host, so ON-HOST vs IN-CONTAINER is the inequality that
+    # holds whatever the host OS is: host uname Linux, container uname Linux, yet
+    # ON-HOST still ≠ IN-CONTAINER.
+    assert_equal "ON-HOST\n", local[:membership],
+                 "the local world must run on the host, outside any container"
+    assert_equal "IN-CONTAINER\n", docker[:membership],
+                 "the docker world must run inside the container"
+    refute_equal local[:membership], docker[:membership],
+                 "both worlds ran on the same side of the container boundary; nothing moved"
+
+    # `uname` corroborates, exact rather than substring: the local world
+    # genuinely sees the host kernel, the docker world genuinely sees the
+    # container's. These also differ on a non-Linux host and AGREE on a Linux
+    # one, which is exactly why the discriminator above is membership, not this.
     host_uname = "#{`uname`.chomp}\n"
     assert_equal host_uname, local[:bash],
                  "local Bash `uname` must equal the host's own uname, exactly"
     assert_equal "Linux\n", docker[:bash],
                  "docker Bash `uname` must be Linux, exactly — not merely containing it"
-    refute_equal local[:bash], docker[:bash],
-                 "the two worlds returned the same kernel; nothing moved"
-    # The sentinel guard: the tty-wrapped pty must keep stdout exact in both
-    # worlds. The pre-fix leak ALSO contained the kernel name, so exactness
-    # above plus this are what make the check a real regression net.
-    refute_match(/TERRET\h{32}/, local[:bash],  "the shell sentinel leaked into local Bash output")
-    refute_match(/TERRET\h{32}/, docker[:bash], "the shell sentinel leaked into docker Bash output")
+    # The sentinel guard on every Bash output: the tty-wrapped pty must keep
+    # stdout exact in both worlds. The pre-fix leak ALSO contained the kernel
+    # name, so exactness above plus this are what make the check a real net.
+    [local[:bash], docker[:bash], local[:membership], docker[:membership]].each do |out|
+      refute_match(/TERRET\h{32}/, out, "the shell sentinel leaked into a Bash output: #{out.inspect}")
+    end
 
     # -- Write/Read round-trip: identical in both worlds, same workspace file --
     assert_equal local[:written], local[:read],
@@ -238,11 +262,16 @@ class SandboxAcceptanceTest < Minitest::Test
     probe = File.join(ws_real, "roundtrip.txt")
     written = "roundtrip written in the #{world} world\n"
 
+    # `test -f /.dockerenv` is the OS-independent discriminator; `uname` is the
+    # corroborating kernel evidence. Both go through the same persistent bash, so
+    # both also exercise the tty-wrapped pty and the sentinel protocol.
     ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(
       [
-        { text: "Running uname.", tool_calls: [tc("u", "Bash",  command: "uname")] },
-        { text: "Writing.",       tool_calls: [tc("w", "Write", file_path: probe, content: written)] },
-        { text: "Reading back.",  tool_calls: [tc("r", "Read",  file_path: probe)] },
+        { text: "Running uname.",       tool_calls: [tc("u", "Bash", command: "uname")] },
+        { text: "Checking membership.", tool_calls: [tc("m", "Bash",
+                                                        command: "test -f /.dockerenv && echo IN-CONTAINER || echo ON-HOST")] },
+        { text: "Writing.",             tool_calls: [tc("w", "Write", file_path: probe, content: written)] },
+        { text: "Reading back.",        tool_calls: [tc("r", "Read",  file_path: probe)] },
         { text: "Done." }
       ]
     ))
@@ -268,7 +297,8 @@ class SandboxAcceptanceTest < Minitest::Test
     assert_includes seen, marker, "#{world}: the cat PTY never echoed the marker back"
     call(ctx, session.id, "terminal_close", name: "echoer")
 
-    { bash: results.fetch("u")[:content], written:, read: results.fetch("r")[:content], terminal: seen }
+    { bash: results.fetch("u")[:content], membership: results.fetch("m")[:content],
+      written:, read: results.fetch("r")[:content], terminal: seen }
   end
 
   def tc(id, name, **args) = Terret::LLM::ToolCall.new(id: id, name: name, args: args)
