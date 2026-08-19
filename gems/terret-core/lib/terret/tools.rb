@@ -219,6 +219,8 @@ module Terret
     class AllowListFloor < Hames::Service
       service_key :allow_list
       inject :tools, :sessions
+      config_schema patterns: { type: Array, default: [],
+                                doc: "tool-name globs the deny-by-default floor permits" }
 
       def start(ctx)
         AllowList.install(ctx, config[:patterns] || [])

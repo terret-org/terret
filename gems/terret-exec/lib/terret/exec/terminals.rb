@@ -46,6 +46,11 @@ module Terret
     class Terminals < Hames::Service
       service_key :terminals
       inject :subprocess
+      config_schema max_terminals: { type: Integer, default: 8, doc: "cap on concurrently open terminals" },
+                    read_timeout:  { type: Numeric, default: 0.1,
+                                     doc: "seconds a non-blocking terminal read waits for output" },
+                    cwd:           { type: String,
+                                     doc: "default working directory for opened terminals (default: Dir.pwd)" }
 
       # What `open` hands back. The handle itself stays in the registry: every
       # other method is name-addressed, so nothing outside this service can

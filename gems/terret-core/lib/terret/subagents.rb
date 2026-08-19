@@ -21,6 +21,7 @@ module Terret
   class Subagents < Hames::Service
     service_key :subagents
     inject :loop, :sessions
+    config_schema({}) # spawns delegated agents; takes no config of its own
 
     # `status` is the child's TURN status — :completed, :cancelled, :rejected
     # or :empty (a failure raises instead). A caller rendering the child's text

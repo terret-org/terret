@@ -12,6 +12,11 @@ module Terret
     class Service < Hames::Service
       service_key :ws
       inject :sessions, :loop, :llm
+      config_schema tokens:      { type: Hash, default: {},
+                                   doc: "token => agent-id map authorizing socket connections" },
+                    queue_limit: { type: Integer, default: 256,
+                                   doc: "max frames buffered per connection before backpressure" },
+                    heartbeat:   { type: Numeric, default: 20, doc: "seconds between server heartbeats" }
 
       def start(ctx)
         @ctx = ctx

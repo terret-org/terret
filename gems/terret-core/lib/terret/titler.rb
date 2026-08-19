@@ -11,6 +11,8 @@ module Terret
   class Titler < Hames::Service
     service_key :titler
     inject :sessions, :llm
+    config_schema role: { type: [String, Symbol], default: :titler,
+                          doc: "llm role a title is generated under" }
 
     PROMPT = "Title this conversation in at most six words. Reply with the title only."
 

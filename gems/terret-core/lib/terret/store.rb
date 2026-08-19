@@ -15,6 +15,7 @@ module Terret
     # objects with Sessions' working set costs nothing.
     class Memory < Hames::Service
       service_key :session_store
+      config_schema({}) # the test default takes no config
 
       def start(_ctx)
         @events ||= Hash.new { |h, k| h[k] = [] }
@@ -34,6 +35,8 @@ module Terret
     # for grepping. at carries microseconds so Time round-trips exactly.
     class JSONL < Hames::Service
       service_key :session_store
+      config_schema dir: { type: String, required: true,
+                           doc: "directory holding one JSONL file per session" }
 
       def start(_ctx)
         @dir ||= config.fetch(:dir).tap { |d| FileUtils.mkdir_p(d) }

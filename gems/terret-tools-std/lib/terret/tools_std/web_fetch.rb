@@ -53,6 +53,14 @@ module Terret
     class WebFetch < Hames::Service
       service_key :tools_std_web_fetch
       inject :tools
+      # resolver: and transport: are injectable seams (tests pass callables),
+      # not YAML config, so they are deliberately absent from the schema.
+      config_schema allow:     { type: Array, default: [],
+                                 doc: "host globs WebFetch may reach; empty denies every host" },
+                    deny:      { type: Array, default: [], doc: "host globs WebFetch may never reach" },
+                    timeout:   { type: Numeric, default: 30.0, doc: "seconds a fetch may run" },
+                    max_bytes: { type: Integer, default: 100_000,
+                                 doc: "bytes of a response body read before truncation" }
 
       # What one result may show. A display decision, the tool's own honest
       # cap rather than policy's — a truncator listening on tools/post_execute

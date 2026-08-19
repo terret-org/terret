@@ -75,6 +75,14 @@ module Terret
     # would be a hole, not a feature.
     class Docker < Hames::Service
       service_key :sandbox
+      config_schema image:      { type: String, default: "ruby:slim", doc: "container image argv runs in" },
+                    network:    { type: String, default: "none",
+                                  doc: "docker --network mode (none, bridge, host, or a network name)" },
+                    workspace:  { type: [String, Array],
+                                  doc: "host directory root(s) mounted into the container" },
+                    user:       { type: String,
+                                  doc: "container user (default: the host uid:gid); nil runs as root" },
+                    docker_bin: { type: String, doc: "path to the docker binary (default: resolved from PATH)" }
 
       # Debian-based, and chosen for what it carries rather than for Ruby:
       # ctx[:shell] spawns `bash` (the sentinel protocol is a bash protocol),

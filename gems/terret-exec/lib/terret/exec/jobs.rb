@@ -38,6 +38,11 @@ module Terret
     class Jobs < Hames::Service
       service_key :jobs
       inject :subprocess
+      config_schema max_jobs:   { type: Integer, default: 8, doc: "cap on concurrent background jobs" },
+                    max_output: { type: Integer, default: 1 << 20,
+                                  doc: "bytes of a job's output retained before truncation" },
+                    cwd:        { type: String, doc: "working directory for spawned jobs (default: Dir.pwd)" },
+                    env:        { type: Hash, default: {}, doc: "environment overlay for spawned jobs" }
 
       # The ledger row. `handle` is the live process, `buffer` is what it has
       # said that nobody has collected yet; both are mutable things this value

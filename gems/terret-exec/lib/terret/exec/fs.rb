@@ -30,6 +30,9 @@ module Terret
     # rather than being caught (or missed) as strings.
     class FS < Hames::Service
       service_key :fs
+      config_schema workspace: { type: [String, Array],
+                                 doc: "directory root(s) every fs op is contained to; " \
+                                      "empty or unset denies every operation" }
 
       def start(ctx)
         @ctx = ctx

@@ -13,6 +13,7 @@ module Terret
     # nothing is the point.
     class SandboxNone < Hames::Service
       service_key :sandbox
+      config_schema({}) # runs argv on the host unchanged; takes no config
 
       def start(_ctx); end
 

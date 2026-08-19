@@ -14,6 +14,15 @@ module Terret
     # knobs are read per call, so reconfigure is live by construction.
     class Summarizer < Hames::Service
       service_key :summarizer
+      # transport: is an injectable seam (tests pass a callable), not YAML config.
+      config_schema compression_ratio: { type: Numeric, default: 0.4,
+                                         doc: "target fraction of the original token count" },
+                    api_key:           { type: String,
+                                         doc: "Morph key; falls back to ENV MORPH_API_KEY when unset" },
+                    api_base:          { type: String, default: "https://api.morphllm.com/v1",
+                                         doc: "Morph Compact API base URL" },
+                    timeout:           { type: Numeric, default: 30.0,
+                                         doc: "seconds a compaction request may run" }
 
       DEFAULT_BASE    = "https://api.morphllm.com/v1"
       DEFAULT_TIMEOUT = 30.0

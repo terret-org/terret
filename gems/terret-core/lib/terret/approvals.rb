@@ -14,6 +14,7 @@ module Terret
     class Approvals < Hames::Service
       service_key :approvals
       inject :sessions, :tools, :loop
+      config_schema({}) # opt-in per tool; the service itself takes no config
 
       def start(ctx)
         @ctx = ctx

@@ -22,6 +22,8 @@ module Terret
     class Jobs < Hames::Service
       service_key :tools_std_jobs
       inject :tools, :jobs
+      config_schema max_output: { type: Integer, default: 30_000,
+                                  doc: "bytes of collected job output returned to the model before truncation" }
 
       # The same literal Bash, WebFetch and Task separate their output with,
       # and it carries the same caveats: a readability device rather than a

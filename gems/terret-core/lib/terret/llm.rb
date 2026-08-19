@@ -86,6 +86,8 @@ module Terret
     # request: middleware may rewrite the request or replace the stream.
     class Service < Hames::Service
       service_key :llm
+      config_schema roles: { type: Hash, default: {},
+                             doc: "role => \"provider/model\" map; an open set of roles" }
 
       def start(_ctx)
         @adapters = {}

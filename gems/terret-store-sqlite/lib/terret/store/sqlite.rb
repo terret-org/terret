@@ -19,6 +19,8 @@ module Terret
     # load exists.
     class SQLite < Hames::Service
       service_key :session_store
+      config_schema path: { type: String, required: true,
+                            doc: "SQLite database file for the append-only session log" }
 
       SCHEMA = <<~SQL
         CREATE TABLE IF NOT EXISTS events (

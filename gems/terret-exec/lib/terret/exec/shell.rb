@@ -45,6 +45,11 @@ module Terret
     class Shell < Hames::Service
       service_key :shell
       inject :subprocess
+      config_schema timeout:    { type: Numeric, default: 120, doc: "seconds a shell command may run" },
+                    max_output: { type: Integer, default: 1 << 20,
+                                  doc: "bytes of command output retained before truncation" },
+                    cwd:        { type: String, doc: "working directory for the shell (default: Dir.pwd)" },
+                    env:        { type: Hash, default: {}, doc: "environment overlay for the shell" }
 
       # `status` is nil when the command did not report one — it was
       # interrupted, or the shell ended underneath it. An exit code we do not

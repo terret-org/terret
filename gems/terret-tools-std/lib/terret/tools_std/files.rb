@@ -15,6 +15,8 @@ module Terret
     class Files < Hames::Service
       service_key :tools_std_files
       inject :tools, :fs
+      config_schema rg: { type: [TrueClass, FalseClass], default: true,
+                          doc: "use ripgrep for Grep when it and a subprocess seam are available" }
 
       DEFAULT_GLOB = "**/*"
 

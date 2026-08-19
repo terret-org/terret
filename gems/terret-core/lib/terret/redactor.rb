@@ -23,6 +23,10 @@ module Terret
   class Redactor < Hames::Service
     service_key :redactor
     inject :sessions
+    config_schema patterns:    { type: Array, default: [],
+                                 doc: "regexp/string patterns scrubbed from tool output and the log" },
+                  replacement: { type: String, default: "[REDACTED]",
+                                 doc: "text a matched secret is replaced with" }
 
     DEFAULT_REPLACEMENT = "[REDACTED]"
 

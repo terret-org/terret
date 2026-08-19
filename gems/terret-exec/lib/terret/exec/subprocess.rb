@@ -22,6 +22,8 @@ module Terret
     class Subprocess < Hames::Service
       service_key :subprocess
       inject :sandbox
+      config_schema term_grace: { type: Numeric, default: 2,
+                                  doc: "seconds between SIGTERM and SIGKILL when stopping a process" }
 
       # A capture that never exited on its own carries `status: nil` — an
       # exit code we do not have is not reported as one — with what it managed

@@ -19,6 +19,8 @@ module Terret
   class Compactor < Hames::Service
     service_key :compactor
     inject :sessions, :summarizer
+    config_schema budget: { type: Integer,
+                            doc: "token budget that triggers compaction; unset or falsy disables it" }
 
     def start(ctx)
       @ctx = ctx
@@ -91,6 +93,8 @@ module Terret
   class RoleSummarizer < Hames::Service
     service_key :summarizer
     inject :llm
+    config_schema role: { type: [String, Symbol], default: :compactor,
+                          doc: "llm role a summary is produced under" }
 
     PROMPT = <<~TEXT
       Summarize the conversation so far for your own future context. Preserve

@@ -23,6 +23,8 @@ module Terret
     class Bash < Hames::Service
       service_key :tools_std_bash
       inject :tools, :shell, :sandbox
+      config_schema max_output: { type: Integer, default: 30_000,
+                                  doc: "bytes of Bash output returned to the model before truncation" }
 
       # What one result may show. The seam has its own cap
       # (Shell::DEFAULT_MAX_OUTPUT, a mebibyte) and it is a memory bound;

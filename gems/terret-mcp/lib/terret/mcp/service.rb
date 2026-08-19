@@ -11,6 +11,14 @@ module Terret
     class Service < Hames::Service
       service_key :mcp
       inject :tools, :prompt
+      # client_factory: is an injectable seam (tests pass a factory), not YAML
+      # config, so it is absent from the schema. servers: is an open map of
+      # name => { url|command, args, env, bearer, approval, timeout }.
+      config_schema strict:  { type: [TrueClass, FalseClass], default: false,
+                               doc: "when true, a server that fails to mount fails the boot" },
+                    servers: { type: Hash, default: {},
+                               doc: "name => server config (url or command, args, env, bearer, " \
+                                    "approval, timeout)" }
 
       DEFAULT_TIMEOUT = 30
 

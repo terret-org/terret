@@ -114,6 +114,8 @@ module Terret
   class Loop < Hames::Service
     service_key :loop
     inject :sessions, :tools, :llm, :prompt
+    config_schema max_agents: { type: Integer, default: 128,
+                                doc: "cap on concurrently live agents in this loop" }
 
     MAX_STEPS = 25
 
