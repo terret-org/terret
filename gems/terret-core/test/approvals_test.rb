@@ -439,6 +439,50 @@ class ParallelApprovalsTest < Minitest::Test
     end
   end
 
+  # A provider is not contractually bound to unique tool-call ids, and two
+  # calls of one parallel batch can arrive sharing one. Keyed by
+  # [session, call_id], the second park overwrote the first's queue entry, so a
+  # verdict woke only the survivor while the first fiber parked forever and the
+  # barrier never completed. Keyed by a unique per-park token, each park gets
+  # its own wake.
+  DUP_A = Terret::LLM::ToolCall.new(id: "dup", name: "deploy_a", args: {})
+  DUP_B = Terret::LLM::ToolCall.new(id: "dup", name: "deploy_b", args: {})
+
+  def dup_id_script
+    [{ text: "Deploying both.", tool_calls: [DUP_A, DUP_B] }, { text: "Done." }]
+  end
+
+  # The in-memory waiter count is the only honest barrier for "both parked":
+  # pending() dedups by call_id, so a shared id makes it read 1 while two
+  # fibers are genuinely waiting.
+  def waiting_count(ctx) = ctx[:approvals].instance_variable_get(:@waiting).size
+
+  def test_two_parallel_parks_sharing_a_call_id_each_get_their_own_wake
+    ctx, = boot(script: dup_id_script)
+    ran = []
+    register_parallel_deploys(ctx, ran)
+    agent, session = spawn(ctx)
+
+    Sync do |task|
+      turn = task.async { ctx[:loop].run_turn(agent, "ship it") }
+      await("both calls never parked") { waiting_count(ctx) == 2 }
+      assert_equal :waiting_approval, agent.status
+
+      # resolving the shared id once wakes exactly one of the two...
+      ctx[:sessions].append(session.id, "approval/resolved", { call_id: "dup", verdict: "approved" })
+      await("the first waiter never woke") { ran.length == 1 }
+      assert_equal 1, waiting_count(ctx),
+                   "one verdict must wake exactly one of two parks sharing a call id"
+
+      # ...and resolving it again wakes the other, so the barrier completes.
+      ctx[:sessions].append(session.id, "approval/resolved", { call_id: "dup", verdict: "approved" })
+      assert_equal :completed, task.with_timeout(5) { turn.wait }
+      assert_equal %w[deploy_a deploy_b], ran.sort
+      results = session.events.select { |e| e.type == "tool/result" }
+      assert_equal 2, results.length
+    end
+  end
+
   def test_the_last_verdict_of_a_parallel_park_restores_the_agent
     ctx, = boot(script: two_deploy_script)
     register_parallel_deploys(ctx, [])

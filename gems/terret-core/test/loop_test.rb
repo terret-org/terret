@@ -674,6 +674,60 @@ class AgentLifecycleTest < Minitest::Test
     assert_equal [s.id], seen
   end
 
+  # A raising fork disposer must not leak a cap slot: the registry entry is
+  # freed in an ensure, so a disposal that blew up partway still returns the
+  # slot it held. Without it a run of them exhausts max_agents while
+  # Subagents#dispose only warns, and the child stays registered forever.
+  def test_dispose_agent_frees_the_slot_even_when_a_fork_disposer_raises
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    agent.ctx.effect { -> { raise "disposer boom" } }
+
+    assert_raises(RuntimeError) { ctx[:loop].dispose_agent(agent.id) }
+    assert_equal :done, agent.status
+    assert_nil ctx[:loop].agent(agent.id), "the id slot must be freed despite the raise"
+    assert_nil ctx[:loop].agent_for_session(s.id), "the session slot must be freed despite the raise"
+    ctx[:loop].spawn_agent(session_id: s.id) # the slot is genuinely free
+  end
+
+  # The loop is a plugin, and its teardown has to take its agents with it: an
+  # idle fork left mounted keeps its per-agent policy listeners and forked tool
+  # registrations alive past the shutdown meant to end them. Boot.shutdown
+  # unloads each row through loader.unload!, which calls this stop hook.
+  def test_stop_disposes_every_agent_the_loop_holds_when_the_row_unloads
+    ctx, loader = boot(script: [])
+    loop_svc = ctx[:loop]
+    a = ctx[:sessions].create
+    b = ctx[:sessions].create
+    agent_a = loop_svc.spawn_agent(session_id: a.id)
+    agent_b = loop_svc.spawn_agent(session_id: b.id)
+    disposed = []
+    agent_a.ctx.effect { -> { disposed << agent_a.id } }
+    agent_b.ctx.effect { -> { disposed << agent_b.id } }
+
+    loader.unload!("loop")
+
+    assert_equal [agent_a.id, agent_b.id].sort, disposed.sort,
+                 "the loop's teardown must dispose every agent it spawned"
+    assert_equal :done, agent_a.status
+    assert_equal :done, agent_b.status
+    assert_nil loop_svc.agent(agent_a.id)
+    assert_nil loop_svc.agent(agent_b.id)
+  end
+
+  # Idempotent: a second stop (a re-run shutdown, or the loader disposing owner
+  # effects after stop already ran) finds no agents and does nothing.
+  def test_stop_is_idempotent
+    ctx, = boot(script: [])
+    loop_svc = ctx[:loop]
+    s = ctx[:sessions].create
+    loop_svc.spawn_agent(session_id: s.id)
+
+    loop_svc.stop(ctx)
+    loop_svc.stop(ctx) # must not raise
+  end
+
   # A reaping bug in one listener must not strand disposal: emit isolates it.
   def test_dispose_agent_survives_a_raising_agent_disposed_listener
     ctx, = boot(script: [])
@@ -1347,6 +1401,66 @@ class ToolBarrierTest < Minitest::Test
 
     errored = session.events.select { |e| e.type == "tool/result" }[1]
     assert_equal "that one is out of stock", errored.payload[:error]
+  end
+
+  # The serial path is a barrier of one and gets the same guarantee the
+  # parallel barrier does: a listener that raises AROUND the handler (the one
+  # crash Registry#execute does not itself render) is one call's error result,
+  # not a failed turn. Without it the tool/call was logged and the turn closed
+  # `failed` with no tool/result under it — and because run_turn appended a
+  # turn/end, `resumable?` goes false, so nothing repairs the dangling call. The
+  # NEXT turn's derive_messages then projects an assistant tool_call a real
+  # provider rejects outright: the failure poisons every turn after it.
+  def test_a_raising_listener_on_a_serial_call_does_not_leave_a_dangling_call
+    ctx, = boot(script: batch_script("lonely"))
+    ran = []
+    ctx.with_owner("solo") do
+      ctx[:tools].register(name: "lonely", description: "s", params: {}) do
+        ran << "lonely"
+        "did work"
+      end
+    end
+    ctx.on("tools/execute") do |call, next_|
+      raise "listener bug" if call.name == "lonely"
+
+      next_.(call)
+    end
+    agent, session = spawn(ctx)
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "go")
+    refute_includes ran, "lonely", "the listener raised before the handler could run"
+
+    result = session.events.select { |e| e.type == "tool/result" }.first
+    assert_equal "RuntimeError: listener bug", result.payload[:error]
+    assert_equal "completed", session.events.last.payload[:status]
+
+    # The invariant the log exists to hold, checked on the serial path: every
+    # call the projection shows the model has a result under it, so the next
+    # turn's request is well-formed rather than a tool_use with no tool_result.
+    history = ctx[:sessions].derive_messages(session.id)
+    owed = history.select { |m| m.role == :assistant }
+                  .flat_map { |m| m.parts.grep(Terret::LLM::ToolCall) }.map(&:id)
+    answered = history.select { |m| m.role == :tool }.flat_map(&:parts).map(&:id)
+    assert_empty owed - answered, "a serial call's crash must not leave the projection owing a result"
+  end
+
+  # The same message-only rendering the parallel path keeps for a domain
+  # Failure, on the serial path: its message is the whole story, unprefixed.
+  def test_a_listener_raising_a_failure_on_a_serial_call_renders_message_only
+    ctx, = boot(script: batch_script("lonely"))
+    ctx.with_owner("solo") do
+      ctx[:tools].register(name: "lonely", description: "s", params: {}) { "did work" }
+    end
+    ctx.on("tools/execute") do |call, next_|
+      raise Terret::Tools::Failure, "out of stock" if call.name == "lonely"
+
+      next_.(call)
+    end
+    agent, session = spawn(ctx)
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "go")
+    result = session.events.select { |e| e.type == "tool/result" }.first
+    assert_equal "out of stock", result.payload[:error]
   end
 
   # A barrier is not interruptible from outside once it starts, so a cancel

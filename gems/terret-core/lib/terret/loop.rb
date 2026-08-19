@@ -166,18 +166,24 @@ module Terret
         raise TurnAlreadyRunning, "agent #{id} is #{agent.status}; dispose only idle agents"
       end
 
-      agent.ctx.dispose!
-      agent.status = :done # terminal: the handle now refuses a turn outright
-      @agents.delete(id)
-      @by_session.delete(agent.session_id)
-      # Fork disposal reaps the agent's registrations, but the process state a
-      # tool call created — ctx[:shell]'s bash, ctx[:terminals]' PTYs — is
-      # root-mounted and keyed by session, so it survives the fork. This is the
-      # signal those services reap it on; core stays decoupled from the optional
-      # exec gem by only emitting, and emit isolates a listener fault so a
-      # reaping bug cannot strand the disposal that already happened.
-      @ctx.emit("agent/disposed", agent.session_id)
+      tear_down_agent(agent)
       agent
+    end
+
+    # Lifecycle teardown: the loader calls this when the loop row unloads
+    # (Boot.shutdown unloads every row through unload!, which calls stop). The
+    # loop is a plugin like any other, and its agents are state it holds — an
+    # idle fork left mounted keeps its per-agent policy listeners and forked
+    # tool registrations alive past the shutdown meant to end them. Every agent
+    # goes, whatever its status, because the process is coming down; best-effort
+    # and idempotent, so one fork whose disposal raises cannot strand the rest
+    # and a second call finds nothing left to do.
+    def stop(_ctx)
+      @agents.values.each do |agent|
+        tear_down_agent(agent)
+      rescue StandardError => e
+        warn "terret: loop shutdown: agent #{agent.id} would not dispose: #{e.class}: #{e.message}"
+      end
     end
 
     TurnState = Struct.new(:status, :steered)
@@ -225,6 +231,29 @@ module Terret
     end
 
     private
+
+    # The disposal both dispose_agent and stop share. The registry slots are
+    # freed in an ensure, so a fork disposer that raises still returns the cap
+    # slot the agent held rather than leaving the child registered forever while
+    # Subagents#dispose only warns — a run of those would exhaust max_agents.
+    # The raise still propagates: the caller decides what to make of it.
+    #
+    # Fork disposal reaps the agent's registrations, but the process state a
+    # tool call created — ctx[:shell]'s bash, ctx[:terminals]' PTYs, ctx[:jobs]'
+    # subprocesses — is root-mounted and keyed by session, so it survives the
+    # fork. The emit is that reaping signal; core stays decoupled from the
+    # optional exec gem by only emitting, and emit isolates a listener fault so
+    # a reaping bug cannot strand the disposal that already happened. It fires
+    # from the ensure too, so a raised fork disposal still sweeps the session's
+    # processes.
+    def tear_down_agent(agent)
+      agent.ctx.dispose!
+    ensure
+      agent.status = :done # terminal: the handle now refuses a turn outright
+      @agents.delete(agent.id)
+      @by_session.delete(agent.session_id)
+      @ctx.emit("agent/disposed", agent.session_id)
+    end
 
     # Shared turn envelope: the status guard, the failure rescue, and the
     # turn/end ensure. Both entry points run their body inside it.
@@ -432,7 +461,18 @@ module Terret
         results = if concurrent
                     execute_together(ctx, sid, run)
                   else
-                    run.map { |tc| execute_call(ctx, sid, tc) }
+                    # A barrier of one gets the same guard the parallel barrier
+                    # applies (execute_together, via guarded_call): a listener
+                    # that raises AROUND the handler — the one crash
+                    # Registry#execute does not itself render — is this call's
+                    # error result, not an exception that fails the turn with the
+                    # tool/call already logged and no tool/result under it. That
+                    # dangling call cannot be repaired: run_turn closes a failed
+                    # turn, resumable? goes false, and every later turn's
+                    # projection carries an assistant tool_call a real provider
+                    # rejects. One call's failure is one call's result, serial or
+                    # parallel.
+                    run.map { |tc| guarded_call(ctx, sid, tc) }
                   end
         # In CALL order, always. Concurrency may change when work happens; it
         # may not change what the log says happened, because derive_messages

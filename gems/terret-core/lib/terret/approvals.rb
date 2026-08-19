@@ -17,7 +17,18 @@ module Terret
 
       def start(ctx)
         @ctx = ctx
-        @waiting = {} # [session_id, call_id] => Thread::Queue awaiting one verdict payload
+        # A unique per-park token => { session_id:, call_id:, queue: }. Keyed by
+        # the token rather than by [session_id, call_id] because provider
+        # tool-call ids are NOT contractually unique: two calls of one parallel
+        # batch can arrive sharing an id, and keying by it let the second park
+        # overwrite the first's queue so a single verdict woke only the survivor
+        # and the first fiber parked forever, hanging the barrier. Each park now
+        # owns its own entry and its own wake. The DURABLE correlation
+        # (approval/requested and /resolved, matched in the log on call_id +
+        # name + args) is unchanged; only this in-memory map needed unique keys.
+        @waiting = {}
+        @waiting_mutex = Mutex.new # tests resolve from another thread; wake_one scans
+        @park_seq = 0
 
         ctx.on("tools/execute") do |call, next_|
           gate(call, next_)
@@ -25,7 +36,7 @@ module Terret
         ctx.on("session/event") do |ev|
           next unless ev.type == "approval/resolved"
 
-          @waiting.delete([ev.session_id, ev.payload[:call_id]])&.push(ev.payload)
+          wake_one(ev.session_id, ev.payload[:call_id], ev.payload)
         end
       end
 
@@ -57,6 +68,14 @@ module Terret
           @ctx[:sessions].append(session_id, "approval/resolved",
                                  { call_id: call_id, verdict: "denied", reason: reason })
         end
+        # The durable denials above wake one waiter per unique pending id
+        # through the resolved listener. A provider that reused a call id within
+        # one parallel batch parked more than one fiber on that id, though, and
+        # a cancel means all of them: sweep whatever is still parked for this
+        # session onto the denial they share, so no fiber is left holding the
+        # barrier open. Waiters the appends already woke are gone from the map,
+        # so this touches only the ones a single durable denial could not reach.
+        drain_session_waiters(session_id, { verdict: "denied", reason: reason })
       end
 
       private
@@ -166,10 +185,13 @@ module Terret
 
       def park(call)
         q = Thread::Queue.new
-        key = [call.session_id, call.id]
+        token = nil
         # waiter first, then the durable request: a verdict can never land in
         # the gap between the append's fan-out and the waiter existing
-        @waiting[key] = q
+        @waiting_mutex.synchronize do
+          token = (@park_seq += 1)
+          @waiting[token] = { session_id: call.session_id, call_id: call.id, queue: q }
+        end
         # ...and the gate's own lookup happened before that waiter existed, so
         # a verdict landing in between signalled nothing. Look again now that
         # a signal has somewhere to land, or the pop below waits forever.
@@ -187,8 +209,35 @@ module Terret
         # thread under plain minitest, where tests resolve from another thread
         q.pop
       ensure
-        @waiting.delete(key)
+        @waiting_mutex.synchronize { @waiting.delete(token) } if token
         restore(agent, call.session_id)
+      end
+
+      # Wake exactly one waiter parked on this (session, call_id). One durable
+      # verdict is one decision, so it releases one park; a second verdict for a
+      # reused id releases the next. FIFO by insertion, so the call that parked
+      # first is the first one a verdict frees.
+      def wake_one(session_id, call_id, payload)
+        entry = @waiting_mutex.synchronize do
+          token, e = @waiting.find do |_t, w|
+            w[:session_id] == session_id && w[:call_id] == call_id
+          end
+          @waiting.delete(token) if token
+          e
+        end
+        entry && entry[:queue].push(payload)
+      end
+
+      # Release every waiter still parked for a session onto one payload — the
+      # cancel path's escape hatch (deny_pending!), so a reused call id cannot
+      # leave a fiber holding the barrier open after the durable denials ran.
+      def drain_session_waiters(session_id, payload)
+        entries = @waiting_mutex.synchronize do
+          matched = @waiting.select { |_t, w| w[:session_id] == session_id }
+          matched.each_key { |t| @waiting.delete(t) }
+          matched.values
+        end
+        entries.each { |e| e[:queue].push(payload) }
       end
 
       # What the agent goes back to when a parked call comes out, derived from

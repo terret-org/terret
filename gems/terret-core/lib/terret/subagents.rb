@@ -11,8 +11,13 @@ module Terret
   # `ctx:` is the CALLING AGENT's context and it is an explicit argument
   # rather than a service ivar for one reason: it is what makes the
   # no-escalation guarantee structural. No path through this provider can
-  # build a child from the root, so an agent restricted to Read and Grep
-  # cannot ask a child to run Bash.
+  # build a child from the root, so a child inherits the caller's roster and
+  # its install-time policy FLOOR — an agent whose FLOOR is Read and Grep
+  # cannot ask a child to run Bash. The qualifier matters (docs/subagents.md
+  # §3): a policy hot-*narrowed* mid-session does not carry to children spawned
+  # after it, because the child's session is fresh and holds no policy/updated,
+  # so it runs at the floor rather than at the parent's live, narrowed set. A
+  # narrowing that must reach children belongs in the floor (a config row).
   class Subagents < Hames::Service
     service_key :subagents
     inject :loop, :sessions
