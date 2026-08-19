@@ -7,3 +7,4 @@ rescue LoadError
 end
 
 require_relative "exec/fs"
+require_relative "exec/sandbox_none"
