@@ -1,6 +1,6 @@
 # Terret
 
-Ruby-native, model-agnostic agent harness where everything is a plugin. Eight gems in one
+Ruby-native, model-agnostic agent harness where everything is a plugin. Eleven gems in one
 repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible effects,
@@ -28,14 +28,33 @@ repo:
   wire proven in the deployed agora integration (bearer key, `compression_ratio: 0.4`,
   nil-on-any-failure), an injectable transport so its unit tests need no network, and a
   `MORPH_LIVE=1` live lane (pending a `MORPH_API_KEY` in this environment).
+- `gems/terret-exec` is the execution world (M7, plan §6.6): `ctx[:fs]` with every path
+  realpath-contained to a granted workspace dir behind an `fs/authorize` waterfall,
+  `ctx[:subprocess]` (spawn and PTY under the one reactor, SIGTERM→SIGKILL cancellation),
+  `ctx[:shell]` (one persistent bash per agent, sentinel protocol), `ctx[:terminals]`
+  (named long-lived PTYs, capped), and `ctx[:sandbox]` with the `None` provider — every
+  argv passes `sandbox.wrap` before it spawns. Stdlib only.
+- `gems/terret-tools-std` is the standard roster (M7, plan §6.7): `Read`, `Write`, `Edit`,
+  `Glob`, `Grep`, `Bash`, `WebFetch`, `terminal_open`/`input`/`read`/`close` — Claude
+  Code's names verbatim, no alias map — registered on those seams with honest
+  `mutating`/`approval`/`concurrency` metadata. `Bash`'s approval derives from
+  `sandbox.isolated?` at registration; `WebFetch` sits behind a deny-by-default domain
+  policy re-checked per redirect hop, plus a host-side loopback/link-local floor.
+- `gems/terret-sandbox-docker` is the container provider (M7): a long-lived container per
+  boot, each workspace dir bind-mounted at the same absolute path, argv wrapped into
+  `docker exec`, `--network none` by default. One patch row moves the execution world into
+  it; docker-gated tests skip clean when the daemon is absent.
 - `gems/terret` is a placeholder holding the name. It will carry profiles and boot.
   None of that is written. Do not add real behaviour here without reading §5 and §9 of
   the plan first.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
-here covers M0–M6: kernel, session log with the invariant, tools pipeline, loop, the
-OpenRouter adapter, the socket, the MCP client, and long-lived agent hardening (durable
-approvals, resumable turns, compaction, titling, cost accounting, hot-reloadable policy).
+here covers M0–M7: kernel, session log with the invariant, tools pipeline, loop, the
+OpenRouter adapter, the socket, the MCP client, long-lived agent hardening (durable
+approvals, resumable turns, compaction, titling, cost accounting, hot-reloadable policy),
+and the execution world (fs/subprocess/shell/terminals seams under workspace scoping, the
+std tools, sandbox `none` and `docker`, credential redaction at the tool pipeline and the
+log-append boundary).
 `LLM::FakeAdapter` (canned script replay) remains the test/demo default; the OpenRouter
 path is proven by canned-wire tests plus a live smoke lane. Session payloads are
 primitives at the append boundary; typed parts encode through `LLM.encode_part`.
@@ -54,6 +73,7 @@ OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs as
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
 bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture
 ruby examples/lifecycle_demo.rb   # park/resume, compaction, titling, cost, hot policy
+ruby examples/exec_demo.rb   # file tools, shell, terminals, redaction; the container act needs docker
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and `terret-core` have zero

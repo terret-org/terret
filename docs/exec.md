@@ -30,7 +30,10 @@ risk M7 defends against is untrusted *code execution*, not untrusted file
 access from a trusted harness, so the container's isolation is spent where
 the threat actually is. Path containment (§3) is enforced identically in
 both worlds, because it never depended on which side of the sandbox
-boundary the syscall runs on.
+boundary the syscall runs on. `examples/exec_demo.rb` walks the concrete
+proof: the demo edits a file host-side through `ctx[:fs]`, then reads it
+back with `Bash` from inside the container — one file, one path, both
+worlds.
 
 ## 2. The seams
 

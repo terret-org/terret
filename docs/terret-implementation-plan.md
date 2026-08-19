@@ -462,7 +462,7 @@ Each phase ends with demoable acceptance criteria. No estimates are given; seque
 
 **M6. Long-lived agent hardening. SHIPPED.** Rescoped mid-execution (recorded in the plan, user-confirmed) once it became clear Terret's primary workload is autonomous agentic systems rather than interactive use: durable human-in-the-loop approvals (`ctx[:approvals]`) landed as designed — a `tools/execute`-stage gate that a per-agent `AllowList` veto always settles first, parking on durable `approval/requested`/`approval/resolved` so a verdict already in the log never re-parks after a restart — but shipped as an **opt-in row** rather than the milestone's center of gravity. That center became three things instead: a kernel-level reconfigure contract (`Hames::Service#reconfigure` / `Loader#reconfigure!`, wholesale config replace, a live `config/updated` event), adopted immediately for `Loop.max_agents` and the socket's tokens/heartbeat/queue_limit; hot-reloadable per-agent policy as a durable log projection (`AllowList` v2 — the active pattern set is the last `policy/updated` event in the session, install patterns only the floor, the socket's `set_policy` frame appending it, replay rebuilding it exactly after a restart); and a summarizer seam (`ctx[:summarizer]`, sole-provider like the session store) behind the compactor, with `RoleSummarizer` (no signup, one `:compactor`-role model call) as the core default and a new eighth gem, `terret-morph`, calling Morph's Compact API on the wire proven in the deployed agora integration (bearer key, `compression_ratio: 0.4`, `preserve_recent: 0`, nil-on-any-failure, an injectable transport keeping its unit tests off the network). `Loop#resume_turn` re-enters an open turn straight from the log — closing the crashed step by re-executing tool calls the last assistant message still owes, reading approval verdicts already recorded rather than re-asking — and the socket now auto-resumes on either a wake or a verdict landing for an agent with no parked fiber, with the wake-race requeuing a losing steer rather than dropping it. Titling (one durable `session/titled` per session, `:titler` role with a 40-char fallback) and `Sessions#usage` (a pure log rollup of every `step/end`'s usage) round out the observability the milestone needed. Three §14 debts got paid alongside all of it: `Context#emit` isolates listener failures instead of surfacing them into a producer whose append already committed; the append boundary refuses invalid UTF-8 instead of failing deep in a store; and the agent registry gained a real lifecycle (`AgentExists`, `AgentCapExceeded` at a cap of 128, `dispose_agent` for idle agents only, `agent_for_session`). Steers now log as `context/injected` rather than `user/message`, restoring a distinction the projection always supported but nothing emitted. *Accepted:* a turn wedged mid-tool-call survived `kill -9` and completed on the first wake in a fresh process, at-least-once for tool calls documented as the cost of that guarantee; a single in-process run proved four wakes, a compaction, a title, a cost rollup, and a live policy flip over the socket in one session. *Deferred:* the fuller §6.4 status machine (`waiting_input`/`stopping`/`done`) to M7/M8; spontaneous resume on boot (resume stays stimulus-driven by design); compaction retention tails; `terret-morph`'s `query:` param.
 
-**M7. Execution world.** fs, subprocess, shell, and terminals seams; std tools; sandbox `none` and `docker`; workspace scoping. *Accept:* one patch row moves bash, read, write, and PTY into a container with zero tool changes.
+**M7. Execution world. SHIPPED.** Three new gems gave the agent hands. `terret-exec` carries the seams: `ctx[:fs]`, where every path expands, resolves its deepest existing prefix through `realpath`, and must land inside a granted workspace directory — traversal and symlink escapes fail closed, including the dangling symlink whose target does not exist yet, with `O_NOFOLLOW` on the leaf open — and every operation passes an `fs/authorize` waterfall that may veto or admit but never rewrite the path; `ctx[:subprocess]`, spawn and PTY under the one reactor with cooperative cancellation escalating SIGTERM to SIGKILL, every argv routed through `ctx[:sandbox].wrap` before it spawns; `ctx[:shell]`, one persistent bash per agent behind a sentinel protocol the model cannot forge, cwd and environment surviving between calls; and `ctx[:terminals]`, named long-lived PTYs under a per-owner cap. All four hold per-agent runtime state that no registration owns, which reversibility alone could not reap, so the milestone declared `agent/disposed` and hung shell and terminal teardown off it: an agent's shells, its terminals, and its backgrounded jobs now go down with it. `terret-tools-std` registers the roster on those seams under Claude Code's names verbatim — `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebFetch`, and `terminal_open`/`input`/`read`/`close` — with honest `mutating`, `approval`, and `concurrency` metadata; `Bash` derives its approval from `ctx[:sandbox].isolated?` at registration, §13's rule made mechanical and re-derived when a sandbox row swaps, and `WebFetch` sits behind a deny-by-default domain policy re-checked on every redirect hop, over a host-side floor that refuses loopback and link-local addresses after resolution — the fetch egresses from the harness, not from the container, so `network: none` was never going to govern it. `terret-sandbox-docker` is the third gem and the acceptance itself: a long-lived container per boot, each workspace directory bind-mounted at the same absolute path, argv wrapped into `docker exec`, `--network none` unless configured otherwise. Redaction landed where §13 asked for it and inside the invariant rather than against it — a `tools/post_execute` pass over a Result's content and error, plus a scrubber seam folded into `Sessions#normalize_payload`, so the stored log and every projection derived from it, both sides of the digest, see identical bytes. Streaming forced a second round: per-fragment scrubbing leaks any secret a provider happens to split across deltas, so a mounted redactor now coalesces each text run into a single chunk at run end, proven by window-straddling tests the first fix would have passed; and resume refuses to re-execute a call whose arguments or whose name the log redacted, rather than silently running a different command. Four preludes in the kernel and core made all of it safe to mount: `Tools::Registry#register` records its effect on the registering context, so a forked agent's tools die with the fork instead of surviving it holding filesystem authority; `Loader#reconfigure!` became atomic, committing the row only after an owned hook returns; the `AllowList` projection caches per session with log-first invalidation instead of rescanning the whole log on every call, which the std tools multiply by an order of magnitude; and `Registry#execute` hands a handler the session it is running in, merge-ordered so a model-forged `session_id` in the arguments can never reach another agent's shell. The `sqlite`/`pty` soak owed since M2 finally ran: eight agents driving concurrent multi-step tool turns against both the SQLite and JSONL stores with two PTYs streaming throughout, every session's seqs unique and contiguous on a fresh re-read, no reactor stall. Both adversarial gates ran at the milestone as M4's did — a fresh opus reviewer over the whole-milestone diff and a cross-model Codex challenge — converging on the disposal leak and diverging productively, with Codex finding a dangling-symlink containment escape the opus pass had rated out of scope; their synthesis drove a four-commit fix batch before the push. *Accepted:* one appended patch row moved `Bash`, `Read`, `Write`, and a PTY into a container with zero tool changes — the roster identical field for field save `Bash`'s sandbox-derived approval, the same handler blocks proven by source location — discriminated by container membership (`/.dockerenv`) rather than kernel name, since a Linux runner reports `Linux` from both worlds; proven live under docker and exercised live in CI. *Deferred:* the §14 additions from the ship gate — host-side output caps for `Read`, `Grep`, and capture; a cancellation model for children orphaned mid-spawn; a total wall-clock deadline for `WebFetch`; docker resource limits as config passthrough; hash-key scrubbing at the log boundary; and two accepted TOCTOU windows, an intermediate-component symlink swap and DNS rebinding under `WebFetch`. To M8: the `task`/`job_*`/`todo` tools and the tool barrier that honors `concurrency:`. Unscheduled beyond it, recorded in §14's ledger rather than promised to a milestone: `landlock` and `seatbelt` sandboxes, `fs.watch`, the SQLite per-session writer task (the soak says it is not needed yet), and harness-level idempotency keys.
 
 **M8. Subagents, then 0.1 release.** The `task` tool over the subagent seam, background jobs, ACP server, docs and cookbook, `doctor`, the bench lane, the security pass in §13, RubyGems release, and an example third-party plugin gem published from a separate repo to prove the extension story.
 
@@ -486,7 +486,7 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
 - **Long-session context growth.** A session measured in weeks outgrows any context window, so compaction is not a nicety and it interacts directly with the §2.5 invariant: a compacted history is still model-visible, so it must be logged as its own durable event rather than computed on the fly. Design the event before the feature.
 - **OpenRouter as a single point of failure.** One adapter means one vendor relationship, one rate limiter, and one normalization layer standing between Terret and every model. The seam makes a native adapter cheap to add, but it is worth knowing this is a deliberate concentration of risk rather than an oversight.
 - **Feature passthrough through OpenRouter.** Prompt caching and interleaved thinking are the two §15 claims most likely to degrade. Verify per model rather than assuming, and be willing to demote a claim rather than defend it.
-- **Fiber-scheduler edge cases** in `sqlite3` and `pty` under load. Mitigate with the writer-task pattern and soak tests during M7's execution-world work. (M5's canary pins fiber-safety at the MCP boundary only.)
+- **Fiber-scheduler edge cases** in `sqlite3` and `pty` under load. Mitigate with the writer-task pattern and soak tests during M7's execution-world work. (M5's canary pins fiber-safety at the MCP boundary only.) *The soak ran during M7* — eight agents on concurrent multi-step tool turns against both the SQLite and JSONL stores with two PTYs streaming throughout, seqs unique and contiguous on a fresh re-read of each store — and found no stall, so the risk retires into normal regression coverage (the lane is opt-in behind `TERRET_SOAK=1`, so wiring it into a scheduled CI job is the remaining follow-up). The writer-task pattern stays unbuilt on purpose: durable-first ordering means a writer task cannot return before the write lands, so it buys serialization rather than latency, and the soak shows a single connection with sub-millisecond inserts is not where the time goes.
 - **Event typing without a compiler.** Runtime contracts plus CI catalog diffing is the bet. If drift still bites, add a Steep-checked events RBS generated from declarations.
 - **Tool naming.** Whether std tools carry Claude Code's names or an alias map is unresolved and blocks nothing until M5, but it should be settled before allow-list formats harden.
 - **Kernel ergonomics debt, found during M3 review.** Two small Hames sharp edges hit
@@ -516,12 +516,21 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   which is enough for now — revisit once an error-tracking seam exists. `Tools::AllowList`'s
   `current_patterns` is an O(events) linear scan of the session log on every call; fine at
   M6's scale, a caching candidate if a very long session ever makes it show up in a
-  profile.
+  profile. *Paid down during M7*, where the std tools made it show up: the projection now
+  caches per session, invalidated the log-first way by a `session/event` listener watching
+  for `policy/updated`, with an unknown session left uncached so deny-all never ossifies
+  into allow.
 - **Recorded, not fixed, at M6's final gates.** Seven findings from the closing
   cross-model review that are real but not M6's problem, each with the reason it waited.
   (1) `Context#register`'s service entry is recorded on the ROOT context rather than the
   registering fork, so a forked agent's service registration bleeds upward — pre-existing,
-  invisible at M6's usage, an M7 kernel pass. (2) Nothing evicts: `Sessions`' `@cache`
+  invisible at M6's usage, an M7 kernel pass. *Paid down during M7* at the surface that
+  actually reached it: `Tools::Registry#register` recorded its effect on the registry's own
+  root rather than on the caller, so a tool a forked agent registered outlived
+  `dispose_agent` — a security bug the moment tools carry filesystem authority. `register`
+  now takes `ctx:` and records there; the roster stays global because visibility is the
+  allow list's job, but ownership follows the registering context so disposal reaps it.
+  (2) Nothing evicts: `Sessions`' `@cache`
   (and now its per-session lock map) grows for the life of the process, and the agent pool
   never auto-disposes an idle agent, so a box serving thousands of long-lived sessions
   leaks both. Long-lived memory lifecycle is an M7 topic in its own right, alongside the
@@ -531,16 +540,54 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   honestly "what the log recorded", not "what the vendor billed". (4) Both the policy scan
   and the pending-approvals scan are O(events) per call, and `pending` inside a long park
   loop is quadratic in the requests of one turn; fine at M6's scale, caching candidates
-  the moment a profile shows them. (5) `Loader#reconfigure!` is not atomic: a service
+  the moment a profile shows them. *Half paid during M7*: the policy scan got its
+  per-session cache when the std tools multiplied call volume; the pending-approvals scan
+  is untouched and still O(events), which is honest because approvals stayed an opt-in row.
+  (5) `Loader#reconfigure!` is not atomic: a service
   whose `reconfigure` hook raises leaves the row's config swapped and the service half-
   updated, and the hooks themselves run ownerless, so an effect one registers is not
-  recorded against the row. (6) The at-least-once tool contract has a narrower cousin
+  recorded against the row. *Paid down during M7*: the row and the service's config roll
+  back when a hook raises, `config/updated` fires only on success, and hooks run under
+  `with_owner(id)` so what they register belongs to the row. (6) The at-least-once tool contract has a narrower cousin
   worth naming: a tool that performs its side effect and dies before its `tool/result`
   appends is genuinely ambiguous on resume, not merely repeated. Idempotency stays the
   tool's concern in v1; harness-level idempotency keys are an M7+ candidate. (7)
   `set_policy` carries the whole of a connection's authority — a client that can steer an
   agent can also rewrite its allow list. Splitting per-frame capabilities from the bearer
   token is a real design question and belongs with the multi-tenant work, not here.
+- **Accepted deferrals from the M7 ship gate.** Both adversarial gates found more than
+  the fix batch took, and the rest was deferred deliberately rather than rushed into an
+  invariant-sensitive surface at a push. (1) Nothing caps what a single read buffers:
+  `FS#read`, `Subprocess`' capture, and `Grep` will all happily pull a huge file into
+  memory, and because the harness is one process the OOM kills every agent on the box
+  rather than the one that asked. A host-side cap on each is the M8 candidate; the shell
+  already has `max_output` for exactly this reason. (2) A fiber cancelled mid-spawn or
+  mid-close can orphan its child: `ensure` closes the pipes but cannot reap, since the
+  reap loop's own sleep would re-raise inside it. Exposure is low today because parks
+  happen at approval gates rather than mid-spawn, and the `timeout:` path reaps correctly,
+  but it needs a design decision before M8's cancellation work. (3) `WebFetch` has
+  per-phase timeouts and no total wall-clock deadline, so a slowloris-shaped server can
+  hold a fiber for far longer than any single phase allows. (4) The docker provider passes
+  no `--memory`, `--cpus`, or `--pids` limits; the container isolates execution but does
+  not bound it. Deployment-hardening config passthrough, M8. (5) The append-boundary
+  scrubber folds string *values* but not hash *keys*, so a credential used as a key would
+  reach the log unscrubbed. Unreachable through the fixed-schema std tools, which is why
+  it waited; fold keys through the scrubber, respecting the structural exemption, in M8.
+  (6) Two TOCTOU windows are accepted with their reasoning: the fs symlink fix put
+  `O_NOFOLLOW` on the leaf open, so the racy leaf swap is closed, but an *intermediate*
+  component swapped mid-operation remains a window — single-agent sequential execution
+  makes it practically unreachable, and `openat`/dirfd is the M8 close; and `WebFetch`
+  resolves, checks, then connects, so a DNS answer that changes between the two rebinds
+  past the floor — pinning the IP via `Net::HTTP#ipaddr=` would widen the injectable
+  transport's `call(url)` contract, so it waits for a transport-shape decision. (7) Three
+  smaller things the final controller pass caught and left: `FS#resolve_real` recurses
+  without a hop cap, so a *loop* of dangling symlinks raises `SystemStackError` instead of
+  `Denied` — DoS-shaped rather than an escape, and a hop cap closes it; `FS#glob` calls
+  `File.realpath` on every entry, and a glob can legitimately return a dangling symlink,
+  so `Errno::ENOENT` crashes the listing rather than skipping the entry; and `WebFetch`'s
+  loopback floor never sees an IPv6 bracket literal such as `[::1]` because the resolver
+  answers nothing for it and the connect then fails on its own — safe today by accident,
+  which is the kind of safety worth pinning with a test in M8's security pass.
 - **MCP wire and fiber-safety, from M5.** v1 targets the deployed legacy wire (protocol
   revisions 2025-11-25/2025-06-18); the 2026-07-28 stateless revision stays out of scope
   until something actually deploys it. manceps' fiber-safety under the async scheduler is
