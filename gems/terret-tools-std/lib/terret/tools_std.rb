@@ -7,3 +7,5 @@ rescue LoadError
 end
 
 require_relative "tools_std/files"
+require_relative "tools_std/bash"
+require_relative "tools_std/terminals"
