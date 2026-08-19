@@ -1,0 +1,294 @@
+# frozen_string_literal: true
+
+require "securerandom"
+
+module Terret
+  module Exec
+    # There is no shell to run anything in: bash could not be spawned, or it
+    # started and never answered its startup handshake. Raised rather than
+    # returned, because every other outcome on this seam describes a command
+    # that actually ran, and this one is the absence of the thing that runs
+    # them.
+    ShellUnavailable = Class.new(Terret::Tools::Failure)
+
+    # ctx[:shell] — one persistent bash per session key (plan §6.6;
+    # docs/exec.md §2). The whole reason this seam exists next to
+    # ctx[:subprocess]'s one-shot #spawn is that the same process serves every
+    # call for a key, so `cd` and `export` from one run are visible to the
+    # next, exactly as a human's terminal session behaves.
+    #
+    # The protocol: write the command on its own line, then a `printf` line
+    # that emits a per-session random sentinel followed by `$?`, and read
+    # until that marker. The sentinel is generated here and never exported, so
+    # a command cannot forge one; the marker regexp additionally demands
+    # digits and a newline immediately after it, which is what makes the parse
+    # exact rather than lucky — the only other place the sentinel can appear
+    # in the stream is a terminal echo of the request line, where `%s` follows
+    # it instead of a status.
+    class Shell < Hames::Service
+      service_key :shell
+      inject :subprocess
+
+      # `status` is nil when the command did not report one — it was
+      # interrupted, or the shell ended underneath it. An exit code we do not
+      # have is not invented. `stdout` is the terminal's stream: a pty has one,
+      # so a command's stderr arrives interleaved here rather than separately.
+      # `notice` is nil unless something happened that the caller did not ask
+      # for (a restart); it is a field rather than text appended to stdout so
+      # that stdout stays exactly what the command wrote.
+      Result = Data.define(:status, :stdout, :notice)
+
+      Session = Data.define(:handle, :sentinel, :marker)
+
+      DEFAULT_SESSION = :default
+      DEFAULT_TIMEOUT = 120
+      HANDSHAKE_TIMEOUT = 10
+      CHUNK = 64 * 1024
+
+      # A session that is not reused is never left half-drained, so the budget
+      # only bounds the pathological case: a background job spewing without
+      # pause between two runs.
+      DRAIN_BUDGET = 0.1
+
+      # How long a session gets to leave on its own before the handle's reaper
+      # takes over. Bounded, because a shell still busy with a command will not
+      # read the request at all.
+      FAREWELL_BUDGET = 1.0
+
+      # ETX — what a human's ^C is on the wire. The line discipline turns it
+      # into SIGINT for the terminal's foreground process group, which is where
+      # the command's own children live; closing the pty instead would reap
+      # bash and orphan them.
+      INTERRUPT = "\u0003"
+
+      # `--noediting` is load-bearing, not tidiness: on a pty bash is
+      # interactive, and readline echoes the line it is reading no matter what
+      # the terminal's own echo flag says. Disabling line editing puts the
+      # echo back under the terminal's control, where the handshake's `stty
+      # -echo` can turn it off. `--norc --noprofile` keep a developer's dotfiles
+      # from deciding what an agent's shell prints.
+      BASH_ARGV = ["bash", "--norc", "--noprofile", "--noediting", "-s"].freeze
+
+      # Run once per session before any command. `-echo` so the request lines
+      # do not come back as output; `-onlcr` so the terminal stops rewriting
+      # the child's newlines as CR-LF; `-icanon min 1 time 0` because a
+      # canonical-mode terminal caps one input line at MAX_CANON (1024 bytes on
+      # macOS) and would silently lose the tail of a longer command; `-ixon` so
+      # a stray ^S in a command cannot wedge the stream. Failure is tolerated
+      # (`2>/dev/null`): under a sandbox whose exec has no tty there is nothing
+      # to configure, and bash is then non-interactive, which needs none of it.
+      HANDSHAKE = "stty -echo -onlcr -icanon -ixon min 1 time 0 2>/dev/null; PS1=; PS2="
+
+      def start(ctx)
+        @ctx = ctx
+        @sessions = {} # key (String) => Session
+      end
+
+      # The loader calls this on unload. A persistent shell is a process the
+      # harness owns, so dropping the reference without reaping it would leak a
+      # bash per agent for the life of the host process.
+      def stop(_ctx) = close_all
+
+      # Every knob is read where it is used, so a hot config swap needs nothing
+      # re-derived here. A live bash keeps the cwd and environment it was
+      # spawned with — it is a running process, not a value — and the new
+      # settings govern the next session.
+      def reconfigure(_config); end
+
+      # Runs one command in this key's session, spawning the session on first
+      # use. Never raises for a command's own failure: a non-zero status is a
+      # Result like any other, because a command that failed still ran.
+      def run(cmd, session: DEFAULT_SESSION, timeout: nil)
+        key = session.to_s
+        timeout ||= default_timeout
+        notices = []
+        if stale?(key)
+          discard(key)
+          notices << "the shell session had exited; a fresh one was started, " \
+                     "so the cwd and variables from earlier runs are gone"
+        end
+        s = (@sessions[key] ||= open_session)
+        timeout ||= default_timeout
+
+        return ended(key, "", notices) unless write(s, request(s, cmd))
+
+        outcome, out = collect(s, monotonic + timeout)
+        case outcome
+        when :timeout then timed_out(key, s, out, notices, timeout)
+        when :eof then ended(key, out, notices)
+        else Result.new(status: outcome, stdout: out, notice: join(notices))
+        end
+      end
+
+      # The pid of this key's live bash, or nil if it has never run anything.
+      # An owner (and a test) can see whether a session is real without asking
+      # it to run something.
+      def pid(session: DEFAULT_SESSION) = @sessions[session.to_s]&.handle&.pid
+
+      # Reaps one session's bash. Closing a key that has none is not an error:
+      # disposal must be safe to call over a set of keys that may or may not
+      # have run anything.
+      def close(session: DEFAULT_SESSION) = discard(session.to_s)
+
+      def close_all = @sessions.keys.each { |key| discard(key) }
+
+      private
+
+      def default_timeout = config[:timeout] || DEFAULT_TIMEOUT
+      def cwd = config[:cwd] || Dir.pwd
+      def env = config[:env] || {}
+
+      # The command goes on its own line rather than joined to the marker line
+      # with `;`, so a multi-line command runs as written. printf emits no
+      # separator of its own before the sentinel, which is what makes stdout
+      # exact: there is no injected newline to strip back off, and a command
+      # whose output ends without one (or ends with a bare CR) is reported as
+      # it was written.
+      #
+      # The cost of this shape is honest and worth stating: a command that
+      # leaves bash waiting for more input (an unclosed quote, a trailing `\`)
+      # swallows the marker line, and the run ends at its timeout with the
+      # session restarted.
+      def request(s, cmd) = "#{cmd}\nprintf '%s%s\\n' '#{s.sentinel}' \"$?\"\n"
+
+      def open_session
+        sentinel = "TERRET#{SecureRandom.hex(16)}"
+        handle = @ctx[:subprocess].pty_spawn(BASH_ARGV, cwd: cwd, env: env)
+        s = Session.new(handle: handle, sentinel: sentinel,
+                        marker: Regexp.new("#{sentinel}(\\d+)\\r?\\n"))
+        handshake!(s)
+        s
+      end
+
+      # Reading to the first marker also synchronises the session: everything
+      # bash said before it — the login banner some systems print, the default
+      # prompt, the echo of the handshake line itself before `stty -echo` took
+      # effect — is discarded, so the first command's output starts clean.
+      def handshake!(s)
+        outcome = if write(s, request(s, HANDSHAKE))
+                    collect(s, monotonic + HANDSHAKE_TIMEOUT).first
+                  else
+                    :closed
+                  end
+        return if outcome.is_a?(Integer)
+
+        # nothing else holds this handle yet, so a shell that never became
+        # usable is reaped here rather than left for the caller to dispose
+        s.handle.close
+        raise ShellUnavailable, "the shell did not answer its startup handshake (#{outcome})"
+      end
+
+      # Reads until the marker, the deadline, or the end of the shell. Returns
+      # [status, stdout] for a command that reported one, or [:timeout, partial]
+      # / [:eof, partial] for the two ways it may not have.
+      #
+      # The buffer stays BINARY until it is sliced: terminal bytes are not
+      # guaranteed to be valid UTF-8, and matching against a BINARY string is
+      # the one form that cannot raise on a child emitting whatever it likes.
+      def collect(s, deadline)
+        buf = String.new(encoding: Encoding::BINARY)
+        loop do
+          if (m = s.marker.match(buf))
+            return [Integer(m[1]), text(buf[0...m.begin(0)])]
+          end
+
+          remaining = deadline - monotonic
+          return [:timeout, text(buf)] if remaining <= 0
+
+          chunk = s.handle.read(CHUNK, timeout: remaining)
+          return [:eof, text(buf)] if chunk.nil?
+
+          buf << chunk.b
+        end
+      end
+
+      # Bytes sitting on the terminal between two runs belong to whatever wrote
+      # them — a backgrounded job, a job-control notice — and never to the
+      # command about to run, so they are drained rather than charged to the
+      # next result. The same pass is the liveness check: a session whose bash
+      # is gone reads as EOF, and an idle live one answers "" on the first
+      # non-blocking read, so this costs a syscall in the ordinary case.
+      def stale?(key)
+        s = @sessions[key] or return false
+
+        deadline = monotonic + DRAIN_BUDGET
+        loop do
+          chunk = s.handle.read(CHUNK, timeout: 0)
+          return true if chunk.nil?
+          return false if chunk.empty? || monotonic >= deadline
+        end
+      end
+
+      # The decided semantics (docs/exec.md §2): kill and respawn rather than
+      # try to recover. The interrupt is what ends the command's own children;
+      # the session goes with it because after an interrupt its input queue and
+      # the output still in flight are in a state we cannot account for — the
+      # next run gets a shell we can, and the caller is told so rather than
+      # left to discover it through a lost `cd`.
+      def timed_out(key, s, out, notices, timeout)
+        interrupt(s)
+        discard(key)
+        notices << "timed out after #{timeout}s; the command was interrupted and the shell " \
+                   "session killed, so the next run starts a fresh session"
+        Result.new(status: nil, stdout: out, notice: join(notices))
+      end
+
+      def ended(key, out, notices)
+        discard(key)
+        notices << "the shell session ended while this command ran; the next run starts a " \
+                   "fresh session, so the cwd and variables from earlier runs are gone"
+        Result.new(status: nil, stdout: out, notice: join(notices))
+      end
+
+      def interrupt(s) = write(s, INTERRUPT)
+
+      # A write to a terminal whose child is gone is not an exception here: it
+      # is how we learn the session ended, and the caller asked to run a
+      # command, not to be told about a file descriptor.
+      def write(s, str)
+        s.handle.write(str)
+        true
+      rescue Errno::EIO, Errno::EPIPE, IOError
+        false
+      end
+
+      def discard(key)
+        s = @sessions.delete(key) or return nil
+        farewell(s)
+        s.handle.close
+      end
+
+      # Ask the shell to leave, and read it to EOF before the handle is closed.
+      # Both halves are load-bearing, and neither is politeness:
+      #
+      # An interactive bash ignores SIGTERM — that is what keeps a stray kill
+      # from taking down a human's terminal — so a close that went straight to
+      # the reaper would always spend the full grace period before the SIGKILL
+      # landed. `exit` is the only cheap way out.
+      #
+      # And a bash SIGKILLed while its terminal still holds bytes nobody read
+      # gets stuck in exit: measured on macOS, with as little as a startup
+      # banner pending, the process sits in `E` state indefinitely and the
+      # reaper's blocking wait never returns — a wedge that would take the
+      # whole reactor with it. Reading to EOF (which is also what draining
+      # does) is what keeps that from being reachable.
+      def farewell(s)
+        write(s, "exit\n")
+        deadline = monotonic + FAREWELL_BUDGET
+        loop do
+          return if s.handle.read(CHUNK, timeout: 0.01).nil? # EOF: the shell is gone
+          return if monotonic >= deadline
+        end
+      end
+
+      def join(notices) = notices.empty? ? nil : notices.join(" ")
+
+      # Terminal bytes arrive as BINARY; everything downstream of this seam is
+      # text. Forced rather than encoded, so a command emitting invalid UTF-8
+      # still round-trips its bytes instead of raising here.
+      def text(buf) = buf.force_encoding(Encoding::UTF_8)
+
+      def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+  end
+end
