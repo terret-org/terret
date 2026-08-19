@@ -474,7 +474,10 @@ module Terret
     # one call's error result, and every other result still appends.
     def execute_together(ctx, sid, run)
       task = defined?(Async::Task) ? Async::Task.current? : nil
-      return run.map { |tc| execute_call(ctx, sid, tc) } unless task
+      # Guarded on both paths. Without a reactor the run is still a run, and a
+      # host that never loaded async must not be the one deployment where a
+      # raising listener eats its siblings' results.
+      return run.map { |tc| guarded_call(ctx, sid, tc) } unless task
 
       results = Array.new(run.length)
       children = run.each_with_index.map do |tc, i|
@@ -496,8 +499,14 @@ module Terret
       results
     end
 
+    # The same split Registry#execute makes one level in, so a plugin cannot
+    # tell which layer caught it: a Failure's message is the whole story and
+    # renders alone, while any other exception keeps its class name, because
+    # a crash's class is diagnostics rather than noise.
     def guarded_call(ctx, sid, tc)
       execute_call(ctx, sid, tc)
+    rescue Tools::Failure => e
+      Tools::Result.new(id: tc.id, content: nil, error: e.message)
     rescue StandardError => e
       Tools::Result.new(id: tc.id, content: nil, error: "#{e.class}: #{e.message}")
     end

@@ -28,7 +28,7 @@ rather than a roster the `Task` tool picks from per call.
 The seam is small:
 
 ```ruby
-ctx[:subagents].run(prompt:, ctx:)   # => Result(text:, session_id:, usage:)
+ctx[:subagents].run(prompt:, ctx:)   # => Result(text:, session_id:, usage:, status:)
 ```
 
 `prompt:` is the child's instruction. `ctx:` is the **calling agent's**

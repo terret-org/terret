@@ -38,6 +38,15 @@ class TaskToolTest < Minitest::Test
     [ctx[:loop].spawn_agent(session_id: session.id, id: id), session]
   end
 
+  # Under a reactor where the host has one, plain where it does not: a
+  # deployment without async takes the barrier's fallback path, and these
+  # guarantees have to hold on both.
+  def run_turn(ctx, agent, text = "go")
+    return ctx[:loop].run_turn(agent, text) unless ASYNC_AVAILABLE
+
+    Async { ctx[:loop].run_turn(agent, text) }.wait
+  end
+
   # Task is root-mounted like the rest of the roster, so a call reaches it the
   # way the loop's own pipeline delivers one: through the registry, dispatched
   # on the CALLING agent's fork, carrying that agent's session.
@@ -73,7 +82,7 @@ class TaskToolTest < Minitest::Test
     result = call(ctx, parent, session.id, description: "answer it", prompt: "what is it?")
 
     assert_nil result.error
-    child_id = result.content[/child session (\S+)\z/, 1]
+    child_id = result.content[/child session (\S+)$/, 1]
     refute_nil child_id, "the ledger line must name the child session"
     refute_equal session.id, child_id
     assert_equal "the child's answer\n--- terret ---\nchild session #{child_id}", result.content
@@ -100,7 +109,7 @@ class TaskToolTest < Minitest::Test
     refute ran
     assert_nil result.error, "a denial inside the child is not a parent error"
     assert_match(/\AI could not run that\./, result.content)
-    child_id = result.content[/child session (\S+)\z/, 1]
+    child_id = result.content[/child session (\S+)$/, 1]
     child = ctx[:sessions].fetch(child_id)
     assert_equal "danger is not on the allow list",
                  child.events.find { |e| e.type == "tool/result" }.payload[:error]
@@ -126,7 +135,7 @@ class TaskToolTest < Minitest::Test
                   session_id: permissive_session.id)
 
     refute ran, "a session_id written into the arguments must lose to the call's own"
-    child_id = result.content[/child session (\S+)\z/, 1]
+    child_id = result.content[/child session (\S+)$/, 1]
     child = ctx[:sessions].fetch(child_id)
     assert_equal "danger is not on the allow list",
                  child.events.find { |e| e.type == "tool/result" }.payload[:error]
@@ -157,7 +166,7 @@ class TaskToolTest < Minitest::Test
 
     assert_nil result.error
     assert_match(/\AI was not allowed to write it\./, result.content)
-    child_id = result.content[/child session (\S+)\z/, 1]
+    child_id = result.content[/child session (\S+)$/, 1]
     child = ctx[:sessions].fetch(child_id)
     assert_equal "write_file denied: no approver can reach a subagent session",
                  child.events.find { |e| e.type == "tool/result" }.payload[:error]
@@ -234,11 +243,14 @@ class TaskToolTest < Minitest::Test
     end
   end
 
-  # The reason Task declares :parallel at all: a fan-out of delegations is one
-  # run under one barrier, and the results come back in call order.
-  def test_two_task_calls_in_one_message_go_out_as_one_parallel_run
-    skip "async is not installed" unless ASYNC_AVAILABLE
-
+  # Two Task calls in one assistant message are one run of the barrier, and
+  # what this pins is what a fan-out must not disturb: the results come back
+  # in CALL order and each delegation gets its own session, whichever child
+  # finished first. It does not claim to prove overlap — two scripted children
+  # never yield, so there is no meter to read here; that proof lives in
+  # loop_test.rb's ToolBarrierTest, against tools that do. Run on whichever
+  # path this host has, because both must hold.
+  def test_a_fan_out_of_task_calls_keeps_call_order_and_gives_each_child_a_session
     a = Terret::LLM::ToolCall.new(id: "tc1", name: "Task",
                                   args: { description: "one", prompt: "first" })
     b = Terret::LLM::ToolCall.new(id: "tc2", name: "Task",
@@ -248,7 +260,7 @@ class TaskToolTest < Minitest::Test
                          { text: "Both are back." }])
     parent, session = spawn(ctx)
 
-    assert_equal :completed, Async { ctx[:loop].run_turn(parent, "go") }.wait
+    assert_equal :completed, run_turn(ctx, parent)
 
     results = session.events.select { |e| e.type == "tool/result" }
     assert_equal %w[tc1 tc2], results.map { |e| e.payload[:id] }

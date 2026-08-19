@@ -1264,16 +1264,10 @@ class ToolBarrierTest < Minitest::Test
     assert_equal %w[tool/call tool/call tool/result tool/result], batch
   end
 
-  # A tool's own crash has always been an ordinary error Result. A listener
-  # that raises AROUND the handler escaped that rendering, and under the
-  # barrier it used to take the whole run with it: siblings that had already
-  # done their work lost their results, the turn closed `failed`, and the
-  # projection was left owing three calls it could never be given results for
-  # (`resumable?` is false once the turn has closed, so nothing can repair
-  # it). One call's failure is one call's error result.
-  def test_a_raising_listener_fails_one_call_without_abandoning_its_siblings
-    skip "async is not installed" unless ASYNC_AVAILABLE
-
+  # Three parallel calls where the MIDDLE one's execution is blown up by a
+  # listener rather than by the handler — the one failure shape that escapes
+  # Registry#execute's own error-Result rendering.
+  def boot_raising_trio(error = RuntimeError.new("listener bug"))
     ctx, = boot(script: batch_script("p_a", "p_b", "p_c"))
     ran = []
     ctx.with_owner("trio") do
@@ -1286,14 +1280,15 @@ class ToolBarrierTest < Minitest::Test
       end
     end
     ctx.on("tools/execute") do |call, next_|
-      raise "listener bug" if call.name == "p_b"
+      raise error if call.name == "p_b"
 
       next_.(call)
     end
     agent, session = spawn(ctx)
+    [ctx, agent, session, ran]
+  end
 
-    assert_equal :completed, Async { ctx[:loop].run_turn(agent, "go") }.wait
-
+  def assert_only_the_middle_call_failed(ctx, session, ran)
     assert_equal %w[p_a p_c], ran.sort, "a sibling's work must not be thrown away"
     results = session.events.select { |e| e.type == "tool/result" }
     assert_equal %w[tc1 tc2 tc3], results.map { |e| e.payload[:id] }
@@ -1310,6 +1305,48 @@ class ToolBarrierTest < Minitest::Test
                   .flat_map { |m| m.parts.grep(Terret::LLM::ToolCall) }.map(&:id)
     answered = history.select { |m| m.role == :tool }.flat_map(&:parts).map(&:id)
     assert_empty owed - answered, "the projection must never owe a call a result"
+  end
+
+  # A tool's own crash has always been an ordinary error Result. A listener
+  # that raises AROUND the handler escaped that rendering, and under the
+  # barrier it used to take the whole run with it: siblings that had already
+  # done their work lost their results, the turn closed `failed`, and the
+  # projection was left owing three calls it could never be given results for
+  # (`resumable?` is false once the turn has closed, so nothing can repair
+  # it). One call's failure is one call's error result.
+  def test_a_raising_listener_fails_one_call_without_abandoning_its_siblings
+    skip "async is not installed" unless ASYNC_AVAILABLE
+
+    ctx, agent, session, ran = boot_raising_trio
+
+    assert_equal :completed, Async { ctx[:loop].run_turn(agent, "go") }.wait
+
+    assert_only_the_middle_call_failed(ctx, session, ran)
+  end
+
+  # The same guarantee where there is no reactor to run the fibers on. That
+  # path is not a lesser mode — it is what every plain-minitest run and every
+  # host that never loaded async takes — so it is pinned by its own test
+  # rather than by the twin above. Testing only the reactor path is exactly
+  # what let the two drift apart once.
+  def test_a_raising_listener_fails_one_call_with_no_reactor_either
+    ctx, agent, session, ran = boot_raising_trio
+
+    assert_equal :completed, ctx[:loop].run_turn(agent, "go")
+
+    assert_only_the_middle_call_failed(ctx, session, ran)
+  end
+
+  # A Failure is a domain outcome whose message is the whole story, and the
+  # registry renders it message-only one level in. Catching it out here must
+  # not start prefixing it with a class name a plugin never chose to show.
+  def test_a_listener_raising_a_failure_still_renders_message_only
+    ctx, agent, session, = boot_raising_trio(Terret::Tools::Failure.new("that one is out of stock"))
+
+    ctx[:loop].run_turn(agent, "go")
+
+    errored = session.events.select { |e| e.type == "tool/result" }[1]
+    assert_equal "that one is out of stock", errored.payload[:error]
   end
 
   # A barrier is not interruptible from outside once it starts, so a cancel
