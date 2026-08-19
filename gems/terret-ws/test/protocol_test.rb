@@ -121,12 +121,48 @@ class ProtocolTest < Minitest::Test
     ->(agent, text) { root.async { ctx[:loop].run_turn(agent, text) } }
   end
 
+  def resumer(ctx, root)
+    ->(agent) { root.async { ctx[:loop].resume_turn(agent) } }
+  end
+
   def connect(ctx, agent, root, queue_limit: 256)
     sock = FakeSocket.new
     conn = Terret::WS::Connection.new(ctx: ctx, agent: agent, io: sock,
-                                      runner: runner(ctx, root), queue_limit: queue_limit)
+                                      runner: runner(ctx, root), resumer: resumer(ctx, root),
+                                      queue_limit: queue_limit)
     conn_task = root.async { conn.run }
     [sock, conn, conn_task]
+  end
+
+  APPROVALS_ROW = { id: "approvals", plugin: Terret::Tools::Approvals }.freeze
+
+  DEPLOY_CALL = -> { Terret::LLM::ToolCall.new(id: "tc7", name: "deploy", args: { env: "prod" }) }
+
+  def register_deploy(ctx)
+    ctx.with_owner("deploy-plugin") do
+      ctx[:tools].register(name: "deploy", description: "Ship it",
+                           params: { env: "string" }, mutating: true,
+                           approval: :always) { |env:| "deployed to #{env}" }
+    end
+  end
+
+  # Stage the log of a turn that died mid-flight: opened, one step, a model
+  # reply owing a deploy call, and no result. That is what a process death
+  # leaves behind, and what resumable? recognizes.
+  def stage_open_turn(ctx, requested: false)
+    session = ctx[:sessions].create
+    sid = session.id
+    ctx[:sessions].append(sid, "turn/start", { agent: "agent-#{sid}" })
+    ctx[:sessions].append(sid, "step/start", { n: 1 })
+    ctx[:sessions].append(sid, "user/message", { text: "ship it" })
+    ctx[:sessions].append(sid, "assistant/message",
+                          { parts: [Terret::LLM.encode_part(DEPLOY_CALL.call)] })
+    ctx[:sessions].append(sid, "tool/call", { id: "tc7", name: "deploy", args: { env: "prod" } })
+    if requested
+      ctx[:sessions].append(sid, "approval/requested",
+                            { call_id: "tc7", name: "deploy", args: { env: "prod" } })
+    end
+    [ctx[:loop].spawn_agent(session_id: sid), session]
   end
 
   # Bounded wait: poll the observable outcome instead of assuming fiber
@@ -464,9 +500,14 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  # A verdict is only accepted against a standing request now, so the round
+  # trip stages two of them; the frames and their durable payloads are
+  # unchanged.
   def test_approve_and_deny_append_durable_resolutions
-    ctx = boot(script: [{ text: "hi" }])
+    ctx = boot(script: [{ text: "hi" }], extra_rows: [APPROVALS_ROW])
     agent, session = spawn_agent(ctx)
+    ctx[:sessions].append(session.id, "approval/requested", { call_id: "tc1", name: "a", args: {} })
+    ctx[:sessions].append(session.id, "approval/requested", { call_id: "tc2", name: "b", args: {} })
 
     Sync do |task|
       sock, = connect(ctx, agent, task)
@@ -480,6 +521,187 @@ class ProtocolTest < Minitest::Test
       assert_equal({ call_id: "tc2", verdict: "denied", reason: "too spicy" }, denied[:payload])
       # durable, not just visible: the log has both
       assert_equal 2, session.events.count { |e| e.type == "approval/resolved" }
+      sock.client_close
+    end
+  end
+
+  def test_a_wake_on_a_resumable_turn_resumes_it_with_the_text_riding_along
+    Sync do |task|
+      ctx = boot(script: [{ text: "Caught up." }])
+      ctx.with_owner("deploy-plugin") do
+        ctx[:tools].register(name: "deploy", description: "Ship it",
+                             params: { env: "string" }) { |env:| "deployed to #{env}" }
+      end
+      agent, session = stage_open_turn(ctx)
+
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "inject", text: "you back?", wake: true })
+      await { session.events.any? { |e| e.type == "turn/end" } }
+
+      assert_equal 1, session.events.count { |e| e.type == "turn/start" }, "resume, not a new turn"
+      assert_equal "deployed to prod",
+                   session.events.find { |e| e.type == "tool/result" }.payload[:content]
+      injected = session.events.find { |e| e.type == "context/injected" }
+      assert_equal "you back?", injected.payload[:text], "the wake text rides the resumed turn"
+      sock.client_close
+    end
+  end
+
+  def test_two_racing_wakes_lose_no_text
+    Sync do |task|
+      # A sleeping tool parks the first turn's fiber mid-step, so the second
+      # wake frame is provably dispatched while a turn is live. Whichever way
+      # it loses -- steered by handle_inject or requeued by the runner's
+      # rescue -- its text must reach the log, and there must be one turn.
+      slow_call = Terret::LLM::ToolCall.new(id: "tcs", name: "slow", args: {})
+      ctx = boot(script: [{ text: "Working.", tool_calls: [slow_call] }, { text: "All done." }])
+      ctx.with_owner("slow-plugin") do
+        ctx[:tools].register(name: "slow", description: "Takes a moment",
+                             params: {}) { sleep(0.02) || "done" }
+      end
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+
+      sock.client_send({ type: "inject", text: "first", wake: true })
+      sock.client_send({ type: "inject", text: "second", wake: true })
+      await { session.events.any? { |e| e.type == "turn/end" } && agent.status == :idle }
+
+      texts = session.events.select { |e| %w[user/message context/injected].include?(e.type) }
+                            .map { |e| [e.type, e.payload[:text]] }
+      assert_includes texts, ["user/message", "first"]
+      assert_includes texts, ["context/injected", "second"],
+                      "the raced wake's text must ride the winner's next step, not drop"
+      assert_equal 1, session.events.count { |e| e.type == "turn/start" }
+      sock.client_close
+    end
+  end
+
+  # handle_inject's own status check makes the socket-level race above resolve
+  # as a steer on this runtime: task.async starts the turn synchronously, so
+  # the second frame always observes :running. The runner's requeue is the
+  # guard for every other caller, and for a runtime where that scheduling
+  # changes — so it is exercised against the Service's own lambda, the only
+  # place a turn can be asked for while one is live.
+  def test_the_runner_requeues_a_raced_wake_instead_of_dropping_it
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions },
+      { id: "prompt",   plugin: Terret::Prompt },
+      { id: "tools",    plugin: Terret::Tools::Registry },
+      { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
+      { id: "loop",     plugin: Terret::Loop },
+      { id: "ws",       plugin: Terret::WS::Service, config: { tokens: { "s1" => "t" } } }
+    ])
+    ctx = loader.boot!
+    slow_call = Terret::LLM::ToolCall.new(id: "tcs", name: "slow", args: {})
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(
+      [{ text: "Working.", tool_calls: [slow_call] }, { text: "All done." }]
+    ))
+    ctx.with_owner("slow-plugin") do
+      ctx[:tools].register(name: "slow", description: "Takes a moment", params: {}) { sleep(0.02) || "done" }
+    end
+    agent, session = spawn_agent(ctx)
+
+    Sync do |task|
+      run = ctx[:ws].send(:runner, task)
+      run.call(agent, "first")
+      await { agent.status == :running }
+      run.call(agent, "second") # loses the race: a turn is already live
+      await { session.events.any? { |e| e.type == "turn/end" } }
+
+      texts = session.events.select { |e| %w[user/message context/injected].include?(e.type) }
+                            .map { |e| [e.type, e.payload[:text]] }
+      assert_includes texts, ["context/injected", "second"],
+                      "a raced wake requeues its text; it must never be dropped"
+      assert_equal 1, session.events.count { |e| e.type == "turn/start" }
+    end
+  end
+
+  def test_approve_without_the_approvals_row_answers_unsupported
+    Sync do |task|
+      ctx = boot(script: [])
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "approve", call_id: "x" })
+      await { sock.protocol_frames.any? { |f| f[:code] == "unsupported" } }
+      refute session.events.map(&:type).include?("approval/resolved")
+      sock.client_close
+    end
+  end
+
+  def test_an_approve_for_nothing_pending_answers_stale_call_and_appends_nothing
+    Sync do |task|
+      ctx = boot(script: [], extra_rows: [APPROVALS_ROW])
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "approve", call_id: "ghost" })
+      await { sock.protocol_frames.any? { |f| f[:code] == "stale_call" } }
+      refute session.events.map(&:type).include?("approval/resolved")
+      sock.client_close
+    end
+  end
+
+  def test_park_approve_execute_over_the_socket
+    Sync do |task|
+      ctx = boot(script: [{ text: "Deploying.", tool_calls: [DEPLOY_CALL.call] }, { text: "Done." }],
+                 extra_rows: [APPROVALS_ROW])
+      register_deploy(ctx)
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "subscribe", from_seq: 0 })
+
+      sock.client_send({ type: "inject", text: "ship it", wake: true })
+      await { agent.status == :waiting_approval }
+      await { sock.event_types.include?("approval/requested") }
+
+      sock.client_send({ type: "approve", call_id: "tc7" })
+      await { session.events.any? { |e| e.type == "turn/end" } }
+      assert_equal "deployed to prod",
+                   session.events.find { |e| e.type == "tool/result" }.payload[:content]
+      assert_equal :idle, agent.status
+      sock.client_close
+    end
+  end
+
+  def test_cancel_while_parked_denies_durably_and_cancels_the_turn
+    Sync do |task|
+      ctx = boot(script: [{ text: "Deploying.", tool_calls: [DEPLOY_CALL.call] }, { text: "Done." }],
+                 extra_rows: [APPROVALS_ROW])
+      register_deploy(ctx)
+      agent, session = spawn_agent(ctx)
+      sock, = connect(ctx, agent, task)
+
+      sock.client_send({ type: "inject", text: "ship it", wake: true })
+      await { agent.status == :waiting_approval }
+
+      sock.client_send({ type: "cancel", reason: "changed my mind" })
+      await { session.events.any? { |e| e.type == "turn/end" } }
+
+      resolved = session.events.find { |e| e.type == "approval/resolved" }
+      assert_equal "denied", resolved.payload[:verdict]
+      turn_end = session.events.find { |e| e.type == "turn/end" }
+      assert_equal "cancelled", turn_end.payload[:status]
+      assert_equal "changed my mind", turn_end.payload[:reason]
+      sock.client_close
+    end
+  end
+
+  def test_a_verdict_for_an_idle_agent_with_an_open_turn_resumes_it
+    Sync do |task|
+      ctx = boot(script: [{ text: "Done." }], extra_rows: [APPROVALS_ROW])
+      register_deploy(ctx)
+      agent, session = stage_open_turn(ctx, requested: true)
+
+      sock, = connect(ctx, agent, task)
+      sock.client_send({ type: "approve", call_id: "tc7" })
+      await { session.events.any? { |e| e.type == "turn/end" } }
+
+      assert_equal "deployed to prod",
+                   session.events.find { |e| e.type == "tool/result" }.payload[:content]
+      assert_equal 1, session.events.count { |e| e.type == "turn/start" }
       sock.client_close
     end
   end

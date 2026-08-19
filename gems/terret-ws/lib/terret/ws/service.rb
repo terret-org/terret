@@ -52,7 +52,8 @@ module Terret
         agent = @ctx[:loop].agent("agent-#{sid}") || @ctx[:loop].spawn_agent(session_id: sid)
         @connections[sid]&.shutdown(code: "superseded")
         conn = Connection.new(ctx: @ctx, agent: agent, io: io,
-                              runner: runner(runner_task), queue_limit: @queue_limit)
+                              runner: runner(runner_task), resumer: resumer(runner_task),
+                              queue_limit: @queue_limit)
         @connections[sid] = conn
         conn.run
       ensure
@@ -77,13 +78,28 @@ module Terret
         lambda do |agent, text|
           task.async do
             @ctx[:loop].run_turn(agent, text)
+          rescue TurnAlreadyRunning
+            # two wake frames in one read burst both saw :idle before either
+            # task ran; the loser's text rides the winner's next step (or the
+            # next turn) via the inbox instead of dropping
+            agent.inject(text)
           rescue => e
-            # Unreachable via the socket's own wake path today: status flips
-            # to :running inside run_turn before any yield point, and
-            # handle_inject checks status first. If M6's wake-on-stimulus can
-            # race this, decide then whether to requeue the text instead of
-            # dropping it.
             warn "terret-ws: turn failed for #{agent.id}: #{e.class}: #{e.message}"
+          end
+        end
+      end
+
+      # Re-enter an open turn (a wake or a verdict arrived for an agent with
+      # no live fiber — the process restarted mid-turn). Rooted on the server
+      # task for the same reason turns are: a dropped client must not kill it.
+      def resumer(task)
+        lambda do |agent|
+          task.async do
+            @ctx[:loop].resume_turn(agent)
+          rescue TurnAlreadyRunning
+            nil # something else got there first; nothing is lost
+          rescue => e
+            warn "terret-ws: resume failed for #{agent.id}: #{e.class}: #{e.message}"
           end
         end
       end

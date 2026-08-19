@@ -50,6 +50,11 @@ ISO8601 with microseconds. Event types and payloads are the durable set in
     connection closes. Resubscribe from your last durable seq.
   - `bad_frame` — unparseable or invalid client frame; connection stays open.
   - `not_running` — `cancel` arrived while no turn was running; stays open.
+  - `stale_call` — `approve`/`deny` named a call with no standing approval
+    request (already resolved, never requested, or a typo); nothing is
+    appended and the connection stays open.
+  - `unsupported` — the frame needs a plugin this deployment does not mount
+    (`approve`/`deny` without the approvals row); stays open.
   - `internal` — the server hit an unexpected error serving this connection;
     connection closes. Resubscribe from your last durable seq.
 
@@ -62,9 +67,9 @@ Frames larger than 1 MiB are rejected as `bad_frame`.
 |---|---|---|
 | `subscribe` | `from_seq` (int ≥ 0, required) | `sessions.read(sid, from_seq:)`, then live tail |
 | `inject` | `text` (required), `wake` (bool, default false) | `agent.inject` / the loop |
-| `cancel` | `reason` (optional) | `agent.cancel` |
-| `approve` | `call_id` (required) | durable `approval/resolved` |
-| `deny` | `call_id` (required), `reason` (optional) | durable `approval/resolved` |
+| `cancel` | `reason` (optional) | `agent.cancel`, plus durable denials when parked |
+| `approve` | `call_id` (required) | durable `approval/resolved` (validated) |
+| `deny` | `call_id` (required), `reason` (optional) | durable `approval/resolved` (validated) |
 | `set_model` | `role` (required), `model` ("provider/model", required) | the live model-role table |
 | `set_policy` | `patterns` (array of strings, required) | durable `policy/updated` (§6.3 AllowList) |
 
@@ -92,6 +97,18 @@ rides into the next step of the current or next turn — that is the mid-turn
 steer. Injection is acknowledged by the log itself: the text appears as a
 durable `user/message` when it lands in a step.
 
+If the log holds an **open turn** (a `turn/start` with no `turn/end` after it —
+the process died mid-turn, or was deployed over), `wake: true` on an idle agent
+**resumes that turn** rather than starting a new one: no second `turn/start`,
+the tool calls the open step still owes are executed, and the wake text rides
+the resumed turn's next step as `context/injected`. Any stimulus resumes; an
+approval verdict is not required.
+
+No wake is ever dropped. Two `wake: true` frames arriving in one read burst can
+both find the agent idle before either turn starts; the loser's turn refuses,
+and its text is requeued into the inbox to ride the winner's next step. A
+client therefore never has to detect or retry a lost wake.
+
 ### cancel
 
 Requests a cooperative stop of the running turn. The loop honors it at step
@@ -100,15 +117,37 @@ but wins the turn — the `tool/result` is recorded, then the turn closes with
 `turn/end {status: "cancelled", reason: ...}`. A cancel with no turn running
 is answered `not_running`.
 
+A turn parked on an approval also cancels: the turn is marked cancelled first,
+then every standing request for the session is denied durably (one
+`approval/resolved {verdict: "denied", reason:}` each) so the parked call
+unparks into a turn that already knows it is stopping. The `reason` carries
+through to both the denials and `turn/end`.
+
 ### approve / deny
 
-Appends durable `approval/resolved` with
-`{call_id:, verdict: "approved"|"denied", reason?:}`. `call_id` is the `id`
-of the corresponding `tool/call` event — it is named `call_id` rather than
+Resolves a parked tool call. Approvals are an **opt-in plugin row**: where it
+is not mounted, nothing ever parks and both frames answer `unsupported`.
+
+Where it is mounted, a tool whose definition demands a decision parks inside
+the tools pipeline and the server appends durable `approval/requested`
+`{call_id:, name:, args:}`. A verdict appends durable `approval/resolved` with
+`{call_id:, verdict: "approved"|"denied", reason?:}`, which unparks the call —
+approved runs it, denied returns an error result to the model. `call_id` is the
+`id` of the corresponding `tool/call` event; it is named `call_id` rather than
 `id` because inside an approval payload a bare `id` would read as the
-approval's own identifier, not the call it references. In M4 nothing parks
-on it yet — the resolution machinery is M6 — but the event is contract now,
-and subscribers see it like any other durable event.
+approval's own identifier, not the call it references.
+
+Verdicts are validated against the log, not taken on faith: only a `call_id`
+with a standing request and no verdict yet is accepted. Anything else — an
+already-resolved call, a call that never asked, a typo — answers `stale_call`
+and appends nothing, so a double approve cannot pollute the log.
+
+Both sides being durable is what survives a process death. If the server
+restarted while a call was parked, no fiber is waiting when the verdict lands;
+the server sees an idle agent with an open turn in the log and resumes the
+turn, which re-executes the owed call and finds the recorded verdict instead of
+parking again (see docs/lifecycle.md, "Durable approvals" and "Resuming an open
+turn").
 
 ### set_model
 

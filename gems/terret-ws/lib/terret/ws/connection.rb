@@ -16,11 +16,12 @@ module Terret
     class Connection
       attr_reader :agent
 
-      def initialize(ctx:, agent:, io:, runner:, queue_limit: 256)
+      def initialize(ctx:, agent:, io:, runner:, resumer: ->(_agent) {}, queue_limit: 256)
         @ctx = ctx
         @agent = agent
         @io = io
         @runner = runner # ->(agent, text) { start a turn task owned by the server }
+        @resumer = resumer # ->(agent) { re-enter the log's open turn, same rooting }
         @sid = agent.session_id
         @queue_limit = queue_limit
         @queue = BoundedQueue.new(queue_limit)
@@ -157,8 +158,15 @@ module Terret
         true
       end
 
+      # A wake on an idle agent whose log holds an open turn resumes that
+      # turn — the text rides its next step as context/injected — instead of
+      # starting a new one. That is the autonomous restart story: after a
+      # deploy, the first stimulus picks the turn back up.
       def handle_inject(text, wake)
-        if wake && @agent.status == :idle
+        if wake && @agent.status == :idle && @ctx[:loop].resumable?(@sid)
+          @agent.inject(text)
+          @resumer.call(@agent)
+        elsif wake && @agent.status == :idle
           @runner.call(@agent, text)
         else
           @agent.inject(text)
@@ -166,20 +174,43 @@ module Terret
       end
 
       def handle_cancel(reason)
-        if @agent.status == :running
+        case @agent.status
+        when :running
           @agent.cancel(reason)
+        when :waiting_approval
+          # cancel first, THEN deny: the parked fiber unparks into a turn
+          # that already knows it is cancelled; each denial is durable
+          @agent.cancel(reason)
+          @ctx[:approvals].deny_pending!(@sid, reason: reason || "cancelled")
         else
           push_frame(Frames.error(code: "not_running"))
         end
       end
 
       # call_id is deliberately not id: it is a foreign key to the tool/call
-      # event's id, and the wire-facing name in docs/protocol.md — recorded
-      # here so the M6 parking machinery correlates the two knowingly.
+      # event's id, and the wire-facing name in docs/protocol.md.
+      #
+      # Approvals are an opt-in row: without it, approve/deny is unsupported.
+      # With it, only a call with a standing approval/requested (and no
+      # verdict yet) accepts one — anything else answers stale_call and
+      # appends nothing, so a double approve or a typo cannot pollute the
+      # log. A verdict landing for an idle agent whose turn is still open in
+      # the log means no fiber is parked (the process restarted since it
+      # parked) — resume the turn.
       def handle_resolution(call_id, verdict, reason)
+        unless @ctx.service?(:approvals)
+          return push_frame(Frames.error(code: "unsupported",
+                                         message: "no approvals service is mounted"))
+        end
+        unless @ctx[:approvals].pending?(@sid, call_id)
+          return push_frame(Frames.error(code: "stale_call",
+                                         message: "#{call_id} has no pending approval"))
+        end
+
         payload = { call_id: call_id, verdict: verdict }
         payload[:reason] = reason if reason
         sessions.append(@sid, "approval/resolved", payload)
+        @resumer.call(@agent) if @agent.status == :idle && @ctx[:loop].resumable?(@sid)
       end
 
       def handle_set_model(role, model)
