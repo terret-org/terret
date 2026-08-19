@@ -9,6 +9,11 @@ module Terret
 
   class LogInvariantViolation < StandardError; end
   class NonPrimitivePayload < StandardError; end
+  # A registered scrubber broke its contract. Distinct from
+  # NonPrimitivePayload on purpose: that one means the DATA was unstorable
+  # (something a caller can fix by encoding it), this one means a PLUGIN is
+  # broken, and the two must not be rescued by the same handler.
+  class ScrubberContractViolation < StandardError; end
 
   # ctx.sessions — the append-only session log. The single source of the
   # context the model sees: derive_messages projects model history from it,
@@ -29,6 +34,33 @@ module Terret
       @emit_mutex = Mutex.new
       @emit_queue = []
       @emitting = false
+      @scrubbers = []
+    end
+
+    # Rewrite every String of every durable payload on its way into the log
+    # (§13's log boundary; docs/exec.md §6). Registration is an effect, so the
+    # returned disposer unregisters and unloading the owning plugin reaps it.
+    #
+    # This is the boundary the scrubbing has to happen at rather than anywhere
+    # downstream: the stored event and every projection derived from it —
+    # derive_messages, and so both sides of the digest assert_log_invariant!
+    # compares — read the same already-scrubbed bytes, so "model-visible means
+    # logged" holds by construction. A read-time filter over the projection
+    # would leave the secret in the log itself and split the digest in two.
+    #
+    # Scrubbers fold in registration order: each is handed the previous one's
+    # output, so a later one can rewrite what an earlier one produced.
+    def register_scrubber(callable)
+      @ctx.effect do
+        @scrubbers << callable
+        # Identity, not ==: removing "the entry equal to this callable" would
+        # take a twin down with it if the same object were registered twice,
+        # and a scrubber that defines its own == could unregister a stranger.
+        lambda do
+          i = @scrubbers.rindex { |s| s.equal?(callable) }
+          @scrubbers.delete_at(i) if i
+        end
+      end
     end
 
     def create(id: SecureRandom.hex(6), parent_id: nil)
@@ -233,7 +265,9 @@ module Terret
           raise NonPrimitivePayload, "invalid UTF-8 string is not storable; scrub it first"
         end
 
-        utf8
+        # After validation, so a scrubber is always handed storable UTF-8 —
+        # and re-validated below, because it hands something back.
+        @scrubbers.empty? ? utf8 : scrub(utf8)
       when Float
         raise NonPrimitivePayload, "non-finite Float is not storable" unless value.finite?
 
@@ -253,6 +287,31 @@ module Terret
         end
       else
         raise NonPrimitivePayload, "#{value.class} is not storable; encode it first"
+      end
+    end
+
+    # Fold a payload string through the registered scrubbers, checking each
+    # answer. A scrubber runs after the primitives contract has already
+    # admitted the value, so a bad answer would land in the store unexamined:
+    # a nil where text was, or bytes the store's JSON generator rejects a
+    # frame later, with nothing left to say which plugin did it. Model-reachable
+    # data must never crash the harness, but a broken PLUGIN may and should —
+    # so this raises, naming the offender (a Proc's inspect carries its
+    # source location) rather than repairing what it cannot guess at.
+    def scrub(text)
+      @scrubbers.reduce(text) do |acc, scrubber|
+        out = scrubber.call(acc)
+        unless out.is_a?(String)
+          raise ScrubberContractViolation,
+                "scrubber #{scrubber.inspect} returned #{out.class}, not a String"
+        end
+        unless out.encoding == Encoding::UTF_8 && out.valid_encoding?
+          raise ScrubberContractViolation,
+                "scrubber #{scrubber.inspect} returned #{out.encoding.name} that is not valid " \
+                "UTF-8; a scrubber is handed UTF-8 and must hand UTF-8 back"
+        end
+
+        out
       end
     end
 

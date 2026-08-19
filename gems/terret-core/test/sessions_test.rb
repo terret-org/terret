@@ -100,6 +100,68 @@ class SessionsPrimitivesTest < Minitest::Test
     assert_equal Encoding::UTF_8, ev.payload[:text].encoding
   end
 
+  def test_registered_scrubbers_rewrite_every_string_at_the_append_boundary
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    ctx.with_owner("scrub") do
+      ctx[:sessions].register_scrubber(->(str) { str.gsub("sk-secret123", "[REDACTED]") })
+    end
+    ev = ctx[:sessions].append(s.id, "user/message", { text: "key is sk-secret123 ok" })
+    assert_equal "key is [REDACTED] ok", ev.payload[:text]
+    # the projection sees the same bytes — the invariant holds by construction
+    assert_equal "key is [REDACTED] ok",
+                 ctx[:sessions].derive_messages(s.id).first.text
+  end
+
+  def test_scrubber_registration_is_a_reversible_effect
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    disposer = nil
+    ctx.with_owner("scrub") do
+      disposer = ctx[:sessions].register_scrubber(->(t) { t.gsub("x", "y") })
+    end
+    disposer.call
+    ev = ctx[:sessions].append(s.id, "user/message", { text: "xx" })
+    assert_equal "xx", ev.payload[:text]
+  end
+
+  def test_scrubbers_fold_in_registration_order
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    ctx.with_owner("scrub") do
+      ctx[:sessions].register_scrubber(->(t) { t.gsub("one", "two") })
+      ctx[:sessions].register_scrubber(->(t) { t.gsub("two", "three") })
+    end
+    ev = ctx[:sessions].append(s.id, "user/message", { text: "one" })
+    assert_equal "three", ev.payload[:text]
+  end
+
+  # A scrubber is a plugin, not model data: it may crash loudly, and it must,
+  # because the alternative is a poisoned payload landing in the store with
+  # nothing left to blame.
+  def test_a_scrubber_that_returns_a_non_string_raises_and_names_itself
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    ctx.with_owner("scrub") { ctx[:sessions].register_scrubber(->(_t) { nil }) }
+    err = assert_raises(Terret::ScrubberContractViolation) do
+      ctx[:sessions].append(s.id, "user/message", { text: "hello" })
+    end
+    assert_match(/NilClass/, err.message)
+    assert_match(/sessions_test\.rb/, err.message, "the message must point at the scrubber")
+  end
+
+  def test_a_scrubber_that_returns_invalid_utf8_raises_before_anything_is_stored
+    ctx = sessions_ctx
+    s = ctx[:sessions].create
+    ctx.with_owner("scrub") do
+      ctx[:sessions].register_scrubber(->(_t) { "\xFF\xFE".dup.force_encoding(Encoding::UTF_8) })
+    end
+    assert_raises(Terret::ScrubberContractViolation) do
+      ctx[:sessions].append(s.id, "user/message", { text: "hello" })
+    end
+    assert_equal %w[session/created], s.events.map(&:type)
+  end
+
   def boot_with_store(store)
     Hames.reset_events!
     Terret.declare_events!

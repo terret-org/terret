@@ -202,8 +202,8 @@ not in this roster.
 Two layers, doing different jobs. `tools/post_execute` is a waterfall
 every tool result already passes through
 (docs/terret-implementation-plan.md §6.3); a redactor listening there
-rewrites a `Result`'s content before it becomes the durable `tool/result`
-payload, catching the common case — a tool that happened to return a
+rewrites a `Result`'s content and error before either becomes the durable
+`tool/result` payload, catching the common case — a tool that happened to return a
 credential — before it is ever logged.
 
 That is not sufficient on its own, because a secret can enter the log
