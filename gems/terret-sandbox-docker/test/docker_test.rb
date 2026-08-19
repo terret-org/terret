@@ -6,6 +6,15 @@ require "pty"
 require "securerandom"
 require_relative "../lib/terret/sandbox/docker"
 
+# The concurrency test needs a fiber scheduler, because the race it pins is a
+# fiber race: the harness runs one reactor and no user-facing threads.
+ASYNC_AVAILABLE = begin
+  require "async"
+  true
+rescue LoadError
+  false
+end unless defined?(ASYNC_AVAILABLE)
+
 # Every test here drives a REAL container. The seam's entire claim is that a
 # tool's argv stops running here and starts running somewhere else, and a
 # mocked docker would only prove this file can build an array of strings — the
@@ -22,27 +31,41 @@ class SandboxDockerTest < Minitest::Test
   # getent satisfies these tests.
   IMAGE = ENV.fetch("TERRET_DOCKER_TEST_IMAGE", "ruby:slim")
 
-  def docker? = system("docker", "info", out: File::NULL, err: File::NULL)
+  # Asked once per process rather than per test: `docker info` is a round-trip
+  # to the daemon, and the answer cannot change mid-suite.
+  DOCKER = system("docker", "info", out: File::NULL, err: File::NULL)
+
+  def docker? = DOCKER
 
   def setup
     @plugins = []
+    # What was already on this machine before the test. Everything the suite
+    # is allowed to remove is measured against this, so a developer running
+    # `rake test` beside a real terret container keeps it.
+    @preexisting = docker? ? containers_labelled : []
   end
 
   # Cleanup runs on every path, including a test that failed or raised
   # mid-container: a leaked `sleep infinity` holds a bind mount on the
-  # developer's machine until they notice it by hand. The teardown asserts the
-  # sweep worked rather than assuming it, so a provider whose #stop silently
-  # does nothing fails the suite instead of littering.
+  # developer's machine until they notice it by hand.
+  #
+  # The sweep is by LABEL rather than by the ids the provider recorded, and
+  # that is the whole point of it — a provider that lost track of a container
+  # it started (the fiber race) leaves one nothing can name. Asserting BEFORE
+  # the sweep is what keeps the assertion meaningful: the provider's own #stop
+  # has to be what cleaned up, and the sweep is only the net that catches what
+  # it missed.
   def teardown
-    ids = @plugins.filter_map(&:container)
+    return unless docker?
+
     @plugins.each do |plugin|
       plugin.stop(nil)
     rescue StandardError
       nil
     end
-    ids.each { |id| system("docker", "rm", "-f", id, out: File::NULL, err: File::NULL) }
-    survivors = ids.select { |id| container_listed?(id) }
-    assert_empty survivors, "containers survived the test and are still on this machine"
+    leaked = containers_labelled - @preexisting
+    leaked.each { |id| system("docker", "rm", "-f", id, out: File::NULL, err: File::NULL) }
+    assert_empty leaked, "the provider's own stop left containers behind"
   end
 
   def boot(workspace:, network: "none")
@@ -170,8 +193,35 @@ class SandboxDockerTest < Minitest::Test
       sandbox.workspace_ready!
 
       assert_equal first, sandbox.container
-      assert_equal 1, containers_labelled.count { |id| id == first }
-      assert_equal 1, containers_labelled.length, "a second ready! started a second container"
+      assert_equal [first], containers_labelled - @preexisting,
+                   "a second ready! started a second container"
+    end
+  end
+
+  # The fiber race. `@container ||= run_container!` reads, then parks (the
+  # `docker run` capture is blocking IO, which under a scheduler yields the
+  # fiber), then assigns — so N fibers reaching their first wrap together each
+  # see nil, each start a container, and only the last one to assign is
+  # remembered. The rest are orphans: never stopped, `--rm` never fires because
+  # `sleep infinity` never exits, and unfindable except by label.
+  #
+  # This is not a theoretical interleaving. ctx[:subprocess] is built to park
+  # the fiber rather than the thread precisely so one reactor can serve many
+  # agents, so "several agents' first tool call at once" is the ordinary case,
+  # not the pathological one.
+  def test_concurrent_first_wraps_start_exactly_one_container
+    skip "docker unavailable" unless docker?
+    skip "async unavailable" unless ASYNC_AVAILABLE
+
+    workspace do |ws|
+      sandbox = ctx_sandbox(ws)
+      Sync do
+        4.times.map { Async { sandbox.wrap(["true"], cwd: ws) } }.each(&:wait)
+      end
+
+      assert_equal [sandbox.container], containers_labelled - @preexisting,
+                   "concurrent first wraps started more than one container, and the ones " \
+                   "the provider did not record are orphans"
     end
   end
 

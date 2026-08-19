@@ -87,6 +87,7 @@ module Terret
       def start(_ctx)
         @workspace = resolve_workspace(config[:workspace])
         @container = nil
+        @lock = Mutex.new
       end
 
       def isolated? = true
@@ -130,31 +131,35 @@ module Terret
         ["docker", "exec", "-i", *(tty ? ["-t"] : []), "-w", workdir(cwd), @container, *argv]
       end
 
-      # Idempotent by construction: the second call sees the id and does
-      # nothing. There is deliberately NO liveness check here — it would cost a
+      # Idempotent, and the lock is what makes that true rather than nearly
+      # true. A bare `@container ||= run_container!` reads, PARKS (the `docker
+      # run` capture is blocking IO, which under a fiber scheduler yields), and
+      # only then assigns — so N agents reaching their first wrap together each
+      # see nil, each start a container, and only the last to assign is
+      # remembered. The others are orphans in the worst sense: never stopped,
+      # `--rm` never fires because `sleep infinity` never exits, and nothing
+      # left in the process knows their ids. That is the ordinary case, not a
+      # pathological one, because ctx[:subprocess] parks the fiber rather than
+      # the thread precisely so one reactor can serve many agents at once.
+      #
+      # Mutex is fiber-aware under a scheduler, so a waiter parks instead of
+      # blocking the reactor, and it is stdlib — this gem still has no runtime
+      # dependency. The `docker run` is held INSIDE the lock deliberately: the
+      # window being closed is exactly the one that spans it.
+      #
+      # There is still deliberately NO liveness check here — it would cost a
       # docker round-trip on every single wrap, which is every spawn in the
       # harness. A container that died underneath us surfaces as the exec's own
-      # failure, which is where the caller is already prepared to read one.
+      # failure; #restart! is how a caller recovers from it.
       def workspace_ready!
-        @container ||= run_container!
+        @lock.synchronize { @container ||= run_container! }
       end
 
       # The loader's unload hook, and the only thing standing between a
       # crashed agent and a `sleep infinity` holding a bind mount forever. The
       # default argument is what lets a caller that is not the loader — a test,
       # an operator — end the container without inventing a context.
-      #
-      # Tolerant of a container that is already gone: `--rm` means the daemon
-      # may have removed it first, and a disposal path that raised on an
-      # already-clean state would turn tidy-up into a second failure.
-      def stop(_ctx = nil)
-        id = @container
-        @container = nil
-        return nil if id.nil?
-
-        system("docker", "rm", "-f", id, out: File::NULL, err: File::NULL)
-        nil
-      end
+      def stop(_ctx = nil) = discard!
 
       # A live image, network or workspace swap is a remount, and saying so is
       # more honest than pretending. The container is already running on the
@@ -168,6 +173,24 @@ module Terret
       end
 
       private
+
+      # Under the same lock as #workspace_ready!, so a disposal that lands
+      # while another fiber is mid-`docker run` cannot clear an id that is
+      # about to be assigned and leave the new container orphaned — the mirror
+      # image of the race the lock is there to close.
+      #
+      # Tolerant of a container that is already gone, which is the ordinary
+      # case for #restart!: `--rm` means the daemon may have removed it first,
+      # and a disposal path that raised on an already-clean state would turn
+      # tidy-up into a second failure.
+      def discard!
+        @lock.synchronize do
+          id = @container
+          @container = nil
+          system("docker", "rm", "-f", id, out: File::NULL, err: File::NULL) if id
+        end
+        nil
+      end
 
       def image = config[:image] || DEFAULT_IMAGE
       def network = config[:network] || DEFAULT_NETWORK
