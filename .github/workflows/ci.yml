@@ -16,6 +16,13 @@ jobs:
           ruby-version: .ruby-version
           bundler-cache: true
 
+      # The docker suite runs live here rather than skipping, so M7's
+      # acceptance — one patch row moves the execution world into a container —
+      # stays exercised in CI. Pulling the image up front keeps the first
+      # container test from paying for it.
+      - name: Pull the sandbox image
+        run: docker pull ruby:slim
+
       - name: Test suites
         run: bundle exec rake test
 
