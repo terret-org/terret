@@ -232,6 +232,11 @@ an append-only log. That exemption is positional rather than by name: it
 holds at the top of a payload and inside an `assistant/message`'s encoded
 parts, and stops the moment anything content-bearing is entered, so the
 `args[:content]` a `Write` call carries is scrubbed like any other text.
+A tool NAME is deliberately not on that list: the model chooses it, so it
+is content, and redacting one fails safe — the name stops resolving and
+the call comes back as a not-found error, where a collapsed id would
+instead poison the session for good.
+
 Streamed text is the other adjustment, and it costs something worth
 naming. A provider's deltas break at token boundaries, so a secret split
 across two of them defeats a pattern that matches it perfectly — and a

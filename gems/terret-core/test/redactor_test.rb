@@ -235,6 +235,66 @@ class RedactorTest < Minitest::Test
     assert_equal "ran it", session.events.find { |e| e.type == "tool/result" }.payload[:content]
   end
 
+  def approvals_row = [{ id: "approvals", plugin: Terret::Tools::Approvals }]
+
+  def await(message, timeout: 2)
+    deadline = Time.now + timeout
+    until yield
+      raise message if Time.now > deadline
+
+      sleep 0.005
+    end
+  end
+
+  # A tool name scrubs like any other content now, so the gate has to compare
+  # names the same way it compares args: against what the log actually holds.
+  def test_a_recorded_verdict_still_matches_a_call_whose_name_was_redacted
+    ctx, = boot(script: [], extra_rows: approvals_row)
+    ctx.with_owner("deploy-plugin") do
+      ctx[:tools].register(name: SECRET, description: "", params: {}, mutating: true,
+                           approval: :always) { "shipped" }
+    end
+    session = ctx[:sessions].create
+    sid = session.id
+    agent = ctx[:loop].spawn_agent(session_id: sid)
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    ctx[:sessions].append(sid, "approval/requested", { call_id: "tc1", name: SECRET, args: {} })
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+
+    call = Terret::Tools::Call.new(id: "tc1", name: SECRET, args: {}, session_id: sid)
+    t = Thread.new { ctx[:tools].execute(call, ctx: agent.ctx) }
+    assert t.join(2), "the gate re-parked: a recorded verdict no longer matches its stored name"
+    assert_equal "shipped", t.value.content
+  end
+
+  # Sessions refuses values the old JSON round trip coerced silently — a Time
+  # a plugin synthesized into args has no stored form at all. That is a
+  # comparison the gate cannot make, not a verdict, so it must park like it
+  # always did rather than tearing the raise through the tools pipeline.
+  def test_args_with_no_stored_form_park_instead_of_raising
+    ctx, = boot(script: [], extra_rows: approvals_row)
+    ctx.with_owner("deploy-plugin") do
+      ctx[:tools].register(name: "deploy", description: "", params: {}, mutating: true,
+                           approval: :always) { |at:| "deployed at #{at.year}" }
+    end
+    session = ctx[:sessions].create
+    sid = session.id
+    agent = ctx[:loop].spawn_agent(session_id: sid)
+    ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
+    # a standing request, unresolved: park re-uses it instead of appending
+    ctx[:sessions].append(sid, "approval/requested",
+                          { call_id: "tc1", name: "deploy", args: { at: "earlier" } })
+
+    call = Terret::Tools::Call.new(id: "tc1", name: "deploy", args: { at: Time.now },
+                                   session_id: sid)
+    t = Thread.new { ctx[:tools].execute(call, ctx: agent.ctx) }
+    await("never parked (status=#{agent.status})") { agent.status == :waiting_approval }
+    ctx[:sessions].append(sid, "approval/resolved", { call_id: "tc1", verdict: "approved" })
+
+    assert t.join(2), "the parked call never woke"
+    assert_equal "deployed at #{Time.now.year}", t.value.content
+  end
+
   # -- streamed chunks ------------------------------------------------------
 
   # FakeAdapter slices text into 8-character deltas, which is exactly what a

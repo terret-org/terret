@@ -106,15 +106,30 @@ module Terret
       # decision.
       def recorded_verdict(call)
         events = open_turn(call.session_id)
+        # Both compared in stored form, and hoisted out of the scan: a tool
+        # name is content like its args (the model chooses it), so a scrubber
+        # rewrites it on the way into the log and a raw comparison would never
+        # match again.
+        name = stored_form(call.name)
+        args = stored_form(call.args)
         asked = events.rindex do |e|
           e.type == "approval/requested" && e.payload[:call_id] == call.id &&
-            e.payload[:name] == call.name && e.payload[:args] == stored_form(call.args)
+            e.payload[:name] == name && e.payload[:args] == args
         end
         return nil unless asked
 
         events[(asked + 1)..].find do |e|
           e.type == "approval/resolved" && e.payload[:call_id] == call.id
         end&.payload
+      rescue NonPrimitivePayload
+        # A value the log refuses has no stored form to compare against — a
+        # Time or some other object a plugin synthesized into args, which the
+        # JSON round trip this used to do coerced silently. That is a
+        # comparison this method cannot make, not a verdict it found: answering
+        # nil parks the call, exactly as this path behaved before. The raise
+        # must not tear out through the tools pipeline, where it would fail the
+        # whole turn over a question about one call.
+        nil
       end
 
       # Args reach the log through Sessions' primitives contract (symbol keys,

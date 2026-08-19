@@ -25,17 +25,20 @@ module Terret
 
     Session = Struct.new(:id, :events, :parent_id, keyword_init: true)
 
-    # Payload keys whose values the harness or the provider minted to point at
-    # something else: tool call ids and their approval foreign keys, the part
-    # tag decode_part dispatches on, lineage, verdicts, the live allow list.
+    # Payload keys whose values the harness minted to point at something else:
+    # tool call ids and their approval foreign keys, the part tag decode_part
+    # dispatches on, lineage, verdicts, the live allow list.
     # A pattern written for a credential — long hex, a UUID shape — matches
     # these too, and rewriting one protects nothing (none of it is
     # model-carried) while it can wreck the log for good: two tool calls that
     # collapse to one id are a request providers reject, a mangled tag makes
     # the session undecodable, and a rewritten pattern list silently changes
     # what an agent may run. Add a key here only when the harness itself
-    # generates its value.
-    STRUCTURAL_KEYS = %i[id call_id name type verdict status agent parent_id
+    # generates its value. A tool NAME is deliberately absent: the model
+    # chooses it, so it is content — and redacting one fails safe, because a
+    # name that stops resolving comes back as a not-found error rather than
+    # collapsing two calls onto one identifier.
+    STRUCTURAL_KEYS = %i[id call_id type verdict status agent parent_id
                          from boundary upto_seq n patterns].freeze
 
     # Keys whose value is a structural CONTAINER rather than a leaf: the

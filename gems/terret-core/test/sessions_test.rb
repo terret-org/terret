@@ -155,8 +155,20 @@ class SessionsPrimitivesTest < Minitest::Test
     ev = ctx[:sessions].append(s.id, "tool/call",
                                { id: "abc123", name: "deploy", args: { token: "abc123" } })
     assert_equal "abc123", ev.payload[:id]
-    assert_equal "deploy", ev.payload[:name]
     assert_equal "[REDACTED]", ev.payload[:args][:token]
+  end
+
+  # A tool name is the one field in that group the MODEL chooses, so it is
+  # content and it scrubs. Unlike an id, redacting it fails safe: the name
+  # stops resolving and the call comes back as a not-found error, rather than
+  # two calls silently collapsing onto one identifier.
+  def test_a_tool_name_is_content_rather_than_structure
+    ctx = scrubbing_ctx
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "tool/call",
+                               { id: "abc123", name: "run_abcdef_now", args: {} })
+    assert_equal "run_[REDACTED]_now", ev.payload[:name]
+    assert_equal "abc123", ev.payload[:id], "ids stay exempt"
   end
 
   def test_two_tool_calls_keep_distinct_ids_under_a_generic_pattern
