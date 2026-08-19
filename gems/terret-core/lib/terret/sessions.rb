@@ -90,6 +90,13 @@ module Terret
       out
     end
 
+    # The latest session/titled's title, or nil. Metadata, not model history.
+    def title(session_id)
+      fetch(session_id).events.reverse_each
+                       .find { |e| e.type == "session/titled" }
+                       &.payload&.[](:title)
+    end
+
     # The enforcement point for "model-visible means logged": the loop calls
     # this with the message list it is about to send; a mismatch against the
     # log projection raises in dev/test.

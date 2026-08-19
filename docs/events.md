@@ -20,6 +20,7 @@ event's public contract; the bus enforces it at runtime.
 | `session/created` | emit | yes | session opened |
 | `session/event` | emit |  | fan-out of every durable append |
 | `session/forked` | emit | yes | lineage record |
+| `session/titled` | emit | yes | session titled (metadata; projection-invisible) |
 | `step/end` | emit | yes | model step closed |
 | `step/start` | emit | yes | model step opened |
 | `tool/call` | emit | yes | tool invocation requested by model |

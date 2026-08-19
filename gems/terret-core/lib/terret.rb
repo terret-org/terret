@@ -34,6 +34,7 @@ module Terret
     e.("approval/resolved",  :emit, durable: true, doc: "parked call decided (approve/deny)")
     e.("policy/updated",   :emit, durable: true,
        doc: "agent allow-list replaced (metadata; projection-invisible)")
+    e.("session/titled",   :emit, durable: true, doc: "session titled (metadata; projection-invisible)")
     # live extension points
     e.("config/updated",    :emit,      doc: "a row's config was hot-swapped (id, config)")
     e.("session/event",     :emit,      doc: "fan-out of every durable append")
@@ -53,6 +54,7 @@ require_relative "terret/sessions"
 require_relative "terret/tools"
 require_relative "terret/approvals"
 require_relative "terret/compactor"
+require_relative "terret/titler"
 require_relative "terret/loop"
 
 Terret.declare_events!
