@@ -455,6 +455,51 @@ class JobsTest < Minitest::Test
     assert_raises(Terret::Exec::NoSuchJob) { ctx[:jobs].collect(id, session: "agent-a") }
   end
 
+  # Closes the real handle first, so the test leaks no process, and then fails
+  # the way a handle that could not be ended would.
+  class RefusesToClose
+    def initialize(handle) = @handle = handle
+    def exited? = @handle.exited?
+    def eof? = @handle.eof?
+    def exit_status = @handle.exit_status
+    def read(...) = @handle.read(...)
+
+    def close
+      @handle.close
+      raise Errno::EPERM
+    end
+  end
+
+  # One job that cannot be closed is one job's problem. It used to be the whole
+  # ledger's: the raise came out of the disposal listener, emit isolated it,
+  # and the agent went away while every job behind that one kept running with
+  # nothing left in the harness able to name it. EPERM on a zombie-only process
+  # group was how this happened in the field; now that the errno is rescued, a
+  # handle that refuses outright is what keeps the isolation honest.
+  def test_one_job_that_will_not_close_does_not_strand_the_ledger_behind_it
+    ctx, = boot
+    stubborn = ctx[:jobs].start("sleep 30", session: "agent-a")
+    live, pid = start_with_pid(ctx, "sleep 30", session: "agent-a")
+    ledger = ctx[:jobs].instance_variable_get(:@jobs)
+    ledger[stubborn] = ledger[stubborn].with(handle: RefusesToClose.new(ledger[stubborn].handle))
+
+    assert_equal [stubborn, live], ctx[:jobs].stop_all_for("agent-a")
+    refute_alive pid
+    assert_raises(Terret::Exec::NoSuchJob) { ctx[:jobs].collect(stubborn, session: "agent-a") }
+  end
+
+  # The disposal hook and the unload hook are the same operation over different
+  # halves of the ledger, so they answer the same way: the ids they ended.
+  def test_stopping_a_sessions_jobs_and_stopping_them_all_both_hand_back_the_ids
+    ctx, = boot
+    a = ctx[:jobs].start("sleep 30", session: "agent-a")
+    b = ctx[:jobs].start("sleep 30", session: "agent-b")
+
+    assert_equal [a], ctx[:jobs].stop_all_for("agent-a")
+    assert_equal [b], ctx[:jobs].stop_all
+    assert_empty ctx[:jobs].stop_all
+  end
+
   def test_unloading_the_row_reaps_every_job
     ctx, loader = boot
     _a, pid_a = start_with_pid(ctx, "sleep 30", session: "agent-a")

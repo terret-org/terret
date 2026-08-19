@@ -2,6 +2,7 @@
 
 require "minitest/autorun"
 require "rbconfig"
+require "tmpdir"
 require_relative "../lib/terret/tools_std"
 require_relative "../../terret-exec/lib/terret/exec" # the seam these tools stand on
 
@@ -41,6 +42,11 @@ class JobToolsTest < Minitest::Test
   end
 
   def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+  # A job the harness spawned and never waited on is an unreaped zombie from
+  # the moment it exits. `ps` is the only portable way to see that: a zombie
+  # answers kill(0) exactly as a running process does.
+  def zombie?(pid) = `ps -o stat= -p #{pid} 2>/dev/null`.strip.start_with?("Z")
 
   def start_job(ctx, command, session_id: "s1")
     result = call(ctx, "job_start", session_id: session_id, command: command)
@@ -154,6 +160,33 @@ class JobToolsTest < Minitest::Test
 
     after = call(ctx, "job_collect", id: id)
     assert_match(/stopped/i, after.content)
+  end
+
+  # The seam's zombie case, seen from the tool. A job that finished on its own
+  # and was never collected sits unreaped in a process group whose only member
+  # is itself, and the EPERM Darwin answers a signal to that group with used to
+  # come back to the model as the result of job_stop. There is no blanket
+  # rescue in this layer — an errno arriving here would mean the seam let one
+  # out — so this is the test that says it does not.
+  def test_stopping_a_job_that_already_finished_is_not_an_errno_the_model_has_to_read
+    Dir.mktmpdir do |dir|
+      ctx, = boot
+      path = File.join(dir, "pid")
+      id, = start_job(ctx, "echo $$ > #{path}")
+      deadline = now + 5
+      sleep 0.02 while !File.exist?(path) && now < deadline
+      pid = Integer(File.read(path))
+      # never collected, so nothing has waited on it: it stays a zombie
+      sleep 0.02 while !zombie?(pid) && now < deadline
+      assert zombie?(pid), "the job never became an unreaped zombie; this is not the case"
+
+      result = call(ctx, "job_stop", id: id)
+
+      assert_nil result.error
+      assert_match(/#{Regexp.escape(id)}/, result.content)
+      refute_match(/Errno|EPERM|Operation not permitted/, result.content)
+      refute zombie?(pid), "and the stop collected the child it ended"
+    end
   end
 
   def test_a_job_with_nothing_new_to_say_says_so_and_reports_that_it_is_running
