@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "minitest/autorun"
+require "json"
 require "rbconfig"
 require "tmpdir"
 require_relative "../lib/terret/exec"
@@ -256,6 +257,64 @@ class ShellTest < Minitest::Test
 
     assert_equal 0, r.status
     assert_equal 8, r.stdout.bytesize
+  end
+
+  # The cap is a byte offset and characters are not bytes. Bytes the CHILD
+  # emitted that were never valid UTF-8 still round-trip untouched; what must
+  # never happen is this seam manufacturing invalid bytes by cutting a valid
+  # character in half — a durable append JSON-encodes the payload, and a
+  # half-character raises there rather than at the seam that made it.
+  def test_a_multibyte_flood_is_never_cut_into_invalid_utf8
+    ctx, = boot(config: { max_output: 1000 })
+    r = ctx[:shell].run(%(#{RUBY} -e "print '日' * 400")) # 1200 bytes, cut lands mid-character
+
+    assert_equal 0, r.status
+    assert r.stdout.valid_encoding?, "the cap must not manufacture invalid UTF-8"
+    JSON.generate({ stdout: r.stdout }) # what the append boundary does; raises on a broken string
+    assert_equal 999, r.stdout.bytesize, "the cut backs off to the last whole character"
+    assert_equal 333, r.stdout.length
+    assert_match(/201/, r.notice, "the backed-off bytes count as dropped, exactly")
+  end
+
+  # When a command's output ends inside a marker's length of the cap, the
+  # marker BEGINS inside the kept region. Reporting the kept region verbatim
+  # would hand the model the session's sentinel — the one value the protocol's
+  # forgery resistance rests on — and leave the dropped count negative.
+  def test_output_ending_just_short_of_the_cap_never_leaks_the_sentinel
+    [20, 30, 39].each do |slack|
+      ctx, = boot(config: { max_output: 100 })
+      size = 100 - slack
+      r = ctx[:shell].run(%(#{RUBY} -e "print 'x' * #{size}"))
+
+      assert_equal 0, r.status, "slack #{slack}"
+      refute_includes r.stdout, "TERRET", "protocol bytes reported as output (slack #{slack})"
+      assert_equal size, r.stdout.bytesize, "slack #{slack}"
+      assert_nil r.notice, "nothing was dropped at #{size} bytes of output"
+    end
+  end
+
+  def test_output_exactly_filling_the_cap_with_its_marker_stays_clean
+    ctx, = boot(config: { max_output: 100 })
+    r = ctx[:shell].run(%(#{RUBY} -e "print 'x' * 60")) # 60 + a 40-byte marker == the cap
+
+    assert_equal 0, r.status
+    assert_equal "x" * 60, r.stdout
+    assert_nil r.notice
+  end
+
+  # Both adjustments in one run: the cap cut lands inside the marker while the
+  # marker itself begins inside the kept region. The reported output has to end
+  # on a character boundary AND carry none of the protocol.
+  def test_a_multibyte_run_whose_marker_straddles_the_cap_stays_clean
+    ctx, = boot(config: { max_output: 100 })
+    r = ctx[:shell].run(%(#{RUBY} -e "print '日' * 30")) # 90 bytes, marker begins at 90
+
+    assert_equal 0, r.status
+    assert r.stdout.valid_encoding?
+    refute_includes r.stdout, "TERRET"
+    assert_equal 90, r.stdout.bytesize
+    assert_equal "日" * 30, r.stdout
+    assert_nil r.notice
   end
 
   # -- a session that ends on its own ---------------------------------------

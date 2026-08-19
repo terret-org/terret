@@ -85,6 +85,16 @@ module Terret
       # reads to survive the trim.
       MARKER_WINDOW = 256
 
+      # UTF-8 lead bytes and the character length each one declares: [mask,
+      # value, bytes]. Read as "if (byte & mask) == value, the character is
+      # `bytes` long".
+      CHARACTER_LENGTHS = [
+        [0x80, 0x00, 1],
+        [0xE0, 0xC0, 2],
+        [0xF0, 0xE0, 3],
+        [0xF8, 0xF0, 4]
+      ].freeze
+
       # A session that is not reused is never left half-drained, so the budget
       # only bounds the pathological case: a background job spewing without
       # pause between two runs. When it does lose that race the remainder is
@@ -277,18 +287,29 @@ module Terret
         cap = max_output
 
         loop do
-          if (m = s.marker.match(tail || kept))
-            out = tail ? kept : kept.byteslice(0, m.begin(0))
-            # everything from the marker on is protocol, not the command's
-            after = (tail || kept).bytesize - m.begin(0)
-            return [Integer(m[1]), text(out), seen - after - out.bytesize]
+          scan = tail || kept
+          if (m = s.marker.match(scan))
+            # Where the marker starts in the STREAM, not in whichever buffer
+            # found it: the window always ends at the stream's end, so its own
+            # offsets are relative. Everything before that point is the
+            # command's output and everything from it on is protocol — which
+            # is why the cut is taken here rather than at the cap. A command
+            # whose output stops within a marker's length of the cap leaves the
+            # marker BEGINNING inside the kept bytes, and returning those
+            # verbatim would hand the caller the session's sentinel, the one
+            # value the protocol's forgery resistance rests on.
+            marker_at = seen - scan.bytesize + m.begin(0)
+            out = kept.byteslice(0, marker_at) # byteslice clamps, so this is
+                                               # all of `kept` in the ordinary
+                                               # over-the-cap case
+            return [Integer(m[1]), text(out), dropped!(marker_at - out.bytesize)]
           end
 
           remaining = deadline - monotonic
-          return [:timeout, text(kept), seen - kept.bytesize] if remaining <= 0
+          return [:timeout, *partial(kept, seen)] if remaining <= 0
 
           chunk = s.handle.read(CHUNK, timeout: remaining)
-          return [:eof, text(kept), seen - kept.bytesize] if chunk.nil?
+          return [:eof, *partial(kept, seen)] if chunk.nil?
 
           seen += chunk.bytesize
           if tail
@@ -300,14 +321,68 @@ module Terret
             # keep the first `cap` bytes; carry a window across the cut so a
             # marker straddling it is still whole in the tail
             tail = window!(kept.byteslice([cap - MARKER_WINDOW, 0].max..))
-            kept = kept.byteslice(0, cap)
+            kept = whole_characters(kept.byteslice(0, cap))
           end
         end
+      end
+
+      # A run that ended without its marker: everything read is the command's
+      # output, and the cut is wherever the deadline or the shell's end landed
+      # — a place this file chose, so it gets the same character-boundary
+      # treatment the cap does.
+      def partial(kept, seen)
+        out = whole_characters(kept)
+        [text(out), dropped!(seen - out.bytesize)]
       end
 
       def window!(buf)
         buf.slice!(0, buf.bytesize - MARKER_WINDOW) if buf.bytesize > MARKER_WINDOW
         buf
+      end
+
+      # Back a byte-offset cut off to the last whole UTF-8 character. Cutting
+      # at a byte offset can split a character in half, and the halves are not
+      # the child's bytes — this seam made them. That matters beyond tidiness:
+      # a durable append JSON-encodes the payload, so a manufactured half
+      # character raises at the append boundary, one layer away from the code
+      # that broke it.
+      #
+      # Only an INCOMPLETE trailing character moves, and never more than three
+      # bytes, because that is the longest tail a split UTF-8 character can
+      # leave. Bytes a child emitted that were never valid UTF-8 are left
+      # exactly as they arrived — a stray continuation byte with no lead, an
+      # 0xFF — since preserving what the child actually wrote is the whole
+      # reason nothing here re-encodes. The rule is narrow on purpose: never
+      # manufacture invalid bytes out of valid ones.
+      def whole_characters(bytes)
+        seen = 0
+        index = bytes.bytesize - 1
+        while index >= 0 && seen < 4
+          byte = bytes.getbyte(index)
+          if (byte & 0xC0) == 0x80 # a continuation byte; keep walking back
+            index -= 1
+            seen += 1
+            next
+          end
+
+          need = CHARACTER_LENGTHS.find { |mask, value, _| (byte & mask) == value }&.last
+          return bytes if need.nil? || seen + 1 >= need # complete, or not ours to fix
+
+          return bytes.byteslice(0, index) # an incomplete tail: drop it
+        end
+        bytes
+      end
+
+      # Every byte dropped is a byte the command produced that the caller will
+      # not see, so the count is non-negative by construction — `out` is always
+      # a prefix of the output that preceded the marker. A negative count would
+      # mean protocol bytes were being counted as output, which is exactly the
+      # arithmetic that leaks a sentinel, so it fails loudly here rather than
+      # being rounded away by a `.positive?` check downstream.
+      def dropped!(count)
+        raise "shell: dropped byte count went negative (#{count}); the cap arithmetic is wrong" if count.negative?
+
+        count
       end
 
       # Bytes sitting on the terminal between two runs belong to whatever wrote
