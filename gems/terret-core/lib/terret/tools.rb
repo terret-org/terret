@@ -3,7 +3,7 @@
 module Terret
   module Tools
     Definition = Data.define(:name, :description, :params, :handler,
-                             :mutating, :approval) do
+                             :mutating, :approval, :concurrency) do
       def schema = { name:, description:, parameters: params }
     end
 
@@ -23,12 +23,19 @@ module Terret
         @defs = {}
       end
 
-      # Returns the registration's disposer.
+      # Returns the registration's disposer. The roster itself stays global
+      # (visibility is the AllowList's job, not this method's) — but the
+      # effect that puts a Definition in the roster is recorded on `ctx`,
+      # which defaults to the registry's own root and so preserves every
+      # existing call site. A caller that passes its forked agent ctx ties
+      # OWNERSHIP to that fork: disposing the agent reaps the registration,
+      # closing the M6-recorded bleed where an agent-registered tool (one
+      # that can carry filesystem authority) outlived the agent that made it.
       def register(name:, description:, params: {}, mutating: false,
-                   approval: :never, &handler)
+                   approval: :never, concurrency: :serial, ctx: @ctx, &handler)
         d = Definition.new(name: name.to_s, description:, params:, handler:,
-                           mutating:, approval:)
-        @ctx.effect do
+                           mutating:, approval:, concurrency:)
+        ctx.effect do
           @defs[d.name] = d
           -> { @defs.delete(d.name) }
         end

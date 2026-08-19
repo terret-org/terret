@@ -960,3 +960,31 @@ class HotPolicyTest < Minitest::Test
     [ctx, loader]
   end
 end
+
+class RegistryScopeTest < Minitest::Test
+  include TerretTestHarness
+
+  def test_an_agent_registered_tool_dies_with_the_agent
+    ctx, = boot(script: [])
+    s = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: s.id)
+    agent.ctx.with_owner("agent-tools") do
+      ctx[:tools].register(name: "mine", description: "scoped", params: {},
+                           ctx: agent.ctx) { "ok" }
+    end
+    assert ctx[:tools].schemas.any? { |sc| sc[:name] == "mine" }
+
+    ctx[:loop].dispose_agent(agent.id)
+    refute ctx[:tools].schemas.any? { |sc| sc[:name] == "mine" },
+           "a tool registered through a fork must not survive the fork's disposal"
+  end
+
+  def test_definitions_carry_concurrency_metadata
+    ctx, = boot(script: [])
+    ctx.with_owner("t") do
+      ctx[:tools].register(name: "solo", description: "d", params: {},
+                           concurrency: :serial) { "x" }
+    end
+    assert_equal :serial, ctx[:tools].fetch("solo").concurrency
+  end
+end
