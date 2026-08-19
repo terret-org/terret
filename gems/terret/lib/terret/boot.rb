@@ -49,10 +49,20 @@ module Terret
     def boot! = loader.boot!
 
     # The loader rather than the context, for a caller that wants
-    # reconfigure!/unload! on the composition it just booted.
+    # reconfigure!/unload! on the composition it just booted. Memoized, because
+    # a second loader would be a second context: `b.loader` then `b.boot!`
+    # would hand back two unrelated worlds built from the same rows.
     def loader
-      require_code!
-      Hames::Loader.new.layer(rows)
+      @loader ||= begin
+        require_code!
+        built = Hames::Loader.new.layer(rows)
+        # Reachable from the context it boots. Terret.boot returns the ctx and
+        # nothing else, so without this a caller holding one has no way to
+        # reconfigure a row, unload one, or shut the composition down through
+        # the services' own stop hooks.
+        built.ctx.register_service(:loader, built)
+        built
+      end
     end
 
     def rows
@@ -87,17 +97,29 @@ module Terret
                    "is not required by any bundle in this profile."
     end
 
-    # Take a booted context down the way the demos do: the long-lived things
-    # first, then every reversible registration. Best-effort by design — this
-    # runs on the way out, including out of a failure.
+    # Take a booted context down through the loader, so every row's own stop
+    # hook runs: the shell closes its bash, the sandbox discards its container,
+    # the SQLite store closes its handle. A hand-written list of seams runs
+    # none of the hooks it does not happen to name, and grows a hole every time
+    # a bundle mounts something new.
+    #
+    # Reverse declaration order, so the session store — which everything else
+    # may still be writing to — closes last.
+    #
+    # Best-effort means each step is separately best-effort. One wedged seam
+    # aborting the rest is how a container survives the process that owned it.
     def self.shutdown(ctx)
-      ctx[:shell].close_all     if ctx.service?(:shell)
-      ctx[:terminals].close_all if ctx.service?(:terminals)
-      ctx[:jobs].stop_all       if ctx.service?(:jobs)
-      ctx[:sandbox].stop        if ctx.service?(:sandbox) && ctx[:sandbox].isolated?
-      ctx.dispose!
+      loader = ctx[:loader] if ctx.service?(:loader)
+      loader&.rows&.values&.reject(&:disabled)&.reverse_each do |row|
+        step("row #{row.id}") { loader.unload!(row.id) }
+      end
+      step("dispose") { ctx.dispose! }
+    end
+
+    def self.step(what)
+      yield
     rescue StandardError => e
-      warn "terret: shutdown: #{e.class}: #{e.message}"
+      warn "terret: shutdown: #{what}: #{e.class}: #{e.message}"
     end
   end
 end

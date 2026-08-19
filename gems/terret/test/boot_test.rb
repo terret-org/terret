@@ -5,6 +5,18 @@ require "tmpdir"
 require "fileutils"
 require_relative "../lib/terret/boot"
 
+# A row whose teardown fails. Named at the top level because a plugin: is a
+# constant name resolved out of YAML, same as any other row's.
+class BootTestWedgedSeam < Hames::Service
+  service_key :wedged
+  class << self; attr_accessor :stopped; end
+
+  def stop(_ctx)
+    self.class.stopped = true
+    raise "wedged: this seam will not close"
+  end
+end
+
 # Terret.boot is the whole embedding surface (docs/composition.md §7): resolve
 # the layers, hand the row list to the Hames loader, return the booted context.
 # A Rails app calls this in an initializer and holds the ctx; `trt` is one
@@ -179,8 +191,63 @@ class BootTest < Minitest::Test
     FileUtils.remove_entry(elsewhere) if elsewhere && File.directory?(elsewhere)
   end
 
+  # -- shutdown --------------------------------------------------------------
+
+  # A row's stop hook is where a service closes what it opened. Tearing a
+  # composition down by hand-listing four seams runs none of them.
+  def test_shutdown_runs_every_rows_stop_hook_not_a_hand_written_list
+    name = offline_profile
+    db_path = File.join(@workspace, "sessions.db")
+    profile_patch(name, <<~YAML)
+      rows:
+        - id: session_store
+          plugin: Terret::Store::SQLite
+          config: { path: #{db_path} }
+        - id: openrouter
+          disabled: true
+        - id: llm
+          config: { roles: { main: fake/scripted } }
+        - id: sandbox
+          plugin: Terret::Exec::SandboxNone
+          config: {}
+    YAML
+    ctx = Terret.boot(profile: name)
+    handle = ctx[:session_store].instance_variable_get(:@db)
+    refute_predicate handle, :closed?
+
+    Terret::Boot.shutdown(ctx)
+    assert_predicate handle, :closed?, "Store::SQLite#stop must have run and closed the database"
+  end
+
+  def test_one_wedged_seam_does_not_abort_the_rest_of_the_shutdown
+    name = offline_profile
+    profile_patch(name, "#{OFFLINE_PATCH}\n  - id: wedged\n    plugin: BootTestWedgedSeam\n    after: sessions\n")
+    ctx = boot(name)
+    BootTestWedgedSeam.stopped = false
+
+    _out, errs = capture_io { Terret::Boot.shutdown(ctx) }
+    @booted.delete(ctx)
+
+    assert BootTestWedgedSeam.stopped, "the wedged seam's stop was attempted"
+    assert_includes errs, "wedged"
+    refute ctx.service?(:sessions), "every other row still came down"
+  end
+
+  def test_the_loader_stays_reachable_from_the_context_it_booted
+    ctx = boot
+    assert_kind_of Hames::Loader, ctx[:loader]
+    assert_same ctx, ctx[:loader].ctx
+  end
+
+  def test_asking_a_boot_for_its_loader_twice_gets_the_same_one
+    b = Terret::Boot.new(Terret::Composition.resolve(profile: offline_profile))
+    assert_same b.loader, b.loader
+    @booted << b.boot!
+    assert_same b.loader.ctx, @booted.last
+  end
+
   def test_the_shipped_headless_template_resolves_with_an_empty_home
-    resolved = Terret::Composition.resolve(profile: "headless")
+    resolved = Terret::Composition.resolve(profile: "headless", bundles: shipped_catalog)
     assert_equal "terret-base", resolved.row("sandbox").row_layer
     assert_equal "Terret::Sandbox::Docker", resolved.row("sandbox").plugin
 
@@ -189,5 +256,13 @@ class BootTest < Minitest::Test
     assert_equal "none", sandbox[:config][:network], "the shipped default denies the network"
     fs = rows.find { |r| r[:id] == "fs" }
     assert_equal [], fs[:config][:workspace], "an unedited template grants no workspace"
+  end
+
+  # Named explicitly rather than discovered: going through discovery would make
+  # the result depend on whatever else happens to be installed on the machine.
+  def shipped_catalog
+    { "terret" => Terret::Composition.load_bundle(
+      File.expand_path("../config/bundle.yml", __dir__), gem_name: "terret"
+    ) }
   end
 end
