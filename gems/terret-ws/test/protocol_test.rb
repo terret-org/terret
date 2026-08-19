@@ -486,6 +486,52 @@ class ProtocolTest < Minitest::Test
     end
   end
 
+  # `:stopping` is a cancel already standing on a turn that has not reached
+  # its boundary yet, and the M8 barrier widened that window: a run in flight
+  # finishes before the cancel is observed. A client sending a second frame
+  # into it is not cancelling nothing — the turn is still running, still
+  # logging, and still going to close — so `not_running` there would be a
+  # false answer, and the newer reason has to reach the durable turn/end.
+  def test_a_second_cancel_while_stopping_is_honored_rather_than_answered_not_running
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) do |city:|
+      gate.dequeue
+      "22C in #{city}"
+    end
+    agent, = spawn_agent(ctx)
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      sock.client_send(type: "inject", text: "weather?", wake: true)
+      await { sock.event_types(chunkless: false).include?("tool/call") }
+
+      sock.client_send(type: "cancel", reason: "changed my mind")
+      await { agent.status == :stopping }
+
+      sock.client_send(type: "cancel", reason: "I really mean it")
+      # Either outcome settles the frame, so the wait is bounded by the
+      # behaviour under test rather than by the timeout.
+      await do
+        agent.cancel_reason == "I really mean it" ||
+          sock.protocol_frames.any? { |f| f[:code] == "not_running" }
+      end
+
+      assert_empty sock.protocol_frames.select { |f| f[:code] == "not_running" },
+                   "a turn still short of its boundary is running, not not_running"
+      assert_equal "I really mean it", agent.cancel_reason
+
+      gate.enqueue(nil)
+      await { sock.event_types.include?("turn/end") }
+      turn_end = sock.events.last
+      assert_equal "cancelled", turn_end[:payload][:status]
+      assert_equal "I really mean it", turn_end[:payload][:reason],
+                   "the newer reason is the one the log keeps"
+      sock.client_close
+    end
+  end
+
   def test_cancel_with_no_turn_running_answers_not_running
     ctx = boot(script: [{ text: "hi" }])
     agent, = spawn_agent(ctx)
