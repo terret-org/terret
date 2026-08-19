@@ -163,7 +163,16 @@ module Terret
       # agree on which files are searched and differ only in regex dialect.
       # It runs through ctx[:subprocess] like every other spawn in Terret,
       # which is what keeps it inside the sandbox once one is mounted.
-      # Returns nil when ripgrep proved unusable and the caller should scan.
+      #
+      # Returns nil when ripgrep proved unusable and the caller should scan
+      # in-process instead. There are two ways that happens, because
+      # rg_on_path? only ever probed THIS process's PATH and the spawn's own
+      # verdict outranks it: a local spawn that cannot find the binary raises
+      # Errno::ENOENT, while a sandbox running the argv somewhere else answers
+      # with a status and never raises — `docker exec` exits 127 for a command
+      # missing from the container, 126 for one that is there but not
+      # executable. A host with ripgrep and an image without it is the ordinary
+      # case, not an exotic one, so neither may fail the call.
       def ripgrep(pattern, files)
         # --no-ignore because which files get searched is ctx[:fs]'s decision,
         # already made: the list below IS the answer, and a .gitignore in the
@@ -177,16 +186,14 @@ module Terret
         case result.status
         when 0 then result.stdout.lines.map(&:chomp)
         when 1 then [] # ripgrep's "no matches" — an answer, not a failure
+        when 126, 127 then nil # no usable rg where the argv actually ran
         else
           # A bad pattern is the caller's problem. Silently retrying it under
           # Ruby's regex dialect would hide that the two engines disagree.
           raise Terret::Tools::Failure, "ripgrep failed: #{failure_detail(result)}"
         end
       rescue Errno::ENOENT
-        # rg_on_path? reads THIS process's PATH; under a container sandbox the
-        # binary that matters is the container's. The spawn's own verdict is
-        # the authoritative one, so a miss here falls back instead of failing.
-        nil
+        nil # the local-spawn miss; the status branch above is the sandbox's
       end
 
       def failure_detail(result)

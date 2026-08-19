@@ -336,6 +336,31 @@ class FilesToolsTest < Minitest::Test
     end
   end
 
+  # The host PATH probe can say yes while the binary that matters lives
+  # somewhere else: `docker exec` answers 127 for a command missing from the
+  # container (126 for one present but not executable) and never raises, so
+  # the status is the only signal there is.
+  def test_grep_falls_back_when_the_sandbox_reports_no_usable_ripgrep
+    [127, 126].each do |status|
+      Dir.mktmpdir do |dir|
+        with_fake_rg_on_path do
+          ctx, = boot(workspace: [dir],
+                      extra_rows: [{ id: "subprocess", plugin: StubSubprocess,
+                                     config: { status: status,
+                                               stderr: "OCI runtime exec failed: exec: \"rg\": " \
+                                                       "executable file not found in $PATH: unknown\n" } }])
+          ctx[:fs].write(File.join(dir, "a.rb"), "needle\n")
+
+          result = call(ctx, "Grep", pattern: "needle")
+          assert_nil result.error, "exit #{status} means scan in-process, not fail the call"
+          assert_equal ["#{File.join(File.realpath(dir), 'a.rb')}:1:needle"],
+                       result.content.lines.map(&:chomp), "exit #{status} answer"
+          assert_equal 1, ctx[:subprocess].calls.length, "exit #{status}: the sandbox was tried first"
+        end
+      end
+    end
+  end
+
   def test_grep_ignores_the_subprocess_seam_when_the_row_turns_ripgrep_off
     Dir.mktmpdir do |dir|
       with_fake_rg_on_path do
