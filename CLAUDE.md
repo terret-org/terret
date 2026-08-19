@@ -74,6 +74,7 @@ bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
 bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture
 ruby examples/lifecycle_demo.rb   # park/resume, compaction, titling, cost, hot policy
 ruby examples/exec_demo.rb   # file tools, shell, terminals, redaction; the container act needs docker
+ruby examples/subagent_demo.rb   # Task delegation, background jobs, TodoWrite, the tool barrier
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and `terret-core` have zero
