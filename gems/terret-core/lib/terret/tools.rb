@@ -51,6 +51,13 @@ module Terret
       # per-agent policy listeners ride the fork (root listeners still run
       # first — fork dispatch chains parent-first). ctx is required — a
       # forgotten kwarg must fail loudly, not silently skip per-agent policy.
+      #
+      # One thing a handler is given beyond its arguments: a handler that
+      # declares a `session_id:` keyword receives the executing call's
+      # session. It is injected here and never model-supplied — it is not a
+      # property of any tool's params schema, and the merge in #handler_args
+      # puts the Call's own value LAST so an argument carrying that name
+      # cannot name somebody else's session.
       def execute(call, ctx:)
         admitted = ctx.waterfall("tools/pre_execute", call)
         return Result.new(id: call.id, content: nil, error: admitted.reason) if admitted.is_a?(Veto)
@@ -58,7 +65,7 @@ module Terret
         result = ctx.waterfall("tools/execute", admitted) do |c|
           begin
             d = fetch(c.name)
-            Result.new(id: c.id, content: d.handler.call(**c.args), error: nil)
+            Result.new(id: c.id, content: d.handler.call(**handler_args(d, c)), error: nil)
           rescue Failure => e
             Result.new(id: c.id, content: nil, error: e.message)
           rescue => e
@@ -66,6 +73,36 @@ module Terret
           end
         end
         ctx.waterfall("tools/post_execute", result)
+      end
+
+      private
+
+      # A handler that declares a `session_id:` keyword is asking which
+      # session it is running for. That is the one fact about a call that is
+      # not in its args and cannot be recovered from anywhere else: a forked
+      # agent scope is an anonymous Context, so a tool owning per-session
+      # state — a persistent shell, a named terminal — has no other way to
+      # keep one agent's state out of another's.
+      #
+      # Only handlers that declare it are handed it, so every registration
+      # that does not care keeps its exact signature (an unknown keyword
+      # would raise). And the call's own session is merged LAST: a model that
+      # writes `session_id` into its arguments is trying to name somebody
+      # else's shell, and here that argument simply loses.
+      #
+      # Both keyword shapes count. A handler written as a block reports an
+      # optional keyword as `:key` and a required one as `:keyreq`, and a
+      # lambda handler reports `:keyreq` too — the tool that needs its
+      # session must not depend on which of the three forms it was written
+      # in.
+      def handler_args(definition, call)
+        return call.args unless wants_session?(definition.handler)
+
+        call.args.merge(session_id: call.session_id)
+      end
+
+      def wants_session?(handler)
+        handler.parameters.any? { |kind, name| name == :session_id && %i[key keyreq].include?(kind) }
       end
     end
 
