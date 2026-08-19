@@ -52,12 +52,26 @@ class JobToolsTest < Minitest::Test
 
   # Bounded, like the seam's own tests: a job that never says the expected
   # thing fails the assertion instead of hanging the suite.
+  #
+  # The body accumulates across windows and the remarks are the newest ones,
+  # which together are what the model would have read had the whole thing
+  # arrived in one collect. A collect DRAINS, so a job whose output and whose
+  # exit land in different windows can never satisfy a predicate over a single
+  # one — and which side of that boundary they fall on is a matter of timing,
+  # which makes it a flake rather than a test.
   def collect_until(ctx, id, session_id: "s1", timeout: 5)
     deadline = now + timeout
+    body = +""
     loop do
       content = call(ctx, "job_collect", session_id: session_id, id: id).content.to_s
-      return content if yield content
-      flunk "the job never said what this test is about: #{content.inspect}" if now > deadline
+      # The last ledger line is the genuine one — a job can print the literal
+      # itself, and the remarks are always after it.
+      chunk, _, remarks = content.rpartition("\n#{Terret::ToolsStd::Jobs::LEDGER}\n")
+      body << chunk unless chunk.empty? || chunk == "(no new output)"
+      whole = "#{body.empty? ? '(no new output)' : body}\n" \
+              "#{Terret::ToolsStd::Jobs::LEDGER}\n#{remarks}"
+      return whole if yield whole
+      flunk "the job never said what this test is about: #{whole.inspect}" if now > deadline
 
       sleep 0.02
     end
@@ -151,9 +165,13 @@ class JobToolsTest < Minitest::Test
     assert_match(/still running/, content)
   end
 
+  # The output and the exit are deliberately far enough apart that a collect
+  # lands between them: the body arrives in a window that still says "running",
+  # and the window that reports the exit has nothing new to say. Both halves
+  # are the result, so the assertion is over both.
   def test_a_finished_job_reports_its_exit_status_in_the_ledger
     ctx, = boot
-    id, = start_job(ctx, "printf done; exit 7")
+    id, = start_job(ctx, "printf done; sleep 0.4; exit 7")
 
     content = collect_until(ctx, id) { |c| c.include?("exited") }
     assert_match(/\Adone\n--- terret ---\n/, content)
@@ -178,6 +196,23 @@ class JobToolsTest < Minitest::Test
     assert_match(/\Az{20}\n--- terret ---/, content)
     assert_match(/kept the first 20 bytes/, content)
     assert_match(/dropped 80 more/, content)
+    assert_match(/gone rather than waiting/, content,
+                 "this collect drained the buffer, so the dropped bytes are not coming later")
+  end
+
+  # The other cap, and a different loss: these bytes never reached the tool at
+  # all, because the seam's buffer dropped them on the way in. Reported as its
+  # own remark for that reason — a model told only "truncated" would not know
+  # which end of the pipe it lost them at.
+  def test_output_the_seam_dropped_before_it_could_be_collected_is_its_own_remark
+    ctx, = boot(jobs_config: { max_output: 32 })
+    id, = start_job(ctx, "#{RUBY} -e 'print \"q\" * 500'; sleep 30")
+
+    content = collect_until(ctx, id) { |c| c.start_with?("q") }
+    assert_match(/\Aq{32}\n--- terret ---/, content, "the seam's cap is kept exactly")
+    assert_match(/dropped before it could be collected/, content)
+    refute_match(/output truncated at max_output/, content,
+                 "the display cap was never reached; only the buffer's was")
   end
 
   # -- failing closed ---------------------------------------------------------
@@ -230,6 +265,18 @@ class JobToolsTest < Minitest::Test
     assert_nil result.content
     assert_match(/command/, result.error)
     refute_match(/ArgumentError/, result.error)
+  end
+
+  # The refusal names the tool that needed the id, the way the command refusal
+  # names job_start: "this tool" is not something a model can act on when it
+  # has four calls in flight.
+  def test_a_missing_id_is_refused_by_the_tool_that_needed_it
+    ctx, = boot
+    %w[job_collect job_stop].each do |name|
+      result = call(ctx, name)
+      assert_nil result.content, name
+      assert_match(/\A#{name} needs the job id/, result.error, name)
+    end
   end
 
   # -- bytes a job wrote that are not text ------------------------------------

@@ -41,10 +41,11 @@ module Terret
         "running after this call returns and after the turn that started it ends; read what " \
         "it has written with job_collect, and end it with job_stop. Each job is a fresh " \
         "shell, not this session's persistent bash, so a `cd` or an `export` from a Bash " \
-        "call is not in effect here. A job does not survive a restart of the harness. If a " \
-        "turn is resumed after a crash this call runs a second time and starts a SECOND " \
-        "job — the first may still be running, with output nobody will collect — so when a " \
-        "resume is possible, use job_collect to check for two ids where you expected one."
+        "call is not in effect here. A job does not survive a restart of the harness. If " \
+        "this call is interrupted before its result is recorded, a resume of the turn runs " \
+        "it again and starts a SECOND job — the first may still be running, with output " \
+        "nobody will collect — so after a resume, use job_collect to check for two ids " \
+        "where you expected one."
 
       COLLECT_DESCRIPTION =
         "Read whatever a job has written since the last time it was collected, and find out " \
@@ -110,14 +111,14 @@ module Terret
         # the barrier was declared for.
         tool("job_collect", COLLECT_DESCRIPTION, object_schema({ id: id_property }, %w[id]),
              mutating: false, approval: :never, concurrency: :parallel) do |session_id:, id: nil|
-          render(@ctx[:jobs].collect(id!(id), session: session_id))
+          render(@ctx[:jobs].collect(id!(id, "job_collect"), session: session_id))
         end
       end
 
       def register_stop
         tool("job_stop", STOP_DESCRIPTION, object_schema({ id: id_property }, %w[id]),
              mutating: true, approval: :policy, concurrency: :serial) do |session_id:, id: nil|
-          stopped(@ctx[:jobs].stop(id!(id), session: session_id))
+          stopped(@ctx[:jobs].stop(id!(id, "job_stop"), session: session_id))
         end
       end
 
@@ -133,10 +134,11 @@ module Terret
               "was started."
       end
 
-      def id!(id)
+      def id!(id, tool)
         return id if id.is_a?(String) && !id.strip.empty?
 
-        raise Terret::Tools::Failure, "this tool needs the job id job_start handed back, as a string"
+        raise Terret::Tools::Failure,
+              "#{tool} needs the job id job_start handed back, as a string"
       end
 
       # The ledger line is what the model will address the job by for the rest
@@ -160,9 +162,14 @@ module Terret
       # writing yet.
       def remarks_for(result, body, dropped)
         remarks = [status_remark(result)]
+        # The dropped bytes are gone, not held back: this collect drained the
+        # buffer, so what did not fit the cap is not waiting for the next one.
+        # Saying "truncated" without saying that invites a model to collect
+        # again for the rest of a result nothing can hand it.
         if dropped.positive?
           remarks << "output truncated at max_output: kept the first #{body.bytesize} bytes " \
-                     "of rendered output and dropped #{dropped} more"
+                     "of rendered output and dropped #{dropped} more, which are gone rather " \
+                     "than waiting for the next collect"
         end
         # The seam's own cap, hit before this tool ever saw the bytes. Reported
         # separately because it is a different loss: those bytes are gone from
