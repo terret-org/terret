@@ -5,6 +5,16 @@ require "json"
 require "tmpdir"
 require_relative "../lib/terret"
 
+# The barrier is Async-native and terret-core depends on nothing: without a
+# reactor a parallel run still completes as a group, just one call at a time.
+# Proving that it OVERLAPS needs the reactor, so those tests need the gem.
+ASYNC_AVAILABLE = begin
+  require "async"
+  true
+rescue LoadError
+  false
+end unless defined?(ASYNC_AVAILABLE)
+
 module TerretTestHarness
   def boot(script:, extra_rows: [])
     Hames.reset_events!
@@ -1065,5 +1075,167 @@ class RegistryScopeTest < Minitest::Test
                            concurrency: :serial) { "x" }
     end
     assert_equal :serial, ctx[:tools].fetch("solo").concurrency
+  end
+end
+
+# M7 declared `concurrency:` on every Definition and honored it nowhere. This
+# is the consumer: within one assistant message the loop partitions the calls
+# into maximal runs, and a run of :parallel definitions executes under one
+# barrier (docs/subagents.md §5).
+class ToolBarrierTest < Minitest::Test
+  include TerretTestHarness
+
+  SLEEP = 0.2
+
+  def batch_script(*names)
+    calls = names.each_with_index.map do |n, i|
+      Terret::LLM::ToolCall.new(id: "tc#{i + 1}", name: n, args: {})
+    end
+    [{ text: "Doing them.", tool_calls: calls }, { text: "All done." }]
+  end
+
+  # Each tool counts itself in and out, so the peak is what actually overlapped
+  # rather than what the wall clock lets us infer.
+  def register_slow(ctx, names, concurrency:, meter:)
+    ctx.with_owner("slow-tools") do
+      names.each do |name|
+        ctx[:tools].register(name: name, description: "slow", params: {},
+                             concurrency: concurrency) do
+          meter[:in_flight] += 1
+          meter[:peak] = [meter[:peak], meter[:in_flight]].max
+          sleep SLEEP
+          meter[:in_flight] -= 1
+          "#{name} done"
+        end
+      end
+    end
+  end
+
+  def timed_turn(ctx, agent)
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    Async { ctx[:loop].run_turn(agent, "go") }.wait
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+  end
+
+  def test_parallel_calls_in_one_message_run_concurrently
+    skip "async is not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot(script: batch_script("slow_a", "slow_b"))
+    meter = { in_flight: 0, peak: 0 }
+    register_slow(ctx, %w[slow_a slow_b], concurrency: :parallel, meter: meter)
+    agent, = spawn(ctx)
+
+    elapsed = timed_turn(ctx, agent)
+
+    assert_equal 2, meter[:peak], "both parallel calls must be in flight at once"
+    assert_operator elapsed, :<, SLEEP * 1.75,
+                    "two #{SLEEP}s calls took #{elapsed.round(3)}s; that is not concurrent"
+  end
+
+  def test_serial_calls_never_overlap
+    skip "async is not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot(script: batch_script("slow_a", "slow_b"))
+    meter = { in_flight: 0, peak: 0 }
+    register_slow(ctx, %w[slow_a slow_b], concurrency: :serial, meter: meter)
+    agent, = spawn(ctx)
+
+    elapsed = timed_turn(ctx, agent)
+
+    assert_equal 1, meter[:peak], "a serial call is a barrier of one"
+    assert_operator elapsed, :>=, SLEEP * 1.75,
+                    "two #{SLEEP}s serial calls took #{elapsed.round(3)}s; they overlapped"
+  end
+
+  # Concurrency is allowed to change WHEN work happens. It is not allowed to
+  # change what the log says happened: derive_messages projects the model's
+  # history from this order and assert_log_invariant! digests against it, so a
+  # log whose result order followed completion would replay differently than
+  # it ran.
+  def test_results_append_in_call_order_regardless_of_completion_order
+    skip "async is not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot(script: batch_script("slow", "quick"))
+    finished = []
+    ctx.with_owner("mixed-tools") do
+      ctx[:tools].register(name: "slow", description: "s", params: {},
+                           concurrency: :parallel) do
+        sleep SLEEP
+        finished << "slow"
+        "slow result"
+      end
+      ctx[:tools].register(name: "quick", description: "q", params: {},
+                           concurrency: :parallel) do
+        finished << "quick"
+        "quick result"
+      end
+    end
+    agent, session = spawn(ctx)
+
+    Async { ctx[:loop].run_turn(agent, "go") }.wait
+
+    assert_equal %w[quick slow], finished, "the second call must really have finished first"
+    results = session.events.select { |e| e.type == "tool/result" }
+    assert_equal %w[tc1 tc2], results.map { |e| e.payload[:id] }
+    assert_equal ["slow result", "quick result"], results.map { |e| e.payload[:content] }
+  end
+
+  # A run is launched as a group, so its calls are all logged before any of
+  # their results — with no reactor in sight, since the shape of the log is a
+  # property of the partition rather than of the scheduler.
+  def test_a_parallel_run_logs_every_call_before_any_of_its_results
+    ctx, = boot(script: batch_script("p_a", "p_b"))
+    ctx.with_owner("pair") do
+      %w[p_a p_b].each do |name|
+        ctx[:tools].register(name: name, description: "p", params: {},
+                             concurrency: :parallel) { "#{name} done" }
+      end
+    end
+    agent, session = spawn(ctx)
+
+    ctx[:loop].run_turn(agent, "go")
+
+    batch = session.events.map(&:type).select { |t| %w[tool/call tool/result].include?(t) }
+    assert_equal %w[tool/call tool/call tool/result tool/result], batch
+  end
+
+  # A barrier is not interruptible from outside once it starts, so a cancel
+  # requested while a run is in flight settles AFTER that run rather than
+  # tearing fibers out of the middle of it. Every call in the batch still ends
+  # with a result either way; there are simply fewer truncated ones.
+  def test_a_cancel_inside_a_parallel_run_truncates_between_runs_not_within_one
+    ctx, = boot(script: batch_script("canceller", "sibling", "loner", "later"))
+    agent = nil
+    ran = []
+    ctx.with_owner("four-tools") do
+      ctx[:tools].register(name: "canceller", description: "c", params: {},
+                           concurrency: :parallel) do
+        agent.cancel("user hit stop")
+        ran << "canceller"
+        "cancelled from here"
+      end
+      ctx[:tools].register(name: "sibling", description: "s", params: {},
+                           concurrency: :parallel) do
+        ran << "sibling"
+        "sibling ran anyway"
+      end
+      ctx[:tools].register(name: "loner", description: "l", params: {},
+                           concurrency: :serial) { ran << "loner" }
+      ctx[:tools].register(name: "later", description: "x", params: {},
+                           concurrency: :parallel) { ran << "later" }
+    end
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+
+    assert_equal :cancelled, ctx[:loop].run_turn(agent, "go")
+
+    assert_equal %w[canceller sibling], ran,
+                 "the run already in flight finishes; nothing after it starts"
+    results = session.events.select { |e| e.type == "tool/result" }
+    assert_equal %w[tc1 tc2 tc3 tc4], results.map { |e| e.payload[:id] },
+                 "the projection never holds a call without a result"
+    assert_equal "sibling ran anyway", results[1].payload[:content]
+    assert_equal "cancelled before execution", results[2].payload[:error]
+    assert_equal "cancelled before execution", results[3].payload[:error]
   end
 end

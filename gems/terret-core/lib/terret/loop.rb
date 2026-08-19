@@ -318,16 +318,7 @@ module Terret
           return # nothing owed
         end
 
-        calls.each do |tc|
-          sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
-          if agent.cancelled?
-            sessions.append(sid, "tool/result",
-                            { id: tc.id, content: nil, error: "cancelled before execution" })
-            next
-          end
-
-          execute_and_record(ctx, sessions, sid, tc)
-        end
+        execute_batch(agent, ctx, sessions, sid, calls)
         sessions.append(sid, "step/end", step_end)
         # redundant under the sync driver (the next iteration's top check
         # would catch it); becomes load-bearing once tools can yield (§8)
@@ -381,11 +372,103 @@ module Terret
       sessions.append(sid, "assistant/chunk", { text: text })
     end
 
-    def execute_and_record(ctx, sessions, sid, tc)
-      result = ctx[:tools].execute(
+    # One assistant message's tool calls, run as maximal runs of the
+    # concurrency their definitions declare (docs/subagents.md §5). M7 put
+    # `concurrency:` on every Definition and honored it nowhere; this is the
+    # consumer.
+    #
+    # Partitioning into MAXIMAL runs rather than gathering every parallel call
+    # in the message together is what preserves a serial call's meaning: a
+    # :serial call is a barrier of one, and nothing reorders across it.
+    #
+    # Cancellation lands BETWEEN runs. A barrier is not interruptible from
+    # outside once it starts, so a cancel requested while a run is in flight
+    # settles after that run rather than tearing fibers out of the middle of
+    # it; a truncated batch simply produces fewer `cancelled before execution`
+    # results than it did before the barrier existed. Every call still ends
+    # with a result either way — the projection never holds a call without one.
+    def execute_batch(agent, ctx, sessions, sid, calls)
+      maximal_runs(ctx, calls).each do |concurrent, run|
+        if agent.cancelled?
+          run.each do |tc|
+            log_call(sessions, sid, tc)
+            sessions.append(sid, "tool/result",
+                            { id: tc.id, content: nil, error: "cancelled before execution" })
+          end
+          next
+        end
+
+        # The whole run is logged before any of it executes: it is launched as
+        # a group, so there is no per-call moment to interleave a call event
+        # into.
+        run.each { |tc| log_call(sessions, sid, tc) }
+        results = concurrent ? execute_together(ctx, sid, run) : run.map { |tc| execute_call(ctx, sid, tc) }
+        # In CALL order, always. Concurrency may change when work happens; it
+        # may not change what the log says happened, because derive_messages
+        # projects the model's history from this order and resume rebuilds it.
+        results.each do |r|
+          sessions.append(sid, "tool/result", { id: r.id, content: r.content, error: r.error })
+        end
+      end
+    end
+
+    # [[concurrent?, [call, ...]], ...]. A lone :parallel call is executed as
+    # a run of one — there is nothing to overlap it with, and a fiber for it
+    # would buy latency rather than spend it.
+    def maximal_runs(ctx, calls)
+      calls.chunk_while { |a, b| parallel?(ctx, a) && parallel?(ctx, b) }
+           .map { |run| [run.length > 1, run] }
+    end
+
+    # An unknown tool is a barrier of one: it cannot be dispatched, and the
+    # pipeline renders its "no such tool" error as an ordinary result.
+    def parallel?(ctx, call)
+      ctx[:tools].fetch(call.name).concurrency == :parallel
+    rescue KeyError
+      false
+    end
+
+    # The barrier: one Async task per call on the one reactor, and dispatch
+    # completes only when every call has. Async is not a dependency of this
+    # gem — without a reactor the run still completes as a group, one call at
+    # a time, exactly the contract Hames' own :parallel dispatch keeps.
+    #
+    # Every child is waited on even after one of them raises. A tool error is
+    # already an ordinary Result rather than an exception, so what reaches
+    # here is a listener that blew up; abandoning its siblings mid-flight
+    # would leave fibers writing into a batch nobody is going to append.
+    def execute_together(ctx, sid, run)
+      task = defined?(Async::Task) ? Async::Task.current? : nil
+      return run.map { |tc| execute_call(ctx, sid, tc) } unless task
+
+      results = Array.new(run.length)
+      children = run.each_with_index.map do |tc, i|
+        task.async { results[i] = execute_call(ctx, sid, tc) }
+      end
+      failure = nil
+      children.each do |child|
+        child.wait
+      rescue StandardError => e
+        failure ||= e
+      end
+      raise failure if failure
+
+      results
+    end
+
+    def log_call(sessions, sid, tc)
+      sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
+    end
+
+    def execute_call(ctx, sid, tc)
+      ctx[:tools].execute(
         Tools::Call.new(id: tc.id, name: tc.name, args: tc.args, session_id: sid),
         ctx: ctx
       )
+    end
+
+    def execute_and_record(ctx, sessions, sid, tc)
+      result = execute_call(ctx, sid, tc)
       sessions.append(sid, "tool/result",
                       { id: result.id, content: result.content, error: result.error })
     end
