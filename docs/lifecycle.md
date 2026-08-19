@@ -86,7 +86,15 @@ approval verdicts from the log rather than re-asking), then the step's
 process's usage figure died with it. From there the turn continues
 stepping normally and closes with an ordinary `turn/end`.
 
-Two edges are left visible rather than papered over:
+That re-execution is why crash recovery is **at-least-once** for tool calls:
+a call whose `tool/result` never logged may still have run, in whole or in
+part, before the process died, and resume runs it again. Idempotency is the
+tool's concern — a tool that cannot be safely repeated needs its own guard.
+`gems/terret-ws/test/lifecycle_test.rb` holds that lane honest: a subprocess
+wedges mid-tool, dies by `kill -9` so no `ensure` runs, and a fresh process
+completes the turn on the first wake.
+
+Three edges are left visible rather than papered over:
 
 - An unclosed `step/start` from a mid-step crash stays unclosed; step
   numbering continues past the gap rather than backfilling it.
