@@ -761,8 +761,8 @@ class ProtocolTest < Minitest::Test
     end
   end
 
-  # Before the M6 boundary (Task 3), invalid UTF-8 appended durably and blew up
-  # in the socket's JSON serializer, dropping the connection. Now the boundary
+  # Before the M6 boundary, invalid UTF-8 appended durably and blew up in the
+  # socket's JSON serializer, dropping the connection. Now the boundary
   # refuses it before any consumer can see it: the log stays untouched and the
   # connection never even notices.
   def test_a_poison_payload_is_refused_at_the_boundary_and_the_socket_survives

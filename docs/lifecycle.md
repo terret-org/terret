@@ -127,12 +127,18 @@ projection the summary stands in for.
 Triggering is automatic and manual both. `ctx[:compactor]`, configured
 with `config[:budget]`, compacts a session after any turn whose last
 `step/end` carried `usage.prompt_tokens >= budget`. `compact!(session_id)`
-is the same operation invoked directly. Either way, the compactor's own
-summarization call goes through `ctx[:llm].stream` as a utility request
+is the same operation invoked directly. Either way, generating the summary
+itself is a seam, `ctx[:summarizer]` — sole-provider, like the session
+store — rather than something the compactor does inline. `RoleSummarizer`,
+the no-signup default, issues one utility request through `ctx[:llm].stream`
 derived from the log — not a session request the loop's invariant assert
-ever sees (docs/terret-implementation-plan.md §2). A failure in that call
-is non-fatal: the listener is isolated, the turn that triggered it already
-closed successfully, and the next turn simply retries compaction.
+ever sees (docs/terret-implementation-plan.md §2). `terret-morph` is the
+other provider: it calls out to Morph's Compact API on the wire proven in
+the deployed agora integration, extractive-compressing the rendered
+history instead of asking a model to write a summary. Either provider may
+decline (return nil/empty) on any failure, which is non-fatal: the listener
+is isolated, the turn that triggered it already closed successfully, and
+the next overweight turn simply retries compaction.
 
 ## Titling
 

@@ -1,13 +1,16 @@
 # Terret
 
-Ruby-native, model-agnostic agent harness where everything is a plugin. Seven gems in one
+Ruby-native, model-agnostic agent harness where everything is a plugin. Eight gems in one
 repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible effects,
   dependency-driven boot. It knows nothing about LLMs and is reusable for any
   plugin-composed application.
 - `gems/terret-core` is the harness built on it. Session log, tools pipeline, agent loop,
-  LLM seam (vocabulary, `AdapterBase` retry policy, `FakeAdapter`).
+  LLM seam (vocabulary, `AdapterBase` retry policy, `FakeAdapter`), plus the M6
+  long-lived-agent services: durable approvals (`ctx[:approvals]`, opt-in per tool), the
+  compactor on the sole-provider `ctx[:summarizer]` seam, the titler, and hot-reloadable
+  per-agent policy (`AllowList` as a log projection).
 - `gems/terret-openrouter` is the one real adapter (plan §6.5): OpenRouter's
   OpenAI-compatible API behind `ctx.llm`, streaming SSE with tool calling and usage
   accounting. The transport is injectable, so its unit tests need no network and no
@@ -21,16 +24,21 @@ repo:
 - `gems/terret-mcp` is the MCP client (M5): manceps-backed stdio and streamable-HTTP
   servers mounted as `mcp__<server>__<tool>` sources behind `ctx[:tools]`, per-server
   approval, per-call timeouts, the allow list in terret-core; mapping in `docs/mcp.md`.
+- `gems/terret-morph` is a `ctx[:summarizer]` provider (M6): Morph's Compact API on the
+  wire proven in the deployed agora integration (bearer key, `compression_ratio: 0.4`,
+  nil-on-any-failure), an injectable transport so its unit tests need no network, and a
+  `MORPH_LIVE=1` live lane (pending a `MORPH_API_KEY` in this environment).
 - `gems/terret` is a placeholder holding the name. It will carry profiles and boot.
   None of that is written. Do not add real behaviour here without reading §5 and §9 of
   the plan first.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
-here covers M0–M5: kernel, session log with the invariant, tools pipeline, loop, the
-OpenRouter adapter, the socket, and the MCP client. `LLM::FakeAdapter` (canned script
-replay) remains the test/demo default; the OpenRouter path is proven by canned-wire tests
-plus a live smoke lane. Session payloads are primitives at the append boundary; typed
-parts encode through `LLM.encode_part`.
+here covers M0–M6: kernel, session log with the invariant, tools pipeline, loop, the
+OpenRouter adapter, the socket, the MCP client, and long-lived agent hardening (durable
+approvals, resumable turns, compaction, titling, cost accounting, hot-reloadable policy).
+`LLM::FakeAdapter` (canned script replay) remains the test/demo default; the OpenRouter
+path is proven by canned-wire tests plus a live smoke lane. Session payloads are
+primitives at the append boundary; typed parts encode through `LLM.encode_part`.
 
 Note the plan has drifted from the code in places. It specifies RSpec (this uses minitest),
 Ruby 3.4+ (this targets 4.0.6), and a separate `terret-llm` gem (the vocabulary lives in
@@ -45,6 +53,7 @@ ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
 bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture
+ruby examples/lifecycle_demo.rb   # park/resume, compaction, titling, cost, hot policy
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and `terret-core` have zero

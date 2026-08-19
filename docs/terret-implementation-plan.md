@@ -460,7 +460,7 @@ Each phase ends with demoable acceptance criteria. No estimates are given; seque
 
 **M5. MCP client. SHIPPED.** `terret-mcp`: a manceps-backed client mounting stdio and streamable-HTTP servers as namespaced `mcp__<server>__<tool>` tool sources behind `ctx[:tools]`, targeting the deployed legacy wire (protocol revisions 2025-11-25/2025-06-18); per-server approval metadata, a strict mode closed to ambient config, per-call timeouts that poison a connection and reconnect on next use, live `tools/list_changed` reconciliation, and resources registered as prompt sections. Two core preludes made policy real: `Context#effect` disposers became self-removing and idempotent (paying down an M4 debt item), and `Registry#execute` now dispatches its waterfalls on the calling agent's forked context, so `Terret::Tools::AllowList` — a deny-by-default `tools/pre_execute` veto with `File.fnmatch` globs — actually governs one agent alone when installed on its fork. *Accepted:* an agent whose entire tool roster arrived from a real stdio MCP server ran a turn over the M4 socket with the allow list admitting one call and denying another, proven live against a fixture subprocess. *Deferred:* approval resolution machinery (M6); the 2026-07-28 stateless MCP wire revision, not yet deployed anywhere.
 
-**M6. Long-lived agent hardening.** Everything a session that runs for weeks needs and a short run does not: context compaction, durable approvals resolved over the socket, wake-on-stimulus semantics through the inbox, titling, and cost accounting per session. *Accept:* an agent runs across many wakes and a deploy without losing derived context, and a parked approval resolves after a restart. Two notes from M3's review for the compactor: `derive_messages(upto:)` slices by event count, not seq boundary, before compaction applies; and the compactor must always set `upto_seq` to the immediately preceding seq, or the projection can interleave a summary among events that predate it.
+**M6. Long-lived agent hardening. SHIPPED.** Rescoped mid-execution (recorded in the plan, user-confirmed) once it became clear Terret's primary workload is autonomous agentic systems rather than interactive use: durable human-in-the-loop approvals (`ctx[:approvals]`) landed as designed — a `tools/execute`-stage gate that a per-agent `AllowList` veto always settles first, parking on durable `approval/requested`/`approval/resolved` so a verdict already in the log never re-parks after a restart — but shipped as an **opt-in row** rather than the milestone's center of gravity. That center became three things instead: a kernel-level reconfigure contract (`Hames::Service#reconfigure` / `Loader#reconfigure!`, wholesale config replace, a live `config/updated` event), adopted immediately for `Loop.max_agents` and the socket's tokens/heartbeat/queue_limit; hot-reloadable per-agent policy as a durable log projection (`AllowList` v2 — the active pattern set is the last `policy/updated` event in the session, install patterns only the floor, the socket's `set_policy` frame appending it, replay rebuilding it exactly after a restart); and a summarizer seam (`ctx[:summarizer]`, sole-provider like the session store) behind the compactor, with `RoleSummarizer` (no signup, one `:compactor`-role model call) as the core default and a new eighth gem, `terret-morph`, calling Morph's Compact API on the wire proven in the deployed agora integration (bearer key, `compression_ratio: 0.4`, `preserve_recent: 0`, nil-on-any-failure, an injectable transport keeping its unit tests off the network). `Loop#resume_turn` re-enters an open turn straight from the log — closing the crashed step by re-executing tool calls the last assistant message still owes, reading approval verdicts already recorded rather than re-asking — and the socket now auto-resumes on either a wake or a verdict landing for an agent with no parked fiber, with the wake-race requeuing a losing steer rather than dropping it. Titling (one durable `session/titled` per session, `:titler` role with a 40-char fallback) and `Sessions#usage` (a pure log rollup of every `step/end`'s usage) round out the observability the milestone needed. Three §14 debts got paid alongside all of it: `Context#emit` isolates listener failures instead of surfacing them into a producer whose append already committed; the append boundary refuses invalid UTF-8 instead of failing deep in a store; and the agent registry gained a real lifecycle (`AgentExists`, `AgentCapExceeded` at a cap of 128, `dispose_agent` for idle agents only, `agent_for_session`). Steers now log as `context/injected` rather than `user/message`, restoring a distinction the projection always supported but nothing emitted. *Accepted:* a turn wedged mid-tool-call survived `kill -9` and completed on the first wake in a fresh process, at-least-once for tool calls documented as the cost of that guarantee; a single in-process run proved four wakes, a compaction, a title, a cost rollup, and a live policy flip over the socket in one session. *Deferred:* the fuller §6.4 status machine (`waiting_input`/`stopping`/`done`) to M7/M8; spontaneous resume on boot (resume stays stimulus-driven by design); compaction retention tails; `terret-morph`'s `query:` param.
 
 **M7. Execution world.** fs, subprocess, shell, and terminals seams; std tools; sandbox `none` and `docker`; workspace scoping. *Accept:* one patch row moves bash, read, write, and PTY into a container with zero tool changes.
 
@@ -476,7 +476,7 @@ The socket adds concerns of its own. A connection's bearer token authorizes exac
 
 Multi-tenancy inside one process is the structural risk. Agents share a reactor and a service tree, so isolation rests on the forked context in §4.1 rather than on the OS. That is adequate for agents under common ownership and inadequate for mutually untrusted ones. Where untrusted execution is required, the boundary is a separate process with the sandbox in §6.6, not a fork.
 
-Prompt-injection stance: tool results are data. The loop never executes instructions from tool output except through the model, and the approval seam is the human backstop. Document this threat model explicitly in `docs/security.md`.
+Prompt-injection stance: tool results are data. The loop never executes instructions from tool output except through the model, and the approval seam is the human backstop. That backstop is optional per profile: autonomous profiles, Terret's primary workload, run deny-by-default hot-reloadable policy (M6) instead of a human in the loop. Document this threat model explicitly in `docs/security.md`.
 
 ## 14. Risks and Open Questions
 
@@ -503,12 +503,20 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   driven by MCP mounting and unmounting tools constantly. (2) `Hames::Context#emit`
   runs listeners inline and unrescued, so any listener error surfaces to the producer
   after a durable append has committed — decide whether fire-and-forget should isolate
-  listener failures (the socket rescues its own listener as a workaround). (3) the JSONL
-  and SQLite stores `JSON.generate` payloads that `normalize_payload` admits without an
-  encoding check, so an invalid-UTF-8 string in a tool result can fail an append at the
-  store instead of at the boundary — tighten `normalize_payload`. (4) `Loop`'s agent
-  registry is unbounded, never disposes a replaced agent's forked context, and allows
-  silent id replacement — needs a lifecycle story before M6's long-lived agents.
+  listener failures (the socket rescues its own listener as a workaround). *Paid down
+  during M6.* (3) the JSONL and SQLite stores `JSON.generate` payloads that
+  `normalize_payload` admits without an encoding check, so an invalid-UTF-8 string in a
+  tool result can fail an append at the store instead of at the boundary — tighten
+  `normalize_payload`. *Paid down during M6.* (4) `Loop`'s agent registry is unbounded,
+  never disposes a replaced agent's forked context, and allows silent id replacement —
+  needs a lifecycle story before M6's long-lived agents. *Paid down during M6.*
+- **Accepted deferrals from the M6 reviews.** `terret-morph`'s `summarize` catches a
+  broad `rescue StandardError` because transport failures share no common exception
+  ancestor to rescue more narrowly; it declines to nil and records `e.class` in its warn,
+  which is enough for now — revisit once an error-tracking seam exists. `Tools::AllowList`'s
+  `current_patterns` is an O(events) linear scan of the session log on every call; fine at
+  M6's scale, a caching candidate if a very long session ever makes it show up in a
+  profile.
 - **MCP wire and fiber-safety, from M5.** v1 targets the deployed legacy wire (protocol
   revisions 2025-11-25/2025-06-18); the 2026-07-28 stateless revision stays out of scope
   until something actually deploys it. manceps' fiber-safety under the async scheduler is
@@ -518,7 +526,7 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
 
 ## 15. What "Cutting Edge" Means Here, Concretely
 
-Agents that live for weeks on one session log, steerable mid-turn over a live connection, surviving disconnects and deploys without losing derived context. Interleaved thinking blocks preserved as first-class message parts and replayed. Provider prompt caching made reliable by byte-stable prompt assembly. Mid-conversation model switching on one session log. Structured cancellation. Parked approvals that survive restarts. MCP interop. A replaceable agent loop.
+Agents that live for weeks on one session log, steerable mid-turn over a live connection, surviving disconnects and deploys without losing derived context. Interleaved thinking blocks preserved as first-class message parts and replayed. Provider prompt caching made reliable by byte-stable prompt assembly. Mid-conversation model switching on one session log. Structured cancellation. Hot-reloadable per-agent policy that survives restarts by replay, with durable approvals available opt-in. MCP interop. A replaceable agent loop.
 
 Each of these follows from two disciplines: everything is a plugin, and model-visible means logged. Keep those two and the rest stays honest. Note that the first two on this list are the ones most exposed to §14's passthrough risk, so they are claims to verify rather than assume.
 

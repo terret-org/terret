@@ -7,7 +7,7 @@ guide any horse. **Hames** is the kernel underneath (the load-bearing pieces
 of the harness): services in a context, typed events with four dispatch
 modes, reversible effects, dependency-driven boot.
 
-Seven gems in one repo:
+Eight gems in one repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible
   effects, dependency-driven boot. It knows nothing about LLMs and is
@@ -32,22 +32,30 @@ Seven gems in one repo:
   streamable-HTTP servers mounted as `mcp__<server>__<tool>` sources behind
   `ctx[:tools]`, per-server approval, per-call timeouts, the allow list in
   `terret-core`; mapping in `docs/mcp.md`.
+- `gems/terret-morph` is a `ctx[:summarizer]` provider: Morph's Compact API
+  on the wire proven in the deployed agora integration, extractive-
+  compressing a session's history instead of asking a model to write a
+  summary. Every failure declines to nil rather than raising, and an
+  injectable transport keeps its unit tests off the network.
 - `gems/terret` is a placeholder holding the name. It will carry profiles
   and boot. None of that is written yet.
 
 ## Status
 
-Milestones M0 through M5 are shipped: the Hames kernel, the session log
+Milestones M0 through M6 are shipped: the Hames kernel, the session log
 with the "model-visible means logged" invariant, the tools pipeline, the
 agent loop, the OpenRouter adapter, durable SQLite sessions, the WebSocket
-interface, and the MCP client. `LLM::FakeAdapter` (canned script replay)
+interface, the MCP client, and long-lived agent hardening — durable
+approvals, resumable turns that survive a `kill -9`, context compaction
+behind a summarizer seam, session titling, per-session cost accounting, and
+hot-reloadable per-agent policy. `LLM::FakeAdapter` (canned script replay)
 remains the test/demo default; the OpenRouter path is proven by canned-wire
 tests plus a live smoke lane. Session payloads are primitives at the append
 boundary; typed parts encode through `LLM.encode_part`.
 
-The full roadmap, including what is not yet built (M6 long-lived agent
-hardening, M7 execution world, M8 subagents and 0.1 release), is
-`docs/terret-implementation-plan.md`; see its §12 for milestone detail. Note
+The full roadmap, including what is not yet built (M7 execution world, M8
+subagents and 0.1 release), is `docs/terret-implementation-plan.md`; see
+its §12 for milestone detail. Note
 the plan has drifted from the code in places: it specifies RSpec (this uses
 minitest), Ruby 3.4+ (this targets 4.0.6), and a separate `terret-llm` gem
 (the vocabulary lives in `terret-core`). Treat the code as current and the
@@ -62,6 +70,7 @@ ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
 bundle exec ruby examples/mcp_demo.rb   # MCP tools from a local stdio fixture
+ruby examples/lifecycle_demo.rb   # park/resume, compaction, titling, cost, hot policy
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and
