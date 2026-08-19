@@ -44,6 +44,7 @@ module Terret
     e.("tools/pre_execute",  :waterfall, doc: "validate, veto, or rewrite a call")
     e.("tools/execute",      :waterfall, doc: "a provider may replace execution")
     e.("tools/post_execute", :waterfall, doc: "truncate/redact the result")
+    e.("fs/authorize",       :waterfall, doc: "veto or admit an fs operation")
     e.("agent/turn_stopping", :serial,   doc: "ordered veto point before turn/end")
   end
 end

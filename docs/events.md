@@ -14,6 +14,7 @@ event's public contract; the bus enforces it at runtime.
 | `assistant/message` | emit | yes | completed assistant message |
 | `config/updated` | emit |  | a row's config was hot-swapped (id, config) |
 | `context/injected` | emit | yes | agent.inject landed in a request |
+| `fs/authorize` | waterfall |  | veto or admit an fs operation |
 | `llm/stream` | waterfall |  | wrap/replace the adapter stream |
 | `policy/updated` | emit | yes | agent allow-list replaced (metadata; projection-invisible) |
 | `session/compacted` | emit | yes | history up to upto_seq replaced by summary (still model-visible) |
