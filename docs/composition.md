@@ -46,8 +46,15 @@ because Bundler put them on the load path. A bundle declares itself in its
 gemspec:
 
 ```ruby
-s.metadata = { "terret" => { "bundle" => "config/bundle.yml" } }
+s.metadata = { "terret" => "config/bundle.yml" }
 ```
+
+The value is the path on its own because **RubyGems validates every
+metadata value as a String** — a gemspec carrying a nested hash there does
+not build at all (`metadata['terret'] value must be a String`). Discovery
+still accepts the richer forms on read, both a real Hash and a YAML
+mapping inside the string, so a gem that grows a second key later does not
+break; but the path alone is what a bundle should ship.
 
 That single line is the whole registration mechanism, and choosing gemspec
 metadata over a registry file or a plugin directory is deliberate: `gem
@@ -58,6 +65,32 @@ third-party gem becomes discoverable by shipping normally — nothing to
 register, nothing to symlink, no directory to drop a file into. It is the
 port of dsh's `package.json` `dsh` field (plan §5), and it is the mechanism
 `docs/cookbook/adding-a-bundle.md` walks end to end.
+
+Discovery quarantines what it finds. A gem whose `bundle.yml` does not
+parse, or whose metadata points outside its own gem directory, becomes a
+broken entry that only a profile *naming* it ever sees — one bad gem in
+the Gemfile must not take out every profile on the machine.
+
+The bundle file itself is that ordered list of rows, optionally wrapped in
+a mapping that also carries a name and its requires:
+
+```yaml
+name: terret-base                 # what dump-config calls this layer
+requires:                         # loaded before any row's constant resolves
+  - terret/store/sqlite
+  - terret/exec
+rows:
+  - id: session_store
+    plugin: Terret::Store::SQLite
+```
+
+`requires:` is the working half of "it has to make that code available".
+Depending on the gem is what puts it on the load path; **a load path is
+not a `require`**, and `Object.const_get("Terret::Store::SQLite")` fails
+on a gem nobody has loaded. So a bundle lists the files its rows' classes
+live in, and boot requires them before resolving a single constant. A
+profile's `plugins:` (§3) does the same job for code that is not a bundle
+at all.
 
 A profile names bundles by **gem name**. A name that discovery did not
 find fails closed, listing what *was* discovered — the failure mode here
@@ -222,14 +255,26 @@ every profile, and its rows are the answer to "what is a Terret":
 |---|---|---|
 | `session_store` | `Terret::Store::SQLite` | durable log, WAL |
 | `sessions`, `prompt`, `tools`, `loop` | terret-core | the harness itself |
-| `llm` | `Terret::OpenRouter::Adapter` | model roles, `!env`-keyed |
+| `llm` | `Terret::LLM::Service` | the role map — `main:` and whatever else a profile points somewhere |
+| `openrouter` | `Terret::OpenRouter::Plugin` | registers the adapter under the provider name `openrouter`, `!env`-keyed |
 | `fs` | `Terret::Exec::FS` | **`workspace:` — an empty or unconfigured list denies every fs op** |
-| subprocess / shell / terminals | terret-exec | the rest of the execution world |
+| subprocess / shell / terminals / jobs | terret-exec | the rest of the execution world |
 | `sandbox` | `Terret::Sandbox::Docker` | **`network: none`** |
 | std tools | terret-tools-std | the CC-named roster |
+| `subagents`, `std_task` | terret-core, terret-tools-std | `Task` delegation and the agents it spawns |
 | `redactor` | terret-core | `tools/post_execute` + the append scrubber |
-| `allow_list` | terret-core | the deny-by-default floor |
+| `allow_list` | `Terret::Tools::AllowListFloor` | the deny-by-default floor: a thin service over the `AllowList` module, so the floor is a row like everything else |
 | `approvals` | terret-core | `disabled: true` — opt-in per M6 |
+
+The model seam is **two rows, not one**, and the split is not incidental.
+`Terret::LLM::Service` is the seam — it holds the role map and it is what
+`ctx.llm` resolves to. An adapter is not a service and mounts nothing;
+`Terret::OpenRouter::Plugin` injects `:llm` and registers an
+`OpenRouter::Adapter` into it under the provider name `openrouter`, which
+is the `openrouter/` half of a role like `main: openrouter/anthropic/claude-sonnet-4.5`.
+Swapping providers is therefore a second row, not a rewrite of the first —
+and taking a profile offline is `disabled: true` on the adapter row plus a
+role pointing somewhere else.
 
 The sandbox row is the one to read twice. **The default is `docker` with
 `network: none`** (plan §13, docs/security.md), so the trusted world is
@@ -400,6 +445,23 @@ because a patch replaces a config wholesale, there is no per-key blame to
 assign — exactly one layer is responsible for what a service receives.
 Wholesale replacement bought a debuggable tree, which is most of why it is
 worth its ergonomic cost.
+
+A **swapped `plugin:` is attributed on its own line**, because a patch may
+change what a row mounts without touching its config and those are two
+different decisions by two possibly different layers:
+
+```yaml
+  - id: sandbox                  # row: terret-base
+    plugin: Terret::Exec::SandboxNone
+                                 # plugin: profiles/headless/patch.yml
+    config: {}                   # config: profiles/headless/patch.yml
+```
+
+The annotation appears only where a layer actually swapped something, so
+its presence means "somebody changed this" rather than being noise on
+every row. That line is the one piece of provenance nobody can afford to
+have wrong: it is how a reader sees that the sandbox got turned off, and
+which file did it.
 
 **Secrets render as their unresolved tag.** `api_key: !env
 OPENROUTER_API_KEY` prints as written; the resolved value never appears in

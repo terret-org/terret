@@ -29,10 +29,21 @@ settings:
   workspace: []
 
   store:
-    # The append-only session log. Everything the agent says and does lands
-    # here, so put it somewhere durable and somewhere you can back up — a
-    # relative path resolves against whatever directory trt was run from,
-    # which is rarely what you meant.
+    # ------------------------------------------------------------------
+    # CHANGE THIS TO A DIRECTORY YOU OWN.
+    #
+    # The append-only session log. Everything the agent reads, says and
+    # does lands here in the clear — prompts, tool output, file contents.
+    # The default below is a placeholder that works on a laptop and is a
+    # poor choice anywhere else: /var/tmp is world-shared, and this exact
+    # path is predictable, so on a multi-user box another account can read
+    # your agent's whole history (and, if it gets there first, choose what
+    # your agent reads back). Point it inside your home or your Terret
+    # home, on a filesystem you can back up.
+    #
+    # Absolute paths only. A relative one resolves against whatever
+    # directory trt happened to be run from, which is rarely what you meant.
+    # ------------------------------------------------------------------
     path: /var/tmp/terret/sessions.db
 
   model:
