@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# The one caller that turns CLI.start's status into an exit. Everything else
+# drives Terret::CLI.start(argv, out:, err:) in-process.
+begin
+  require "terret/boot"
+rescue LoadError
+  require_relative "../lib/terret/boot" # monorepo path source
+end
+
+exit Terret::CLI.start(ARGV)

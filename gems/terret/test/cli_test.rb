@@ -1,0 +1,170 @@
+# frozen_string_literal: true
+
+require "minitest/autorun"
+require "stringio"
+require "tmpdir"
+require "fileutils"
+require_relative "../lib/terret/boot"
+
+# trt, driven in-process with captured IO. start returns an exit status rather
+# than calling exit, which is what makes that possible; exactly one test below
+# spawns the real executable, to prove the wiring exists.
+class CLITest < Minitest::Test
+  def setup
+    @home_dir = Dir.mktmpdir("terret-home")
+    @prev_home = ENV["TERRET_HOME"]
+    ENV["TERRET_HOME"] = @home_dir
+  end
+
+  def teardown
+    ENV["TERRET_HOME"] = @prev_home
+    FileUtils.remove_entry(@home_dir) if File.directory?(@home_dir)
+  end
+
+  def run_cli(*argv)
+    out = StringIO.new
+    err = StringIO.new
+    status = Terret::CLI.start(argv, out: out, err: err)
+    [status, out.string, err.string]
+  end
+
+  def write(path, body)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, body)
+    path
+  end
+
+  def profile(name, body) = write(File.join(@home_dir, "profiles", name, "profile.yml"), body)
+  def profile_patch(name, body) = write(File.join(@home_dir, "profiles", name, "patch.yml"), body)
+
+  def demo_profile
+    profile("demo", <<~YAML)
+      bundles: [terret]
+      settings:
+        workspace: []
+        store: { path: /tmp/demo.db }
+        model: { main: openrouter/some/model }
+        sandbox: { image: demo:latest }
+    YAML
+    "demo"
+  end
+
+  # -- version and usage -----------------------------------------------------
+
+  def test_version_comes_from_the_gems_one_version_constant
+    status, out, = run_cli("--version")
+    assert_equal 0, status
+    assert_equal "trt #{Terret::Meta::VERSION}", out.strip
+  end
+
+  def test_help_prints_the_usage_and_succeeds
+    status, out, = run_cli("--help")
+    assert_equal 0, status
+    assert_includes out, "trt <command>"
+    Terret::CLI::COMMANDS.each { |c| assert_includes out, c }
+  end
+
+  def test_no_command_is_a_usage_error_not_a_crash
+    status, _out, err = run_cli
+    assert_equal 2, status
+    assert_includes err, "no command"
+  end
+
+  def test_an_unknown_command_names_itself
+    status, _out, err = run_cli("frobnicate", "--profile", "demo")
+    assert_equal 2, status
+    assert_includes err, "frobnicate"
+  end
+
+  def test_a_command_without_a_profile_says_so
+    status, _out, err = run_cli("dump-config")
+    assert_equal 2, status
+    assert_includes err, "--profile"
+  end
+
+  def test_an_unknown_flag_is_a_usage_error
+    status, _out, err = run_cli("dump-config", "--profile", "demo", "--nope")
+    assert_equal 2, status
+    assert_includes err, "nope"
+  end
+
+  # -- dump-config -----------------------------------------------------------
+
+  def test_dump_config_annotates_every_row_with_the_layer_that_contributed_it
+    profile_patch(demo_profile, "rows:\n  - id: sandbox\n    config: { image: patched, network: none }\n")
+    status, out, = run_cli("dump-config", "--profile", "demo")
+
+    assert_equal 0, status
+    assert_includes out, %(# resolved: profile "demo")
+    assert_match(/- id: session_store\s+# row: terret-base/, out)
+    assert_match(/config:\s+# config: terret-base/, out)
+    assert_match(/config:\s+# config: profiles\/demo\/patch\.yml/, out)
+  end
+
+  # The one that matters: this output exists to be pasted into an issue.
+  def test_dump_config_never_prints_a_resolved_credential
+    demo_profile
+    ENV["OPENROUTER_API_KEY"] = "sk-live-must-never-be-printed"
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+
+    assert_includes out, "api_key: !env OPENROUTER_API_KEY"
+    refute_includes out, "sk-live-must-never-be-printed"
+  ensure
+    ENV.delete("OPENROUTER_API_KEY")
+  end
+
+  def test_dump_config_leaves_setting_references_unresolved_too
+    demo_profile
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    assert_includes out, "path: !setting store.path"
+    refute_includes out, "/tmp/demo.db"
+  end
+
+  def test_dump_config_shows_a_disabled_row_rather_than_hiding_it
+    _status, out, = run_cli("dump-config", "--profile", demo_profile)
+    assert_match(/- id: approvals.*\n.*plugin: Terret::Tools::Approvals\n\s+disabled: true/, out)
+  end
+
+  def test_dump_config_output_reparses_as_yaml_once_the_tags_are_declared
+    _status, out, = run_cli("dump-config", "--profile", demo_profile)
+    reparsed = Terret::Composition::Visitor.load(out, label: "dump")
+    assert_equal Terret::Composition.resolve(profile: "demo").rows.map(&:id),
+                 reparsed[:rows].map { |r| r[:id].to_s }
+  end
+
+  # -- doctor ----------------------------------------------------------------
+
+  def test_doctor_prints_the_rows_and_is_honest_about_what_it_did_not_check
+    status, out, = run_cli("doctor", "--profile", demo_profile)
+    assert_equal 0, status
+    assert_includes out, "session_store  Terret::Store::SQLite"
+    assert_includes out, "approvals"
+    assert_includes out, Terret::Doctor::PENDING
+  end
+
+  # -- failure ---------------------------------------------------------------
+
+  def test_a_composition_failure_exits_one_with_the_reason_on_stderr
+    profile("broken", "bundles: [nosuchbundle]\n")
+    status, out, err = run_cli("dump-config", "--profile", "broken")
+    assert_equal 1, status
+    assert_empty out
+    assert_includes err, "nosuchbundle"
+  end
+
+  def test_a_missing_profile_exits_one_rather_than_raising
+    status, _out, err = run_cli("doctor", "--profile", "ghost")
+    assert_equal 1, status
+    assert_includes err, "ghost"
+  end
+
+  # -- the executable --------------------------------------------------------
+
+  def test_the_shipped_executable_runs
+    exe = File.expand_path("../exe/trt", __dir__)
+    assert File.executable?(exe), "#{exe} must be executable"
+    out = IO.popen([RbConfig.ruby, exe, "--version"], err: %i[child out], &:read)
+    assert_equal 0, $?.exitstatus, out
+    assert_equal "trt #{Terret::Meta::VERSION}", out.strip
+  end
+end
