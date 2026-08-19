@@ -10,6 +10,7 @@ gem "terret-ws", path: "gems/terret-ws"
 gem "terret-mcp", path: "gems/terret-mcp"
 gem "terret-morph", path: "gems/terret-morph"
 gem "terret-exec", path: "gems/terret-exec"
+gem "terret-tools-std", path: "gems/terret-tools-std"
 gem "terret", path: "gems/terret"
 
 group :development, :test do
