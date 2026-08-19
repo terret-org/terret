@@ -456,27 +456,42 @@ module Terret
     # gem — without a reactor the run still completes as a group, one call at
     # a time, exactly the contract Hames' own :parallel dispatch keeps.
     #
-    # Every child is waited on even after one of them raises. A tool error is
-    # already an ordinary Result rather than an exception, so what reaches
-    # here is a listener that blew up; abandoning its siblings mid-flight
-    # would leave fibers writing into a batch nobody is going to append.
+    # Nothing a call does escapes its own fiber. Registry#execute already
+    # renders a handler's crash as an error Result; a listener that raises
+    # AROUND it escapes that rendering, and letting it out here would abandon
+    # the whole run — siblings that had already done their work would lose
+    # their results, and the projection would be left owing calls it can never
+    # be given results for, because the turn closes and `resumable?` goes
+    # false. So the same shape is applied one level out: one call's failure is
+    # one call's error result, and every other result still appends.
     def execute_together(ctx, sid, run)
       task = defined?(Async::Task) ? Async::Task.current? : nil
       return run.map { |tc| execute_call(ctx, sid, tc) } unless task
 
       results = Array.new(run.length)
       children = run.each_with_index.map do |tc, i|
-        task.async { results[i] = execute_call(ctx, sid, tc) }
+        task.async { results[i] = guarded_call(ctx, sid, tc) }
       end
-      failure = nil
+      # Every sibling is awaited whatever the first wait does, so the batch's
+      # bookkeeping finishes even while the task tree is being torn down —
+      # Async::Stop is not a StandardError, and a half-awaited run would leave
+      # fibers writing into an array nobody is watching. The first exception
+      # is re-raised once there is nothing left in flight.
+      stopped = nil
       children.each do |child|
         child.wait
-      rescue StandardError => e
-        failure ||= e
+      rescue Exception => e # rubocop:disable Lint/RescueException
+        stopped ||= e
       end
-      raise failure if failure
+      raise stopped if stopped
 
       results
+    end
+
+    def guarded_call(ctx, sid, tc)
+      execute_call(ctx, sid, tc)
+    rescue StandardError => e
+      Tools::Result.new(id: tc.id, content: nil, error: "#{e.class}: #{e.message}")
     end
 
     def log_call(sessions, sid, tc)

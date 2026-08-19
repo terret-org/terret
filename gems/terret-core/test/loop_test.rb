@@ -1145,7 +1145,7 @@ end
 class ToolBarrierTest < Minitest::Test
   include TerretTestHarness
 
-  SLEEP = 0.2
+  SLEEP = 0.1
 
   def batch_script(*names)
     calls = names.each_with_index.map do |n, i|
@@ -1177,6 +1177,10 @@ class ToolBarrierTest < Minitest::Test
     Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
   end
 
+  # The meter is the proof, not the clock. An upper bound on wall time is the
+  # one assertion here a loaded CI runner can fail while the code is correct,
+  # so overlap is asserted by what was in flight at once and nothing is
+  # claimed about how long it took.
   def test_parallel_calls_in_one_message_run_concurrently
     skip "async is not installed" unless ASYNC_AVAILABLE
 
@@ -1185,11 +1189,9 @@ class ToolBarrierTest < Minitest::Test
     register_slow(ctx, %w[slow_a slow_b], concurrency: :parallel, meter: meter)
     agent, = spawn(ctx)
 
-    elapsed = timed_turn(ctx, agent)
+    timed_turn(ctx, agent)
 
     assert_equal 2, meter[:peak], "both parallel calls must be in flight at once"
-    assert_operator elapsed, :<, SLEEP * 1.75,
-                    "two #{SLEEP}s calls took #{elapsed.round(3)}s; that is not concurrent"
   end
 
   def test_serial_calls_never_overlap
@@ -1203,7 +1205,10 @@ class ToolBarrierTest < Minitest::Test
     elapsed = timed_turn(ctx, agent)
 
     assert_equal 1, meter[:peak], "a serial call is a barrier of one"
-    assert_operator elapsed, :>=, SLEEP * 1.75,
+    # Safe in the direction it is asserted: a sleep only ever overshoots, so
+    # two sequential ones cannot come in under their sum however slow the
+    # machine is. Only overlap could.
+    assert_operator elapsed, :>=, SLEEP * 2,
                     "two #{SLEEP}s serial calls took #{elapsed.round(3)}s; they overlapped"
   end
 
@@ -1257,6 +1262,54 @@ class ToolBarrierTest < Minitest::Test
 
     batch = session.events.map(&:type).select { |t| %w[tool/call tool/result].include?(t) }
     assert_equal %w[tool/call tool/call tool/result tool/result], batch
+  end
+
+  # A tool's own crash has always been an ordinary error Result. A listener
+  # that raises AROUND the handler escaped that rendering, and under the
+  # barrier it used to take the whole run with it: siblings that had already
+  # done their work lost their results, the turn closed `failed`, and the
+  # projection was left owing three calls it could never be given results for
+  # (`resumable?` is false once the turn has closed, so nothing can repair
+  # it). One call's failure is one call's error result.
+  def test_a_raising_listener_fails_one_call_without_abandoning_its_siblings
+    skip "async is not installed" unless ASYNC_AVAILABLE
+
+    ctx, = boot(script: batch_script("p_a", "p_b", "p_c"))
+    ran = []
+    ctx.with_owner("trio") do
+      %w[p_a p_b p_c].each do |name|
+        ctx[:tools].register(name: name, description: "p", params: {},
+                             concurrency: :parallel) do
+          ran << name
+          "#{name} did real work"
+        end
+      end
+    end
+    ctx.on("tools/execute") do |call, next_|
+      raise "listener bug" if call.name == "p_b"
+
+      next_.(call)
+    end
+    agent, session = spawn(ctx)
+
+    assert_equal :completed, Async { ctx[:loop].run_turn(agent, "go") }.wait
+
+    assert_equal %w[p_a p_c], ran.sort, "a sibling's work must not be thrown away"
+    results = session.events.select { |e| e.type == "tool/result" }
+    assert_equal %w[tc1 tc2 tc3], results.map { |e| e.payload[:id] }
+    assert_equal "p_a did real work", results[0].payload[:content]
+    assert_nil results[1].payload[:content]
+    assert_equal "RuntimeError: listener bug", results[1].payload[:error]
+    assert_equal "p_c did real work", results[2].payload[:content]
+    assert_equal "completed", session.events.last.payload[:status]
+
+    # The invariant the log exists to hold: every call the projection shows
+    # the model has a result under it.
+    history = ctx[:sessions].derive_messages(session.id)
+    owed = history.select { |m| m.role == :assistant }
+                  .flat_map { |m| m.parts.grep(Terret::LLM::ToolCall) }.map(&:id)
+    answered = history.select { |m| m.role == :tool }.flat_map(&:parts).map(&:id)
+    assert_empty owed - answered, "the projection must never owe a call a result"
   end
 
   # A barrier is not interruptible from outside once it starts, so a cancel
