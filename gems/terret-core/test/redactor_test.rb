@@ -279,19 +279,41 @@ class RedactorTest < Minitest::Test
     assert_equal SPLIT_TEXT.chars.each_slice(8).map(&:join), chunks_of(session)
   end
 
-  # Text longer than the carry window still streams: the window is what is
-  # held back, not what is buffered forever.
-  def test_a_long_stream_flushes_prefixes_while_holding_only_the_window
-    long = ("filler " * 60) + "and sk-abc123def ends it"
-    ctx, = boot(script: [{ text: long }], loop_config: { scrub_carry: 32 })
+  # The window was the whole bug. `append` was only ever handed the flushed
+  # PREFIX — the held bytes were scrubbed later, in a different append — so no
+  # scrubber ever saw text spanning the cut, and in steady state every emitted
+  # chunk was byte-identical to one provider delta. Only a secret inside the
+  # final window survived, which is all any earlier test happened to check.
+  LONG_PREFIX = "lorem ipsum dolor sit amet " * 12
+  LONG_SUFFIX = " and then some trailing words" * 12
+
+  def test_a_secret_mid_stream_never_lands_in_a_chunk_however_long_the_stream
+    text = "#{LONG_PREFIX}#{SECRET}#{LONG_SUFFIX}"
+    assert_operator text.length, :>, 500, "the stream has to dwarf any window"
+    ctx, = boot(script: [{ text: text }])
     session = ctx[:sessions].create
     agent = ctx[:loop].spawn_agent(session_id: session.id)
     ctx[:loop].run_turn(agent, "go")
 
+    # No FRAGMENT either: the filler carries none of these, so any hit is the
+    # secret arriving through a delta boundary.
     stored = chunks_of(session)
-    assert_operator stored.length, :>, 1, "a long stream must flush before it ends"
-    refute(stored.any? { |c| c.include?("bc123def") }, stored.inspect)
+    refute(stored.any? { |c| c.match?(/sk-|abc|123|def/) },
+           "a chunk carried part of the secret: #{stored.grep(/sk-|abc|123|def/).inspect}")
+    assert_equal "#{LONG_PREFIX}[REDACTED]#{LONG_SUFFIX}", assistant_text(session)
     assert_equal assistant_text(session), stored.join
+  end
+
+  # The anatomy the guarantee rests on: one chunk per text run while anything
+  # is scrubbing (the scrubber always sees a complete run), and untouched
+  # delta-for-delta streaming when nothing is.
+  def test_scrubbing_coalesces_each_text_run_into_a_single_chunk
+    ctx, = boot(script: [{ text: SPLIT_TEXT }])
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    ctx[:loop].run_turn(agent, "go")
+
+    assert_equal ["your key is [REDACTED] and it works"], chunks_of(session)
   end
 
   # Re-chunking is only safe because chunks are replay/UI fidelity and never

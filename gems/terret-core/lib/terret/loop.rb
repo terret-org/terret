@@ -260,28 +260,38 @@ module Terret
         # A provider's deltas break at token boundaries, so a credential can
         # straddle two of them: "...is sk-a" + "bc123def" defeats a pattern
         # that matches the whole secret perfectly, and the tail lands in the
-        # log verbatim. The carry holds the last `hold` bytes back until more
-        # text arrives, so a scrubber sees the shape whole (§13, docs/exec.md
-        # §6). Chunks are replay/UI fidelity and are NOT projected by
-        # derive_messages, so re-chunking cannot move the digest — only their
-        # concatenation is contractual, and that is unchanged.
-        carry = +""
-        hold  = sessions.scrubbing? ? scrub_carry : 0
+        # log verbatim. A scrubber can only be trusted with text it sees
+        # WHOLE, so while anything is scrubbing the entire run is held and
+        # appended as ONE chunk at the run's end. That trades live token
+        # streaming in the chunk log for the §13 guarantee, and the trade is
+        # only affordable because chunks are replay/UI fidelity: they are not
+        # projected by derive_messages, so nothing here can move the digest,
+        # and only their concatenation is contractual (docs/exec.md §6).
+        #
+        # Captured once rather than per delta, so one run is governed by one
+        # policy even if a scrubber is registered while it streams.
+        scrubbing = sessions.scrubbing?
+        run = +""
         message = ctx[:llm].stream(ctx, role: :main, request: request) do |ev|
           case ev
           when LLM::TextDelta
-            carry << ev.text
-            flush_chunks(sessions, sid, carry, hold: hold)
+            if scrubbing
+              run << ev.text
+            else
+              sessions.append(sid, "assistant/chunk", { text: ev.text })
+            end
           when LLM::ToolCallEnd, LLM::MessageStop
-            flush_chunks(sessions, sid, carry, hold: 0) # the text stream ended here
+            flush_run(sessions, sid, run) # this run of text ended here
           when LLM::Usage
             usage = ev
           end
         end
         # Belt and braces for an adapter that ends without a MessageStop. A
-        # stream that RAISES loses the held-back tail, which is honest: its
-        # assistant/message never lands either, and resume re-requests the step.
-        flush_chunks(sessions, sid, carry, hold: 0)
+        # stream that RAISES loses the whole held run: run_turn closes the
+        # failed turn (close_on_failure), so the next turn starts fresh with
+        # no assistant/message for this step either — the chunk log and the
+        # authoritative log agree about a step that never completed.
+        flush_run(sessions, sid, run)
         sessions.append(sid, "assistant/message",
                         { parts: message.parts.map { |p| LLM.encode_part(p) } })
         step_end = usage ? { n: steps, usage: usage.to_h } : { n: steps }
@@ -337,35 +347,17 @@ module Terret
       end
     end
 
-    # How much streamed text is held back so a scrubber can see a secret that
-    # spans two deltas. Read per turn, so a hot-swapped row governs the next
-    # one; a secret longer than this window can still straddle the boundary,
-    # which is the honest limit of the mechanism (docs/exec.md §6).
-    DEFAULT_SCRUB_CARRY = 256
+    # Append a held run of text as one chunk. No cuts anywhere: a partial run
+    # is exactly what a scrubber cannot be shown, and a whole one never splits
+    # a multibyte character either.
+    def flush_run(sessions, sid, buffer)
+      return if buffer.empty?
 
-    def scrub_carry = config[:scrub_carry] || DEFAULT_SCRUB_CARRY
-
-    # Append everything but the last `hold` bytes of the buffer as one chunk,
-    # consuming exactly what it appended. The cut lands on a character
-    # boundary: slicing by bytes can split a multibyte character in half, and
-    # those halves are bytes no provider sent — the append boundary refuses
-    # them, a layer away from the code that made them.
-    def flush_chunks(sessions, sid, buffer, hold:)
-      cut = buffer.bytesize - hold
-      return if cut <= 0
-
-      prefix = whole_characters(buffer.byteslice(0, cut))
-      return if prefix.empty?
-
-      # Consumed first: the buffer is the record of what has NOT been logged,
-      # and it must not still claim text that an append is already carrying.
-      buffer.slice!(0, prefix.length)
-      sessions.append(sid, "assistant/chunk", { text: prefix })
-    end
-
-    def whole_characters(text)
-      text = text.byteslice(0, text.bytesize - 1) until text.valid_encoding?
-      text
+      # Emptied first: the buffer records what has NOT been logged, and it
+      # must not still claim text an append is already carrying.
+      text = buffer.dup
+      buffer.clear
+      sessions.append(sid, "assistant/chunk", { text: text })
     end
 
     def execute_and_record(ctx, sessions, sid, tc)

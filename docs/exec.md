@@ -232,11 +232,21 @@ an append-only log. That exemption is positional rather than by name: it
 holds at the top of a payload and inside an `assistant/message`'s encoded
 parts, and stops the moment anything content-bearing is entered, so the
 `args[:content]` a `Write` call carries is scrubbed like any other text.
-And streamed text is held back in a small carry window (`scrub_carry` on
-the loop row, 256 bytes) before it becomes `assistant/chunk` events,
-because a provider's deltas break at token boundaries and a secret split
-across two of them defeats a pattern that matches it perfectly; a secret
-longer than that window can still straddle the boundary.
+Streamed text is the other adjustment, and it costs something worth
+naming. A provider's deltas break at token boundaries, so a secret split
+across two of them defeats a pattern that matches it perfectly — and a
+scrubber can only be trusted with text it sees whole. So whenever any
+scrubber is registered, the loop holds an entire run of assistant text and
+appends it as ONE `assistant/chunk` event when the run ends (a tool call,
+the message stop, or the end of the stream). Mount a redactor and the
+chunk log stops carrying live token-by-token progress for that agent;
+that is the trade, and it is affordable only because chunks are
+replay/UI fidelity — `derive_messages` never projects them, so the digest
+is untouched, and only their concatenation is contractual. With no
+scrubber registered nothing changes: chunks stay delta-for-delta what the
+provider sent. A stream that raises mid-run loses that run's chunks
+entirely; `run_turn` closes the failed turn, so no `assistant/message`
+lands for that step either and the two logs agree.
 
 Four more limits worth stating plainly. Enabling a redactor does not
 redact history already in the log — the log is append-only, so the
