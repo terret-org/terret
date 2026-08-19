@@ -67,13 +67,15 @@ module Terret
           },
           required: %w[description prompt]
         }
-        # `description` is a label for a log or a UI line and the child never
-        # sees it, so it is accepted and not used here. It is still required in
-        # the schema: a delegation nobody can name is one nobody can follow.
-        # Defaulted anyway, because an omitted keyword would cost a whole turn
-        # to an ArgumentError rather than a readable result.
+        # Both are required in the schema and both are defaulted here. A
+        # delegation nobody can name is one nobody can follow, and a model
+        # writing one without a prompt has made a mistake — but an omitted
+        # keyword would cost a whole turn to an ArgumentError, where a
+        # defaulted one costs a result the model can read and correct.
+        # `description` is a label for a log or a UI line; the child never
+        # sees it, so nothing here uses it.
         tool("Task", DESCRIPTION, params, mutating: false, approval: :never,
-             concurrency: :parallel) do |prompt:, session_id:, description: nil|
+             concurrency: :parallel) do |session_id:, description: nil, prompt: nil|
           render(delegate(prompt, session_id))
         end
       end
@@ -85,6 +87,11 @@ module Terret
       # the registry and merged last, so a model that writes one into its
       # arguments is naming somebody else's context and simply loses.
       def delegate(prompt, session_id)
+        if prompt.nil? || (prompt.is_a?(String) && prompt.strip.empty?)
+          raise Terret::Tools::Failure,
+                "Task needs a prompt: it is everything the subagent will see. " \
+                "Nothing was delegated."
+        end
         unless prompt.is_a?(String)
           raise Terret::Tools::Failure,
                 "prompt must be a string; got #{prompt.class}. Nothing was delegated."
@@ -101,10 +108,18 @@ module Terret
 
       # The ledger is not cosmetic and it is never omitted: nothing in the
       # parent's log links it to the child's session except this line.
+      #
+      # A turn that did not complete is reported too. "Had nothing to say" and
+      # "was stopped part-way" are different facts about a delegation, and a
+      # model shown only the child's last sentence would summarize the second
+      # as if it were an answer.
       def render(result)
         text = result.text.to_s
-        body = text.empty? ? "(no reply)" : text
-        "#{body}\n#{LEDGER}\nchild session #{result.session_id}"
+        remarks = ["child session #{result.session_id}"]
+        unless result.status == :completed
+          remarks << "the subagent's turn ended #{result.status} rather than completing"
+        end
+        "#{text.empty? ? '(no reply)' : text}\n#{LEDGER}\n#{remarks.join("\n")}"
       end
     end
   end

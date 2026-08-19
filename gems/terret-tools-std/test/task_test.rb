@@ -3,6 +3,15 @@
 require "minitest/autorun"
 require_relative "../lib/terret/tools_std"
 
+# Task declares :parallel, and only a reactor can actually overlap a fan-out
+# of them.
+ASYNC_AVAILABLE = begin
+  require "async"
+  true
+rescue LoadError
+  false
+end unless defined?(ASYNC_AVAILABLE)
+
 class TaskToolTest < Minitest::Test
   def boot(script:, extra_rows: [])
     Hames.reset_events!
@@ -163,5 +172,90 @@ class TaskToolTest < Minitest::Test
 
     assert_nil result.content
     assert_match(/no live agent/, result.error)
+  end
+
+  # "Nothing to say" and "was stopped" are different facts, and a model that
+  # cannot tell them apart will summarize a cancelled delegation as an answer.
+  def test_a_stopped_child_reads_differently_from_one_with_nothing_to_say
+    stop = Terret::LLM::ToolCall.new(id: "c1", name: "stop_me", args: {})
+    ctx, = boot(script: [{ text: "Working on it.", tool_calls: [stop] }])
+    ctx.with_owner("stopper") do
+      ctx[:tools].register(name: "stop_me", description: "s", params: {}) do |session_id:|
+        ctx[:loop].agent_for_session(session_id).cancel("stopped from inside")
+        "stopping"
+      end
+    end
+    parent, session = spawn(ctx)
+
+    result = call(ctx, parent, session.id, description: "stop it", prompt: "start then stop")
+
+    child_id = result.content[/child session (\S+)$/, 1]
+    assert_equal "Working on it.\n--- terret ---\nchild session #{child_id}\n" \
+                 "the subagent's turn ended cancelled rather than completing",
+                 result.content
+    assert_equal "cancelled", ctx[:sessions].fetch(child_id).events.last.payload[:status]
+  end
+
+  def test_an_omitted_prompt_is_a_readable_result_rather_than_an_argument_error
+    ctx, = boot(script: [])
+    parent, session = spawn(ctx)
+
+    result = call(ctx, parent, session.id, description: "forgot the prompt")
+
+    assert_nil result.content
+    assert_match(/needs a prompt/, result.error)
+  end
+
+  # Nothing forbids a child from delegating in turn; the agent cap is the only
+  # ceiling, and a deployment that does not want this says so in its allow
+  # list rather than here.
+  def test_a_child_can_itself_delegate
+    inner = Terret::LLM::ToolCall.new(id: "c1", name: "Task",
+                                      args: { description: "ask again", prompt: "what is it?" })
+    ctx, = boot(script: [{ text: "Delegating further.", tool_calls: [inner] },
+                         { text: "the grandchild answer" },
+                         { text: "my child said: the grandchild answer" }])
+    parent, session = spawn(ctx)
+
+    result = call(ctx, parent, session.id, description: "delegate", prompt: "go")
+
+    assert_match(/\Amy child said: the grandchild answer/, result.content)
+    child_id = result.content[/child session (\S+)$/, 1]
+    child = ctx[:sessions].fetch(child_id)
+    inner_result = child.events.find { |e| e.type == "tool/result" }.payload[:content]
+    grandchild_id = inner_result[/child session (\S+)$/, 1]
+
+    refute_nil grandchild_id
+    assert_equal 3, [session.id, child_id, grandchild_id].uniq.length
+    assert_equal "the grandchild answer",
+                 ctx[:sessions].derive_messages(grandchild_id).last.text
+    [child_id, grandchild_id].each do |sid|
+      assert_nil ctx[:loop].agent_for_session(sid), "every child is disposed on its way out"
+    end
+  end
+
+  # The reason Task declares :parallel at all: a fan-out of delegations is one
+  # run under one barrier, and the results come back in call order.
+  def test_two_task_calls_in_one_message_go_out_as_one_parallel_run
+    skip "async is not installed" unless ASYNC_AVAILABLE
+
+    a = Terret::LLM::ToolCall.new(id: "tc1", name: "Task",
+                                  args: { description: "one", prompt: "first" })
+    b = Terret::LLM::ToolCall.new(id: "tc2", name: "Task",
+                                  args: { description: "two", prompt: "second" })
+    ctx, = boot(script: [{ text: "Both at once.", tool_calls: [a, b] },
+                         { text: "child one" }, { text: "child two" },
+                         { text: "Both are back." }])
+    parent, session = spawn(ctx)
+
+    assert_equal :completed, Async { ctx[:loop].run_turn(parent, "go") }.wait
+
+    results = session.events.select { |e| e.type == "tool/result" }
+    assert_equal %w[tc1 tc2], results.map { |e| e.payload[:id] }
+    assert_equal ["child one", "child two"],
+                 results.map { |e| e.payload[:content].lines.first.chomp }.sort
+    children = results.map { |e| e.payload[:content][/child session (\S+)$/, 1] }
+    assert_equal 2, children.uniq.length, "each delegation gets its own session"
+    children.each { |sid| assert_nil ctx[:loop].agent_for_session(sid) }
   end
 end

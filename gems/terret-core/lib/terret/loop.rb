@@ -77,9 +77,15 @@ module Terret
 
     # Cooperative stop: the loop honors it at step boundaries. Mid-stream
     # abort arrives with the async task-tree work (plan §8); until then this
-    # is the honest synchronous form. A cancel is per-turn and best-effort:
-    # if the turn rejects, fails, or completes before a boundary honors it,
-    # the cancel dies with that turn rather than haunting the next one.
+    # is the honest synchronous form.
+    #
+    # A cancel raised DURING a turn is per-turn and best-effort: whether that
+    # turn rejects, fails, or completes before a boundary honors it, turning's
+    # ensure clears the flag, so it never haunts the next one. A cancel on an
+    # IDLE agent has no turn to clear it and so it persists — the next turn
+    # honors it at once and closes cancelled having spent no step, which is
+    # what a stop pressed just before a message lands should do.
+    #
     # The status moves only from :running: :stopping is a sub-state of a turn
     # that is still working and is no longer going to finish, so there is
     # nothing for it to mean on an idle agent — and an idle agent left
@@ -122,14 +128,12 @@ module Terret
       @max_agents = config[:max_agents] || 128
     end
 
-    # `parent:` is the context the agent's own scope forks from, and it
-    # defaults to this service's root exactly as it always did — an interface
-    # spawning a top-level agent wants the root, and the socket, ACP and every
-    # test harness keep their call sites unchanged. The subagent provider is
-    # the one caller that passes something else: the CALLING agent's fork, so
-    # a child inherits that agent's roster and policy floor instead of the
-    # root's (docs/subagents.md §3). The two cases do not have to share one
-    # answer, and this keyword is what keeps them from having to.
+    # `parent:` is the context the agent's own scope forks from. It defaults to
+    # this service's root exactly as it always did, so every interface spawning
+    # a top-level agent keeps its call site; the subagent provider is the one
+    # caller that passes something else — the CALLING agent's fork, which is
+    # what makes a child inherit that agent's roster and policy floor instead
+    # of the root's (docs/subagents.md §3).
     def spawn_agent(session_id:, id: "agent-#{session_id}", parent: @ctx)
       raise AgentExists, "agent #{id} already exists" if @agents.key?(id)
       if (live = @by_session[session_id])
@@ -401,20 +405,15 @@ module Terret
     end
 
     # One assistant message's tool calls, run as maximal runs of the
-    # concurrency their definitions declare (docs/subagents.md §5). M7 put
-    # `concurrency:` on every Definition and honored it nowhere; this is the
-    # consumer.
+    # concurrency their definitions declare (docs/subagents.md §5).
     #
-    # Partitioning into MAXIMAL runs rather than gathering every parallel call
-    # in the message together is what preserves a serial call's meaning: a
-    # :serial call is a barrier of one, and nothing reorders across it.
+    # MAXIMAL runs, rather than every parallel call in the message gathered
+    # together, is what preserves a serial call's meaning: it is a barrier of
+    # one, and nothing may reorder across it.
     #
-    # Cancellation lands BETWEEN runs. A barrier is not interruptible from
-    # outside once it starts, so a cancel requested while a run is in flight
-    # settles after that run rather than tearing fibers out of the middle of
-    # it; a truncated batch simply produces fewer `cancelled before execution`
-    # results than it did before the barrier existed. Every call still ends
-    # with a result either way — the projection never holds a call without one.
+    # Cancellation lands BETWEEN runs, because a barrier cannot be interrupted
+    # from outside once it starts. Every call still ends with a result either
+    # way — the projection may never hold a call without one.
     def execute_batch(agent, ctx, sessions, sid, calls)
       maximal_runs(ctx, calls).each do |concurrent, run|
         if agent.cancelled?

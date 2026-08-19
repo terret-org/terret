@@ -45,6 +45,7 @@ class SubagentSeamTest < Minitest::Test
     assert_equal "the answer is 42", result.text
     refute_equal parent_session.id, result.session_id
     assert_equal({ prompt_tokens: 9, completion_tokens: 4, cost: 0.002, steps: 1 }, result.usage)
+    assert_equal :completed, result.status
 
     # A fresh session, not a fork of the parent's: the child sees the prompt
     # it was given and nothing else (docs/subagents.md §2).

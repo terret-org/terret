@@ -68,7 +68,12 @@ calling agent's context and runs it to completion. Exactly:
    effect the child installed dies at the same moment.
 
 The value that comes back is
-`Subagents::Result = Data.define(:text, :session_id, :usage)`.
+`Subagents::Result = Data.define(:text, :session_id, :usage, :status)`.
+`status` is the child's ordinary turn status — `:completed`, `:cancelled`,
+`:rejected` or `:empty`; a failure raises instead — and it is there because
+"had nothing to say" and "was stopped part-way" are different facts about a
+delegation. A caller shown only the child's last sentence would report the
+second as if it were an answer.
 
 Two properties of that sequence are load-bearing rather than incidental.
 
