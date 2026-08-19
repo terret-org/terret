@@ -186,11 +186,11 @@ class RedactorTest < Minitest::Test
 
   # The log a process death leaves behind: an open turn whose last assistant
   # message owes a tool call that never produced a result.
-  def stage_owed_call(ctx, args)
+  def stage_owed_call(ctx, args, name: "shell")
     session = ctx[:sessions].create
     sid = session.id
     agent = ctx[:loop].spawn_agent(session_id: sid)
-    call = Terret::LLM::ToolCall.new(id: "tc1", name: "shell", args: args)
+    call = Terret::LLM::ToolCall.new(id: "tc1", name: name, args: args)
     ctx[:sessions].append(sid, "turn/start", { agent: agent.id })
     ctx[:sessions].append(sid, "step/start", { n: 1 })
     ctx[:sessions].append(sid, "user/message", { text: "go" })
@@ -221,6 +221,29 @@ class RedactorTest < Minitest::Test
     result = session.events.find { |e| e.type == "tool/result" }
     assert_nil result.payload[:content]
     assert_match(/redacted/, result.payload[:error])
+  end
+
+  # A redacted NAME resolves to nothing, so the call already could not run —
+  # but "no such tool" reads to a model as a broken roster rather than as the
+  # log having rewritten its own record. Resume refuses any owed call the log
+  # redacted, wherever the token landed, and says so.
+  def test_resume_refuses_to_replay_a_call_whose_name_the_log_redacted
+    ctx, = boot(script: [{ text: "wrapped up" }])
+    ran = []
+    ctx.with_owner("shell-plugin") do
+      ctx[:tools].register(name: "run_#{SECRET}", description: "", params: {}) do
+        ran << :called
+        "ran it"
+      end
+    end
+    _agent, session = stage_owed_call(ctx, { cmd: "ls -la" }, name: "run_#{SECRET}")
+
+    ctx[:loop].resume_turn(ctx[:loop].agent_for_session(session.id))
+
+    assert_empty ran
+    error = session.events.find { |e| e.type == "tool/result" }.payload[:error]
+    assert_match(/was not replayed/, error)
+    refute_match(/KeyError/, error, "a redacted call must not read as a missing tool")
   end
 
   def test_resume_still_replays_a_call_the_log_recorded_faithfully

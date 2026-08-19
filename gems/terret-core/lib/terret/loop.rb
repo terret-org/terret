@@ -325,13 +325,19 @@ module Terret
     end
 
     # Resume replays a tool call decoded from the LOG, and the log is
-    # scrubbed: an argument that carried a credential carries the replacement
-    # token instead. Re-running `deploy --key [REDACTED]` is not a retry of
-    # what the model asked for, it is a DIFFERENT command with the same name —
-    # and for Bash or Write that difference is a real, irreversible side
-    # effect. The M6 at-least-once contract (docs/lifecycle.md) yields to
-    # honesty here: the call is refused with a result that says why, and the
-    # model's next step decides what to do about it.
+    # scrubbed: whatever carried a credential carries the replacement token
+    # instead. Re-running `deploy --key [REDACTED]` is not a retry of what the
+    # model asked for, it is a DIFFERENT command with the same name — and for
+    # Bash or Write that difference is a real, irreversible side effect. The M6
+    # at-least-once contract (docs/lifecycle.md) yields to honesty here: the
+    # call is refused with a result that says why, and the model's next step
+    # decides what to do about it.
+    #
+    # The NAME is checked as well as the args, though a redacted name could
+    # never have resolved anyway: "no such tool" would tell the model its
+    # roster is broken, when what actually happened is that the log rewrote
+    # its own record of the call. One refusal, one accurate reason, wherever
+    # the token landed.
     #
     # Only the redactor's own token is known. A scrubber registered directly
     # with some other replacement is not detectable from here, and a call it
@@ -406,11 +412,11 @@ module Terret
         unless logged.include?(tc.id)
           sessions.append(sid, "tool/call", { id: tc.id, name: tc.name, args: tc.args })
         end
-        if token && redacted?(tc.args, token)
+        if token && (redacted?(tc.name, token) || redacted?(tc.args, token))
           sessions.append(sid, "tool/result",
                           { id: tc.id, content: nil,
-                            error: "#{tc.name} was not replayed on resume: its arguments were " \
-                                   "redacted in the session log, so the recorded call is not " \
+                            error: "#{tc.name} was not replayed on resume: the session log " \
+                                   "redacted part of this call, so the recorded call is not " \
                                    "the call that was made" })
           next
         end
