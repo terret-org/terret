@@ -103,6 +103,23 @@ class BootTest < Minitest::Test
     ctx
   end
 
+  def now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+  def alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  end
+
+  # Bounded so a child that never dies fails the assertion instead of hanging;
+  # signal delivery and reaping are asynchronous, so a bare check would race.
+  def refute_alive(pid, message = nil, timeout: 5)
+    deadline = now + timeout
+    sleep 0.02 while alive?(pid) && now < deadline
+    refute alive?(pid), message || "pid #{pid} is still alive"
+  end
+
   # -- the whole point -------------------------------------------------------
 
   def test_a_patched_profile_boots_offline_and_drives_a_turn_end_to_end
@@ -236,6 +253,34 @@ class BootTest < Minitest::Test
 
     Terret::Boot.shutdown(ctx)
     assert_predicate handle, :closed?, "Store::SQLite#stop must have run and closed the database"
+  end
+
+  # The console (examples/web_chat.rb) routes its Ctrl-C teardown through
+  # Boot.shutdown for exactly this: the two things a hand-picked list of seams
+  # used to miss are a running job and the loop's own agents. Shutdown unloads
+  # the loop row (whose stop disposes its agents) and the jobs row (whose stop
+  # ends every subprocess), so neither survives.
+  def test_shutdown_ends_running_jobs_and_disposes_the_loops_agents
+    pid = nil
+    ctx = boot
+    ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new([]))
+    session = ctx[:sessions].create
+    agent = ctx[:loop].spawn_agent(session_id: session.id)
+    job_id = ctx[:jobs].start("sleep 60", session: session.id)
+    pid = ctx[:jobs].instance_variable_get(:@jobs)[job_id].handle.pid
+    assert alive?(pid), "the job did not start"
+
+    Terret::Boot.shutdown(ctx)
+    @booted.delete(ctx)
+
+    assert_equal :done, agent.status, "the loop's agents must be disposed on shutdown"
+    refute_alive pid, "a running job must not survive shutdown"
+  ensure
+    begin
+      Process.kill("KILL", pid) if pid
+    rescue Errno::ESRCH
+      nil
+    end
   end
 
   def test_one_wedged_seam_does_not_abort_the_rest_of_the_shutdown

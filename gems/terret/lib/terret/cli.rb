@@ -117,6 +117,7 @@ module Terret
 
     def self.boot(opts, out:, err:)
       require_relative "boot" # the one command that needs it; already loaded via exe/trt
+      ctx = nil
       ctx = Terret.boot(profile: opts.profile, home: opts.home, patches: opts.patches,
                         allow_config_ruby: opts.allow_config_ruby)
       out.puts "trt: profile #{opts.profile.inspect} is up. Interrupt to stop."
@@ -127,11 +128,17 @@ module Terret
         out.puts
       end
       out.puts "trt: stopping"
-      Boot.shutdown(ctx)
       0
     rescue StandardError => e
       err.puts "trt: boot failed: #{e.class}: #{e.message}"
       1
+    ensure
+      # Teardown belongs here, not on the success path: a park that raises
+      # rather than catching its Interrupt used to return 1 and leak the whole
+      # booted world — its container, its bash, its open database. A boot that
+      # got as far as a live context is always torn down; a Terret.boot that
+      # never returned leaves ctx nil and nothing to shut down.
+      Boot.shutdown(ctx) if ctx
     end
 
     # An agent is a task tree on the fiber scheduler, so a booted process

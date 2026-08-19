@@ -33,6 +33,7 @@ require_relative "../gems/terret-exec/lib/terret/exec"           # fs, sandbox-n
 require_relative "../gems/terret-tools-std/lib/terret/tools_std" # Read/Write/Edit/Glob/Grep, Bash, terminal_*, WebFetch, Task
 require_relative "../gems/terret-openrouter/lib/terret/openrouter"
 require_relative "../gems/terret-store-sqlite/lib/terret/store/sqlite"
+require_relative "../gems/terret/lib/terret/boot"                # Boot.shutdown: every mounted row's stop hook, on the way out
 require "async"
 require "async/http/server"
 require "async/http/endpoint"
@@ -861,9 +862,13 @@ begin
     server.run
   end
 ensure
-  # A console killed with Ctrl-C must not leave a bash, a PTY, or a container
-  # behind it.
-  ctx[:shell].close_all     if ctx.service?(:shell)
-  ctx[:terminals].close_all if ctx.service?(:terminals)
-  ctx[:sandbox].stop        if ctx.service?(:sandbox) && ctx[:sandbox].isolated?
+  # A console killed with Ctrl-C must not leave a bash, a PTY, a background
+  # job, or a container behind it. Route through Boot.shutdown so every mounted
+  # row's own stop hook runs — jobs' subprocesses, the shell's bash, the
+  # terminals' PTYs, the loop's agents, the sandbox's container, the SQLite
+  # handle — each step best-effort in reverse-mount order, rather than a
+  # hand-picked few where one early failure skips the rest and a newly mounted
+  # seam is silently missed. This is a hand-built loader, so it hands its own
+  # loader in (docs/composition.md §7).
+  Terret::Boot.shutdown(ctx, loader: loader) if defined?(ctx) && ctx
 end

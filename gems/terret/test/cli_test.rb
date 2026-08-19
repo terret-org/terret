@@ -214,6 +214,73 @@ class CLITest < Minitest::Test
     refute_empty err
   end
 
+  # -- boot teardown ---------------------------------------------------------
+
+  def run_cli_boot(profile = "demo")
+    out = StringIO.new
+    err = StringIO.new
+    opts = Terret::CLI::Options.new("boot", profile, [], nil, false)
+    status = Terret::CLI.boot(opts, out: out, err: err)
+    [status, out.string, err.string]
+  end
+
+  # A plain singleton-method swap, restored after the block. Kept local to
+  # these tests so the suite stays runnable under the bundler-free lane, where
+  # minitest/mock is not on the load path.
+  def swapping(mod, name, impl)
+    original = mod.method(name)
+    mod.singleton_class.define_method(name, impl)
+    yield
+  ensure
+    mod.singleton_class.define_method(name, original)
+  end
+
+  # A park that raises instead of catching its Interrupt used to return 1
+  # without ever tearing the booted world down. Teardown belongs in an ensure,
+  # so a context that came up is always shut down.
+  def test_boot_tears_down_even_when_the_park_raises_after_boot_succeeds
+    ctx = Object.new
+    shut = []
+    swapping(Terret, :boot, ->(**_kw) { ctx }) do
+      swapping(Terret::CLI, :park, -> { raise "reactor died" }) do
+        swapping(Terret::Boot, :shutdown, ->(c, **_kw) { shut << c }) do
+          status, = run_cli_boot
+          assert_equal 1, status
+          assert_equal [ctx], shut, "a booted context must be torn down even when park raises"
+        end
+      end
+    end
+  end
+
+  # The clean path still tears down exactly once (and only once).
+  def test_boot_tears_down_on_a_clean_stop
+    ctx = Object.new
+    shut = []
+    swapping(Terret, :boot, ->(**_kw) { ctx }) do
+      swapping(Terret::CLI, :park, -> {}) do # returns as if the Interrupt was handled
+        swapping(Terret::Boot, :shutdown, ->(c, **_kw) { shut << c }) do
+          status, = run_cli_boot
+          assert_equal 0, status
+          assert_equal [ctx], shut
+        end
+      end
+    end
+  end
+
+  # A Terret.boot that never returns a context leaves nothing to shut down, and
+  # the ensure must not call shutdown with nil.
+  def test_a_boot_that_fails_outright_does_not_try_to_shut_down_a_nil_context
+    shut = []
+    swapping(Terret, :boot, ->(**_kw) { raise "boot blew up" }) do
+      swapping(Terret::Boot, :shutdown, ->(c, **_kw) { shut << c }) do
+        status, _out, err = run_cli_boot
+        assert_equal 1, status
+        assert_includes err, "boot failed"
+        assert_empty shut, "there is no context to tear down when boot itself failed"
+      end
+    end
+  end
+
   # -- the executable --------------------------------------------------------
 
   def test_the_shipped_executable_runs
