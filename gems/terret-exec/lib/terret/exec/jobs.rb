@@ -25,14 +25,11 @@ module Terret
     # job in a sandboxed profile runs inside the container with everything
     # else.
     #
-    # The seam a job deliberately does NOT use is ctx[:shell]. A command
-    # becomes a fresh `bash -lc` argv handed to ctx[:subprocess], never a `run`
-    # against the agent's persistent bash: that shell is one long-lived process
-    # per session driven by a sentinel protocol that reads until it sees its
-    # marker, so a job parked in it would hold the shell for its whole lifetime
-    # and every later Bash call in the session would block behind it. The
-    # comparison to draw with `Bash` is about WRAPPING, not about the seam —
-    # Bash wraps once when its session opens, a job wraps per spawn.
+    # The seam a job deliberately does NOT use is ctx[:shell]: a job parked in
+    # the agent's persistent bash would hold that one process for its whole
+    # lifetime, and every later Bash call in the session would block behind it.
+    # A command becomes a fresh `bash -lc` argv handed to ctx[:subprocess]
+    # instead.
     #
     # Nothing in the log says a job exists. It survives its turn and it does
     # not survive a restart: the process that held the pid is gone, and the log
@@ -225,23 +222,29 @@ module Terret
       # that outruns its collector simply stops running until somebody collects
       # — which is exactly the case a job exists for.
       #
-      # It is a TRANSIENT task on the ROOT. Transient, so a job never keeps the
-      # reactor alive past the work that started it; on the root, because a
-      # child of the calling task would be awaited by it, and the turn that
-      # called `job_start` would then not end until the job did — the precise
-      # opposite of what a job is.
+      # TRANSIENT is the whole of it, and it is about the REACTOR's lifetime
+      # rather than about who waits for whom: a transient task never keeps the
+      # reactor alive past the work that started it, and on shutdown it unwinds
+      # with an Async::Cancel at its `sleep`. Which task it hangs off is not a
+      # choice worth making — `async` re-parents to the calling task whichever
+      # task it is called on (measured) — and it would not matter if it were,
+      # because a parent does not wait for a transient child either. The turn
+      # that called `job_start` ends while the job runs on.
       #
       # Nothing depends on it having run. #collect drains the pipe itself
       # before answering, so a deployment with no reactor sees the same output
-      # in the same order from the same calls; what it does not get is the
-      # backpressure relief.
+      # in the same order from the same calls. Two things it does not see are
+      # worth naming, because both look like the seam misbehaving: a job with
+      # more than a pipe buffer to write between two collects is parked in
+      # `write` until the next one — its side effects stop with it, because a
+      # parked job is not running — and a job that finishes while nobody is
+      # collecting stays an unreaped zombie until a collect, a stop, or its
+      # agent's disposal notices that it went.
       def pump(job)
         task = defined?(Async::Task) ? Async::Task.current? : nil
         return unless task
 
-        root = task
-        root = root.parent while root.parent
-        root.async(transient: true) do
+        task.async(transient: true) do
           loop do
             pull(job)
             break if job.handle.exited? && job.handle.eof?

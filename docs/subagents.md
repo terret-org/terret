@@ -334,6 +334,15 @@ unknown id, an id already collected out, and an id belonging to another
 session all fail closed, and all with the same answer: which of the three is
 true is not something one session should learn about another's jobs.
 
+Under a reactor a fiber per job drains its pipe as the job fills it, and
+with no reactor mounted the same calls return the same bytes in the same
+order — but two things stop happening, and both look like the seam
+misbehaving rather than the deployment: a job with more than a pipe buffer
+(about 64KB) to write between two collects is parked in `write` until the
+next one, its side effects stopped with it, and a job that finishes while
+nobody is collecting stays an unreaped zombie until a collect, a `stop`, or
+its agent's disposal notices that it went.
+
 Jobs are **reaped on `agent/disposed`**, the event M7 declared for exactly
 this class of state — per-agent runtime that no registration owns and
 reversibility alone cannot collect (docs/exec.md §2, shells and
