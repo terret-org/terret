@@ -28,6 +28,11 @@ class WebFetchToolTest < Minitest::Test
     Hames.reset_events!
     Terret.declare_events!
     loader = Hames::Loader.new
+    # A network-free resolver default so a unit test never performs real DNS;
+    # the SSRF tests override it with an explicit host -> address map. The
+    # default answers a public (TEST-NET-3) address so the address floor admits
+    # every host these other tests fetch.
+    config = { resolver: ->(_host) { ["203.0.113.10"] } }.merge(config)
     loader.layer([
       { id: "tools", plugin: Terret::Tools::Registry },
       { id: "std_web_fetch", plugin: Terret::ToolsStd::WebFetch, config: config }
@@ -256,6 +261,83 @@ class WebFetchToolTest < Minitest::Test
     result = call(ctx, url: "https://example.com/")
 
     refute_match(/Terret|Failure|URI::/, result.error, "a Failure renders message-only")
+  end
+
+  # -- SSRF floor: loopback and link-local --------------------------------
+  #
+  # WebFetch egresses HOST-side via Net::HTTP, so `network: none` on the
+  # sandbox does not constrain it. An allowlisted hostname resolving to
+  # loopback or the cloud-metadata link-local address would otherwise reach
+  # host-local and instance-credential endpoints; the address is checked on the
+  # model's URL and on every redirect hop before anything is fetched.
+
+  def test_a_host_resolving_to_loopback_is_refused_and_nothing_is_fetched
+    recorder = Recorder.new
+    ctx, = boot(config: { allow: ["*"], transport: recorder,
+                          resolver: ->(_h) { ["127.0.0.1"] } })
+    result = call(ctx, url: "https://sneaky.example/x")
+
+    assert_nil result.content
+    assert_match(/loopback or link-local/, result.error)
+    assert_empty recorder.urls, "a host resolving to loopback must never reach the transport"
+  end
+
+  def test_a_host_resolving_to_the_cloud_metadata_address_is_refused
+    recorder = Recorder.new
+    ctx, = boot(config: { allow: ["*"], transport: recorder,
+                          resolver: ->(_h) { ["169.254.169.254"] } })
+    result = call(ctx, url: "https://metadata.example/latest/meta-data/")
+
+    assert_nil result.content
+    assert_match(/loopback or link-local/, result.error)
+    assert_empty recorder.urls
+  end
+
+  # The refusal fires even when only ONE of several resolved addresses is
+  # forbidden: a rebinding-adjacent record that answers both a public and a
+  # link-local address must not slip the public one through.
+  def test_a_host_resolving_to_a_mix_including_link_local_is_refused
+    recorder = Recorder.new
+    ctx, = boot(config: { allow: ["*"], transport: recorder,
+                          resolver: ->(_h) { ["203.0.113.10", "169.254.169.254"] } })
+    result = call(ctx, url: "https://mixed.example/x")
+
+    assert_nil result.content
+    assert_match(/loopback or link-local/, result.error)
+    assert_empty recorder.urls
+  end
+
+  def test_a_redirect_to_a_link_local_host_is_refused_mid_chain
+    recorder = Recorder.new({
+      "https://entry.example/" => [302, { "location" => "https://internal.example/" }, "moved"]
+    }, default: [200, {}, "SHOULD NOT REACH"])
+    resolver = ->(host) { host == "internal.example" ? ["169.254.169.254"] : ["203.0.113.10"] }
+    ctx, = boot(config: { allow: ["*"], transport: recorder, resolver: resolver })
+    result = call(ctx, url: "https://entry.example/")
+
+    assert_nil result.content
+    assert_match(/loopback or link-local/, result.error)
+    assert_equal ["https://entry.example/"], recorder.urls,
+                 "the redirect target must be refused before it is fetched"
+  end
+
+  def test_a_host_resolving_to_a_public_address_is_allowed
+    recorder = Recorder.new(default: [200, {}, "ok"])
+    ctx, = boot(config: { allow: ["*"], transport: recorder,
+                          resolver: ->(_h) { ["203.0.113.10"] } })
+
+    assert_equal "ok", call(ctx, url: "https://public.example/x").content
+    assert_equal ["https://public.example/x"], recorder.urls
+  end
+
+  # Private ranges are a documented M8 config knob, deliberately NOT part of
+  # this floor: a deployment may legitimately fetch internal services.
+  def test_a_private_range_address_is_not_blocked_by_the_floor
+    recorder = Recorder.new(default: [200, {}, "ok"])
+    ctx, = boot(config: { allow: ["*"], transport: recorder,
+                          resolver: ->(_h) { ["10.0.0.5"] } })
+
+    assert_equal "ok", call(ctx, url: "https://intranet.example/x").content
   end
 
   # -- what a URL may be -----------------------------------------------------

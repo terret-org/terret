@@ -2,6 +2,8 @@
 
 require "net/http"
 require "uri"
+require "resolv"
+require "ipaddr"
 
 module Terret
   module ToolsStd
@@ -24,16 +26,30 @@ module Terret
     # transport that followed them would do it without ever consulting the
     # policy.
     #
-    # And the policy matches a HOSTNAME STRING. That is worth saying plainly:
-    # it is not IP pinning, and it is not DNS-rebinding protection. An IP
-    # literal is matched as the IP's own text (`10.0.0.1` matches the glob
-    # `10.0.0.1`, and nothing at all under an empty allow list), but a host on
-    # the allow list that resolves to a link-local address still resolves
-    # there, and a name that resolves differently between this check and the
-    # connect still connects to the second answer. SSRF-grade network control
-    # is the sandbox row's job — `network: none`, or an egress policy around
-    # the container (docs/exec.md §4) — and stating the boundary is more
-    # useful than a half-measure here that reads like one.
+    # And the policy matches a HOSTNAME STRING, not an IP. An IP literal is
+    # matched as its own text (`10.0.0.1` matches the glob `10.0.0.1`, and
+    # nothing under an empty allow list), and a name on the allow list is
+    # admitted no matter where it resolves.
+    #
+    # That last part is why WebFetch does NOT lean on the sandbox for network
+    # safety the way the rest of §6.6 does: this GET runs HOST-side through
+    # Net::HTTP, so `network: none` on the sandbox row constrains the container
+    # and not this tool. An allowlisted name resolving to 127.0.0.1 or to the
+    # 169.254.169.254 cloud-metadata endpoint would reach host-local services
+    # and instance credentials with nothing in the way. So the tool carries its
+    # own SSRF floor: #check_address! resolves the host and refuses loopback and
+    # link-local targets before any connection, on the model's URL and on every
+    # redirect hop. It is a FLOOR, not full SSRF control — private ranges
+    # (10/8, 172.16/12, 192.168/16) stay reachable by default because a
+    # deployment may legitimately fetch internal services, and blocking them is
+    # a documented M8 config knob. It is also not DNS-rebinding protection: the
+    # address is resolved once for the check and the connection re-resolves, so
+    # a name that answers differently between the two still connects to the
+    # second answer. Pinning the connection to the checked IP would mean
+    # threading it through the injectable transport seam, whose contract is a
+    # bare `call(url)`; the honest floor keeps that seam intact and closes the
+    # static-record and misconfigured-allowlist vectors, which are the ones a
+    # deployment actually hits.
     class WebFetch < Hames::Service
       service_key :tools_std_web_fetch
       inject :tools
@@ -177,7 +193,49 @@ module Terret
         raise Terret::Tools::Failure, "url names no host; nothing was fetched" if host.empty?
 
         check_policy!(host)
+        check_address!(host)
         uri
+      end
+
+      # -- the SSRF floor ------------------------------------------------------
+
+      # The address check the domain policy cannot make: a name the allow list
+      # admits is still refused if it resolves to a loopback or link-local
+      # address, so an allowlisted host cannot launder a fetch to 127.0.0.1 or
+      # to 169.254.169.254 (see the class comment for why this lives in the tool
+      # rather than the sandbox, and for the DNS-rebinding boundary it accepts).
+      # An unresolvable name answers no addresses and passes here — there is no
+      # internal target to refuse, and the connection fails on its own.
+      def check_address!(host)
+        addresses(host).each do |ip|
+          next unless forbidden_address?(ip)
+
+          # The IP is named so a model reading the refusal can see WHY, but it
+          # is the resolved address, never a secret the caller wrote.
+          raise Terret::Tools::Failure,
+                "#{host} resolves to #{ip}, a loopback or link-local address WebFetch " \
+                "refuses; nothing was fetched"
+        end
+      end
+
+      # The resolution seam, injectable like the transport so this gem's unit
+      # tests need no DNS: a callable taking a host and answering an array of
+      # address strings. Resolv.getaddresses answers [] rather than raising on a
+      # name that does not resolve, which is exactly the fail-open-safe shape
+      # here — nothing to refuse.
+      def resolver = config[:resolver] || Resolv.method(:getaddresses)
+
+      def addresses(host) = Array(resolver.call(host))
+
+      # Loopback (127.0.0.0/8, ::1) and link-local (169.254.0.0/16, fe80::/10),
+      # exactly the two ranges IPAddr's own predicates name. A string that does
+      # not parse as an IP is treated as forbidden: a resolver answer this tool
+      # cannot verify fails closed rather than being connected to blind.
+      def forbidden_address?(ip)
+        addr = IPAddr.new(ip.to_s)
+        addr.loopback? || addr.link_local?
+      rescue IPAddr::InvalidAddressError
+        true
       end
 
       # -- the domain policy ---------------------------------------------------

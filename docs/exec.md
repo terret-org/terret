@@ -199,6 +199,13 @@ their own convention.
 | `WebFetch` | `false` | `:policy` | `:serial` |
 | `terminal_open`/`input`/`read`/`close` | `true` | `:policy` | `:serial` |
 
+`WebFetch` is the one tool in this roster that does **not** move into the
+container with the others: it egresses host-side through Net::HTTP, so a
+sandbox row's `network:` mode does not govern it. It is bounded instead by
+its own deny-by-default domain allow list and an SSRF floor that refuses
+loopback and link-local targets (docs/security.md); everything else here
+runs behind `ctx[:sandbox]`.
+
 `Bash`'s approval is the one entry in this table that is not a static
 value: it is derived from `ctx[:sandbox].isolated?` **at registration
 time** (§13 — outside a sandbox, an agent that can run arbitrary shell

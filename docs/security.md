@@ -46,6 +46,17 @@ container as outside it; what the container changes is what an escaped or
 malicious *process* can reach — no network by default, no view of the
 host process table, no access to anything not bind-mounted.
 
+"No network by default" is a claim about *spawned processes*, and the one
+tool it does not cover is `WebFetch`: it egresses HOST-side through
+Net::HTTP, so `network: none` never touches it. `WebFetch` is governed
+solely by its own domain allow list (deny-by-default), plus its own SSRF
+floor — it resolves each target, on the model's URL and on every redirect
+hop, and refuses loopback and link-local addresses so an allowlisted name
+cannot launder a fetch to `127.0.0.1` or the `169.254.169.254`
+cloud-metadata endpoint. That floor is not full SSRF control: private
+ranges stay reachable by default (an M8 config knob), and it is resolve-
+then-connect rather than IP-pinned, so it is not DNS-rebinding protection.
+
 `landlock` (Linux) and `seatbelt` (macOS) are named in plan §6.6 as future
 providers and are not built in M7 — only `none` and `docker` exist. A
 profile that needs OS-native sandboxing without a container has no seam
