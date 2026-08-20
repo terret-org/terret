@@ -1,0 +1,19 @@
+# Floors for `rake bench BENCH_FLOORS=1` (plan §11). Each floor is set at
+# roughly 10% of what this machine measured when the floors were authored —
+# the point is catching an order-of-magnitude regression (a kernel change
+# that makes dispatch or streaming 10x+ slower), not chasing machine noise or
+# a CI runner that happens to be somewhat slower than a dev box. Do not
+# tighten these to "what CI usually gets"; that turns every noisy run into a
+# flake. Re-run `rake bench` and re-derive these only when a deliberate
+# change moves the baseline (e.g. a new dispatch mode, a heavier session
+# append path).
+#
+# Raw numbers measured on the authoring machine (Apple Silicon, Ruby 4.0.6,
+# `mise exec -- ruby bench/*.rb`, three runs each):
+#   dispatch_emit_events_per_sec:       ~2,590,000 - 2,670,000
+#   dispatch_waterfall_events_per_sec:  ~718,000 - 730,000
+#   chunk_throughput_chunks_per_sec:    ~192,000 - 201,000
+
+dispatch_emit_events_per_sec: 250000
+dispatch_waterfall_events_per_sec: 70000
+chunk_throughput_chunks_per_sec: 15000

@@ -41,3 +41,10 @@ jobs:
         run: |
           bundle exec rake config:catalog
           git diff --exit-code docs/config-catalog.md
+
+      # Bench lane (plan §11): dispatch overhead + chunk throughput must not
+      # silently regress an order of magnitude. Floors are ~10% of a dev-box
+      # baseline (bench/floors.yml), with plenty of headroom for a slower
+      # ubuntu-latest runner.
+      - name: Bench lane is above floor
+        run: bundle exec rake bench BENCH_FLOORS=1

@@ -76,6 +76,7 @@ terret-core). Treat the code as current and the plan as intent.
 ```bash
 rake test              # all suites, plain minitest, no bundler needed
 rake events:catalog    # regenerates docs/events.md
+rake bench             # dispatch overhead + chunk throughput (bench/README.md); BENCH_FLOORS=1 gates on bench/floors.yml
 ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo

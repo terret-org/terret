@@ -67,6 +67,37 @@ module ConfigCatalog
   def doc(text) = text.to_s.gsub("|", "\\|")
 end
 
+desc "Run the bench lane (plan §11): dispatch overhead + chunk throughput. " \
+     "BENCH_FLOORS=1 asserts each metric against bench/floors.yml and exits 1 below floor"
+task :bench do
+  require "yaml"
+  require_relative "bench/dispatch_overhead"
+  require_relative "bench/chunk_throughput"
+
+  results = {}
+  results.merge!(Bench::DispatchOverhead.run)
+  results.merge!(Bench::ChunkThroughput.run)
+
+  floors = YAML.safe_load_file("bench/floors.yml")
+
+  puts "\nBench summary"
+  puts format("%-38s %14s %14s", "metric", "this run", "floor")
+  results.each do |metric, value|
+    puts format("%-38s %14d %14d", metric, value, floors.fetch(metric))
+  end
+
+  next unless ENV["BENCH_FLOORS"]
+
+  failing = results.select { |metric, value| value < floors.fetch(metric) }
+  if failing.empty?
+    puts "\nBENCH_FLOORS: all #{results.length} metrics at or above floor"
+  else
+    warn "\nBENCH_FLOORS: below floor: " \
+         "#{failing.map { |m, v| "#{m}=#{v} < #{floors.fetch(m)}" }.join(', ')}"
+    exit 1
+  end
+end
+
 desc "Generate docs/config-catalog.md from every service's Hames::Schema (CI diffs this)"
 task :"config:catalog" do
   require_relative "gems/terret/lib/terret/boot"

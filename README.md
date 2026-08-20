@@ -102,6 +102,8 @@ plan as intent.
 rake test              # all suites, plain minitest, no bundler needed
 rake events:catalog    # regenerates docs/events.md
 rake config:catalog    # regenerates docs/config-catalog.md
+rake bench             # bench/README.md — chunk throughput + dispatch overhead
+rake bench BENCH_FLOORS=1   # also asserts against bench/floors.yml (CI runs this)
 trt doctor --profile headless   # validate a profile's config without booting
 trt acp --profile headless      # serve the Agent Client Protocol on stdio for an editor
 ruby examples/headless_demo.rb
