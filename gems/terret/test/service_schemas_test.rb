@@ -53,4 +53,12 @@ class ServiceSchemasTest < Minitest::Test
     refute_nil Terret::Subagents.config_schema
     assert_empty Terret::Subagents.config_schema.keys
   end
+
+  # ACP over stdio has no config surface (the transport is the client's own
+  # stdin/stdout, auth is the process boundary), so it declares an empty schema
+  # rather than being unschema'd.
+  def test_the_acp_interface_declares_an_empty_schema
+    refute_nil Terret::ACP::Service.config_schema
+    assert_empty Terret::ACP::Service.config_schema.keys
+  end
 end

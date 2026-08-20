@@ -9,6 +9,10 @@ Injectable seams (a transport, a resolver, a client factory) are wiring
 passed in code, never YAML, so they are absent here by design. A service
 with no schema is not listed; doctor reports it as `unschema'd`.
 
+## terret-acp — `Terret::ACP::Service` (`acp`)
+
+No configurable keys.
+
 ## terret-core — `Terret::Compactor` (`compactor`)
 
 | Key | Type | Required | Default | Description |

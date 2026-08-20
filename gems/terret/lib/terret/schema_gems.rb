@@ -15,6 +15,7 @@ module Terret
     terret/tools_std
     terret/sandbox/docker
     terret/ws
+    terret/acp
     terret/mcp
     terret/morph
   ].freeze
