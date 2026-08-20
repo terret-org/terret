@@ -210,6 +210,44 @@ class SessionsPrimitivesTest < Minitest::Test
     assert_equal({ name: "[REDACTED]", id: "[REDACTED]", content: "[REDACTED]" }, ev.payload[:args])
   end
 
+  # A Hash whose KEY is secret-shaped once reached the log verbatim:
+  # normalize_payload coerced keys to symbols and only ever recursed into
+  # VALUES, so no scrubber ever saw a key. An MCP tool's structured_content is
+  # exactly such a Hash — its keys are authored by the tool — so in CONTENT
+  # scope a key must scrub like any leaf.
+  def test_a_secret_shaped_content_key_is_scrubbed
+    ctx = scrubbing_ctx
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "tool/result",
+                               { id: "tc1", content: { "deadbeef01" => "v", "safe" => "w" } })
+    assert_equal({ :"[REDACTED]" => "v", safe: "w" }, ev.payload[:content])
+  end
+
+  # The mirror of the value exemption: a STRUCTURAL key NAME is the harness's
+  # own vocabulary that the projection and the gate read by that name, so a
+  # pattern matching it must not rewrite it — a renamed :verdict is a verdict
+  # the approvals gate can no longer find.
+  def test_a_structural_key_name_survives_a_pattern_that_matches_it
+    ctx = scrubbing_ctx(->(t) { t.gsub("verdict", "[X]") })
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "approval/resolved",
+                               { call_id: "tc1", verdict: "approved" })
+    assert ev.payload.key?(:verdict), "a structural key name was rewritten"
+    refute ev.payload.key?(:"[X]")
+  end
+
+  # Not only STRUCTURAL_KEYS: every field name at a structural level is the
+  # log's own vocabulary, so none of them scrub. The exemption is positional —
+  # it ends only when content is entered — so a top-level :content key survives
+  # while the value under it is scrubbed like any other text.
+  def test_a_field_name_at_the_structural_surface_is_never_scrubbed
+    ctx = scrubbing_ctx(->(t) { t.gsub("content", "[X]") })
+    s = ctx[:sessions].create
+    ev = ctx[:sessions].append(s.id, "tool/result", { id: "tc1", content: "the content" })
+    assert ev.payload.key?(:content), "a field name the projection reads must survive"
+    assert_equal "the [X]", ev.payload[:content]
+  end
+
   def test_lineage_verdicts_and_policy_are_never_scrubbed
     ctx = scrubbing_ctx
     parent = ctx[:sessions].create(id: "abc123")

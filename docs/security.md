@@ -120,10 +120,14 @@ protects what is appended afterwards and never what is already stored. A
 the append backstop as the only cover for that result. Ordering among
 `post_execute` listeners is unpinned, so middleware registered ahead of
 the redactor reads results before they are rewritten. And the log's own
-structural identifiers are exempt from scrubbing by design — a pattern
-that rewrote a tool call id would break the session rather than protect
-it — so a credential a model puts where an identifier belongs is not
-caught there.
+structural identifiers are exempt from scrubbing by design — the exemption
+covers both the identifier VALUES and the field NAMES that carry them
+(`Sessions::STRUCTURAL_KEYS`), because a pattern that rewrote a tool call
+id, or the `verdict` key the approvals gate reads back, would break the
+session rather than protect it. A secret-shaped Hash key deeper in content
+— an MCP tool's `structured_content`, say — is scrubbed like any leaf; it
+is only where a structural identifier belongs that a credential a model
+plants there is not caught.
 
 ## The socket's authority model
 

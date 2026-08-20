@@ -329,10 +329,20 @@ module Terret
                 when String then k.to_sym
                 else raise NonPrimitivePayload, "#{k.class} is not a storable hash key"
                 end
-          raise NonPrimitivePayload, "duplicate key #{key.inspect} after coercion" if out.key?(key)
-
+          # child_scope reads the un-scrubbed key: the structural exemption is
+          # decided by the real field NAME, before that name is ever rewritten.
           child_scrub, child_structural = child_scope(key, scrub, structural)
-          out[key] = normalize_payload(v, scrub: child_scrub, structural: child_structural)
+          # A KEY is content too once we have descended past the structural
+          # surface. An MCP tool's structured_content is a Hash whose keys the
+          # tool authored, and a secret-shaped one reached the log verbatim
+          # because only values recursed. Field names AT a structural level are
+          # the log's own vocabulary the projection reads by name, so they are
+          # never rewritten (`scrub_key` returns them untouched); the value
+          # exemption STRUCTURAL_KEYS carries is unaffected.
+          stored = scrub_key(key, scrub, structural)
+          raise NonPrimitivePayload, "duplicate key #{stored.inspect} after coercion" if out.key?(stored)
+
+          out[stored] = normalize_payload(v, scrub: child_scrub, structural: child_structural)
         end
       else
         raise NonPrimitivePayload, "#{value.class} is not storable; encode it first"
@@ -352,6 +362,19 @@ module Terret
       return [true, true]   if structural && STRUCTURAL_CONTAINERS.include?(key)
 
       [true, false]
+    end
+
+    # A key scrubs exactly where its sibling leaves do: only in content scope
+    # (past the structural surface) and only when something is registered.
+    # Routed through the String arm rather than scrub_string directly, so the
+    # key is UTF-8-encoded and validated before a scrubber sees it — the same
+    # contract every value String already meets. With no scrubber registered
+    # the key is handed back untouched, so a session that never scrubs stores
+    # byte-identical keys to before.
+    def scrub_key(key, scrub, structural)
+      return key unless scrub && !structural && !@scrubbers.empty?
+
+      normalize_payload(key.to_s, scrub: true, structural: false).to_sym
     end
 
     # Fold a payload string through the registered scrubbers, checking each
