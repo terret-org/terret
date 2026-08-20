@@ -28,7 +28,7 @@ class ServerTest < Minitest::Test
 
   # -- harness ---------------------------------------------------------------
 
-  def boot(script:, extra_rows: [])
+  def boot(script:, extra_rows: [], max_agents: nil)
     Hames.reset_events!
     Terret.declare_events!
 
@@ -39,7 +39,7 @@ class ServerTest < Minitest::Test
       { id: "prompt",   plugin: Terret::Prompt },
       { id: "tools",    plugin: Terret::Tools::Registry },
       { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
-      { id: "loop",     plugin: Terret::Loop },
+      { id: "loop",     plugin: Terret::Loop, config: max_agents ? { max_agents: max_agents } : {} },
       { id: "acp",      plugin: Terret::ACP::Service },
       *extra_rows
     ])
@@ -79,11 +79,18 @@ class ServerTest < Minitest::Test
       @received = []
     end
 
+    # Finding 9: this roots the server read loop as a CHILD of `task` (so the
+    # test can drive frames concurrently), whereas Service#serve runs the read
+    # loop in the top task itself. Both root turn tasks on the top task so they
+    # outlive the read loop; the real serve topology is covered end to end by
+    # terret-acp/test/cli_test.rb.
     def serve(ctx, task)
       @reader = task.async do
         while (line = @client_in.gets)
           @received << JSON.parse(line, symbolize_names: true)
         end
+      rescue IOError
+        nil # the test closed the read end (close_reader); stop collecting
       end
       @server = task.async do
         Terret::ACP::Server.new(ctx: ctx, input: @server_in, output: @server_out,
@@ -97,6 +104,12 @@ class ServerTest < Minitest::Test
     # The editor disconnects: closing the write end EOFs the server read loop.
     def disconnect
       @client_out.close unless @client_out.closed?
+    end
+
+    # The editor closes the end it reads from, so the server's next write hits a
+    # broken pipe. Used to exercise the writer's SystemCallError rescue.
+    def close_reader
+      @client_in.close unless @client_in.closed?
     end
 
     # After a disconnect, let the server finish, then EOF the reader so the
@@ -397,5 +410,236 @@ class ServerTest < Minitest::Test
     agent = ctx[:loop].agent("agent-#{sid}")
     refute_nil agent, "a disconnect must not dispose the agent (docs/acp.md, M6 lifecycle)"
     refute_equal :done, agent.status, "the agent is parked, not torn down"
+  end
+
+  # -- the writer does not stall the shared event bus (blocking finding) ------
+
+  # An output whose write parks forever, standing in for an editor that has
+  # stopped reading. If project wrote through this directly (as it did before
+  # the bounded-queue decoupling), it would park Sessions#fan_out's drainer and
+  # stall every agent's session/event dispatch process-wide.
+  class BlockingWriter
+    attr_reader :entered
+
+    def initialize
+      @entered = false
+      @released = false
+      @held = Async::Notification.new
+    end
+
+    def write(_frame)
+      @entered = true
+      @held.wait until @released # parks every write until the test releases at teardown
+    end
+
+    def flush = nil
+
+    def release
+      @released = true
+      @held.signal
+    end
+  end
+
+  def test_a_withholding_editor_does_not_stall_another_sessions_stream
+    ctx = boot(script: [{ text: "AAAAAAAAAAAAAAAA" }, { text: "BBBBBBBBBBBBBBBB" }])
+    Sync do |task|
+      # Session A: pre-created so we can drive it without reading its (blocked)
+      # output; the server re-attaches to the live agent.
+      a = ctx[:sessions].create
+      ctx[:loop].spawn_agent(session_id: a.id)
+      a_in_r, a_in_w = IO.pipe
+      a_in_w.sync = true
+      a_out = BlockingWriter.new
+      server_a = Terret::ACP::Server.new(ctx: ctx, input: a_in_r, output: a_out, runner_task: task)
+      task.async { server_a.run }
+
+      # Session B: an ordinary duplex we read.
+      dx_b = Duplex.new
+      dx_b.serve(ctx, task)
+      sid_b = new_session(dx_b, id: 1)
+
+      # Wake A's turn; its first chunk parks A's writer (fix) — or, before the
+      # fix, the whole event-bus drainer synchronously inside project.
+      a_in_w.write("#{JSON.generate(jsonrpc: '2.0', id: 1, method: 'session/prompt',
+                                    params: { sessionId: a.id,
+                                              prompt: [{ type: 'text', text: 'go' }] })}\n")
+      await { a_out.entered } # A is parked on its blocked pipe
+
+      # The discriminating assertion: B's NOTIFICATIONS still flow. Before the
+      # fix, A parks the drainer, so B's session/update events never dispatch
+      # (its prompt response would still arrive from the turn task, but its
+      # streamed chunks would not).
+      dx_b.send(jsonrpc: "2.0", id: 2, method: "session/prompt",
+                params: { sessionId: sid_b, prompt: [{ type: "text", text: "go" }] })
+      await { dx_b.updates.any? { |u| u[:sessionUpdate] == "agent_message_chunk" } }
+      await { dx_b.response(2) }
+      assert_equal "end_turn", dx_b.response(2)[:result][:stopReason]
+    ensure
+      # A winds down gracefully: releasing the writer lets it drain, closing A's
+      # input EOFs its read loop. Then tear down B, and stop any straggler.
+      a_out&.release
+      a_in_w&.close unless a_in_w&.closed?
+      dx_b&.disconnect
+      dx_b&.drain
+      task.children.each(&:stop)
+    end
+  end
+
+  # -- a turn outlives the editor disconnecting (test gap) -------------------
+
+  def test_a_turn_completes_after_the_editor_disconnects
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) { |city:| gate.dequeue; "22C in #{city}" }
+    sid = nil
+    Sync do |task|
+      dx = Duplex.new
+      dx.serve(ctx, task)
+      sid = new_session(dx)
+
+      dx.send(jsonrpc: "2.0", id: 2, method: "session/prompt",
+              params: { sessionId: sid, prompt: [{ type: "text", text: "weather?" }] })
+      await { dx.update_kinds.include?("tool_call") } # parked in the tool
+
+      # The editor vanishes: close its read end so the writer's next frame hits
+      # a broken pipe (SystemCallError), then its write end so the read loop
+      # reaches EOF. The turn — rooted off the read loop — must still finish.
+      dx.close_reader
+      dx.disconnect
+      gate.enqueue(nil)
+
+      await { ctx[:sessions].fetch(sid).events.any? { |e| e.type == "turn/end" } }
+      task.children.each(&:stop)
+    end
+
+    turn_end = ctx[:sessions].fetch(sid).events.reverse_each.find { |e| e.type == "turn/end" }
+    assert_equal "completed", turn_end.payload[:status], "the turn ran to completion despite the disconnect"
+    agent = ctx[:loop].agent("agent-#{sid}")
+    refute_nil agent, "the agent survives a disconnect"
+    refute_equal :done, agent.status
+  end
+
+  # -- a second in-flight prompt is refused (test gap) -----------------------
+
+  def test_a_second_prompt_while_one_is_in_flight_is_refused
+    ctx = boot(script: two_step_script)
+    gate = Async::Queue.new
+    register_weather(ctx) { |city:| gate.dequeue; "22C in #{city}" }
+    Sync do |task|
+      dx = Duplex.new
+      dx.serve(ctx, task)
+      sid = new_session(dx)
+
+      dx.send(jsonrpc: "2.0", id: 2, method: "session/prompt",
+              params: { sessionId: sid, prompt: [{ type: "text", text: "weather?" }] })
+      await { dx.update_kinds.include?("tool_call") } # first turn underway
+
+      dx.send(jsonrpc: "2.0", id: 3, method: "session/prompt",
+              params: { sessionId: sid, prompt: [{ type: "text", text: "again?" }] })
+      await { dx.response(3) }
+      assert_equal(-32600, dx.response(3)[:error][:code], "a prompt already in flight is refused")
+
+      gate.enqueue(nil)
+      await { dx.response(2) }
+      assert_equal "end_turn", dx.response(2)[:result][:stopReason], "the first prompt still completes"
+      dx.disconnect
+      dx.drain
+    end
+  end
+
+  # -- an empty prompt is invalid params (test gap for finding 5) -------------
+
+  def test_a_prompt_with_no_actionable_content_is_invalid_params
+    ctx = boot(script: [])
+    Sync do |task|
+      dx = Duplex.new
+      dx.serve(ctx, task)
+      sid = new_session(dx)
+
+      # A non-empty prompt whose only block is a type we do not handle renders
+      # to no text — invalid params, not an empty turn.
+      dx.send(jsonrpc: "2.0", id: 2, method: "session/prompt",
+              params: { sessionId: sid, prompt: [{ type: "image", data: "…" }] })
+      await { dx.response(2) }
+      assert_equal(-32602, dx.response(2)[:error][:code])
+      dx.disconnect
+      dx.drain
+    end
+  end
+
+  # -- session/new past the cap leaks no durable session (finding 2) ----------
+
+  def test_session_new_past_the_agent_cap_leaks_no_durable_session
+    ctx = boot(script: [], max_agents: 1)
+    Sync do |task|
+      dx = Duplex.new
+      dx.serve(ctx, task)
+      new_session(dx, id: 1) # fills the single-agent cap
+
+      dx.send(jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/w", mcpServers: [] })
+      await { dx.response(2) }
+      assert_equal(-32603, dx.response(2)[:error][:code], "the second session/new is refused past the cap")
+
+      # The refusal spawns before it creates, so it left no orphaned durable
+      # session — exactly the one from the first session/new exists.
+      assert_equal 1, ctx[:sessions].session_ids.length
+      dx.disconnect
+      dx.drain
+    end
+  end
+
+  # -- resume/reattach synthesizes the opening tool_call (findings 3 + 8) -----
+
+  # Stage the log of a turn that died mid-tool: opened, one step, a model reply
+  # owing a weather call, its tool/call durable, no result. That is what a
+  # process death leaves behind and what resumable? recognizes.
+  def stage_open_turn(ctx)
+    session = ctx[:sessions].create
+    sid = session.id
+    ctx[:sessions].append(sid, "turn/start", { agent: "agent-#{sid}" })
+    ctx[:sessions].append(sid, "step/start", { n: 1 })
+    ctx[:sessions].append(sid, "user/message", { text: "weather?" })
+    ctx[:sessions].append(sid, "assistant/message",
+                          { parts: [Terret::LLM.encode_part(WEATHER_CALL.call)] })
+    ctx[:sessions].append(sid, "tool/call", { id: "tc1", name: "weather", args: { city: "CDMX" } })
+    ctx[:loop].spawn_agent(session_id: sid)
+    sid
+  end
+
+  def test_resume_reattach_synthesizes_a_tool_call_before_its_update
+    ctx = boot(script: [{ text: "It is 22C in CDMX." }]) # the step after the owed tool completes
+    register_weather(ctx)
+    sid = stage_open_turn(ctx)
+    Sync do |task|
+      dx = Duplex.new
+      dx.serve(ctx, task)
+
+      # A prompt against the reattached session resumes its open turn.
+      dx.send(jsonrpc: "2.0", id: 1, method: "session/prompt",
+              params: { sessionId: sid, prompt: [{ type: "text", text: "still there?" }] })
+      await { dx.response(1) }
+      assert_equal "end_turn", dx.response(1)[:result][:stopReason]
+
+      # The tool/call was durable before this connection existed, so this editor
+      # never received its tool_call — the server must synthesize one (pending)
+      # ahead of the tool_call_update, or the editor gets an update for an id it
+      # never saw opened.
+      kinds = dx.update_kinds
+      call = kinds.index("tool_call")
+      update = kinds.index("tool_call_update")
+      refute_nil call, "a tool_call was synthesized for the reattached editor"
+      assert call < update, "the synthesized tool_call precedes its update"
+
+      tool_call = dx.updates.find { |u| u[:sessionUpdate] == "tool_call" }
+      assert_equal "tc1", tool_call[:toolCallId]
+      assert_equal "weather", tool_call[:title], "the tool name is read from the log"
+      assert_equal "other", tool_call[:kind]
+
+      done = dx.updates.find { |u| u[:sessionUpdate] == "tool_call_update" }
+      assert_equal "tc1", done[:toolCallId]
+      assert_equal "completed", done[:status]
+      dx.disconnect
+      dx.drain
+    end
   end
 end

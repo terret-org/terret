@@ -275,9 +275,19 @@ The mapping Task 7 pins (`Server#stop_reason`):
   §8) — a stdio server that blocks the thread on a read would stall every
   other agent in the process, which is the one mistake this codebase
   cannot afford to make twice.
-- **One write mutex.** A streaming turn emits notifications while a
-  request/response pair is in flight. Frames must not interleave, so every
-  write goes through one serialization point.
+- **A bounded outbound queue, drained by one writer fiber.** This is the
+  decoupling terret-ws makes (ws/connection.rb), and for the same reason.
+  `session/update` is projected inside `Sessions#fan_out`'s *synchronous*
+  drainer, so a write straight to a slow editor's pipe would park that
+  drainer and stall every agent's `session/event` dispatch in the process —
+  co-mounted sockets, the titler, the compactor — with the emit queue
+  growing unbounded. Instead every producer (the projection, the read loop,
+  a turn task) enqueues a frame non-blockingly, and one writer fiber is the
+  only thing that ever parks on the pipe. That single writer is also the one
+  serialization point, so a streaming turn's notifications and a request's
+  response never interleave without a mutex. A queue that fills means the
+  editor stopped reading: its output is dropped rather than blocking the
+  bus — a lagging editor never wedges another session.
 - **Errors are JSON-RPC standard plus three.** `-32700` parse, `-32600`
   invalid request, `-32601` method not found (the answer to any method
   this server does not implement, including every v2 name), `-32602`

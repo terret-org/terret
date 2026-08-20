@@ -7,5 +7,6 @@ rescue LoadError
 end
 
 require_relative "acp/wire"
+require_relative "acp/bounded_queue"
 require_relative "acp/server"
 require_relative "acp/service"
