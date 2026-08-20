@@ -236,7 +236,8 @@ module Terret
       case value
       when Hash
         value.flat_map do |key, sub|
-          nested?(sub) ? ["#{pad}#{key}:", *yaml_lines(sub, depth + 1)] : ["#{pad}#{key}: #{scalar(sub)}"]
+          k = key_cell(key)
+          nested?(sub) ? ["#{pad}#{k}:", *yaml_lines(sub, depth + 1)] : ["#{pad}#{k}: #{scalar(sub)}"]
         end
       when Array
         value.flat_map do |sub|
@@ -252,6 +253,13 @@ module Terret
     def self.nested?(value) = (value.is_a?(Hash) || value.is_a?(Array)) && !value.empty?
 
     def self.safe(value) = Composition.one_line(value.to_s)
+
+    # A config KEY is attacker-influenceable the same way a value or a plugin
+    # name is (an explicit YAML key can carry a newline that forges a provenance
+    # line, or spell a secret), so it goes through the same one_line/redact path
+    # the values already use — not the Psych.dump `scalar` path, because a key is
+    # printed bare rather than quoted.
+    def self.key_cell(key) = Composition.one_line(Composition.redact_secrets(key.to_s))
 
     # Psych does the quoting, so a value that would reparse as a boolean, a
     # number, or a null comes back quoted. A tag renders as itself (unresolved).

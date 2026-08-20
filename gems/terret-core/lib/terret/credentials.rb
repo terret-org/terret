@@ -109,7 +109,13 @@ module Terret
       store = file_store or return nil
       entry = store[name] or return nil
 
-      decrypt(Base64.strict_decode64(entry))
+      blob = begin
+        Base64.strict_decode64(entry.to_s)
+      rescue ArgumentError
+        raise Error, "a credential store entry is not valid Base64 " \
+                     "(a truncated or corrupted store); refusing to resolve"
+      end
+      decrypt(blob)
     end
 
     def file_store
@@ -153,9 +159,14 @@ module Terret
       cipher.auth_tag = blob.byteslice(IV_LEN, TAG_LEN)
       plaintext = cipher.update(blob.byteslice(IV_LEN + TAG_LEN..) || "") + cipher.final
       plaintext.force_encoding(Encoding::UTF_8)
-    rescue OpenSSL::Cipher::CipherError => e
+    rescue OpenSSL::Cipher::CipherError, ArgumentError, TypeError => e
+      # CipherError is the wrong-key/tampered case; ArgumentError and TypeError
+      # are what a TRUNCATED blob raises before decryption even begins — an iv or
+      # auth tag of the wrong length, or a nil slice past the end of the bytes.
+      # All three mean the entry cannot be decrypted, and all three fail closed
+      # through the friendly Error rather than a raw crypto backtrace.
       raise Error, "a credential store entry failed to decrypt " \
-                   "(wrong master key or a tampered store): #{e.message}"
+                   "(wrong master key, or a truncated or tampered store): #{e.message}"
     end
   end
 end

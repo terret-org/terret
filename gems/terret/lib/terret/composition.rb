@@ -264,7 +264,12 @@ module Terret
       def refuse_collection_tag!(node, core_allowed)
         name = terret_tag(node, core_allowed) or return
 
-        raise Error, "#{@label}: !#{name} tags a scalar, not a collection"
+        # The parser bounds this name to env/setting/ruby today (a longer tag is
+        # refused earlier as an unknown tag, already clipped), so the clip is
+        # defense in depth — the same "every interpolated fragment goes through
+        # CLIP" rule the other refusals follow, so a future change upstream can
+        # not reopen an uncapped interpolation here.
+        raise Error, "#{@label}: !#{Composition.clip(name)} tags a scalar, not a collection"
       end
 
       # YAML resolves an unquoted 2026-08-19 to a Date, :fake to a Symbol, and

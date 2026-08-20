@@ -251,6 +251,24 @@ class CompositionTest < Minitest::Test
     assert_raises(C::Error) { resolve }
   end
 
+  # The collection-tag refusal is the one refusal that interpolates a tag NAME.
+  # The parser bounds that name to env/setting/ruby in practice (a longer tag
+  # routes through the already-capped "unknown config tag" refusal), so this cap
+  # is defense in depth — pinned by driving the refusal directly with an
+  # over-long name and asserting it is clipped rather than echoed whole.
+  def test_a_collection_tag_refusal_caps_the_interpolated_name
+    long = "x" * 500
+    # A Visitor whose tag classifier returns an over-long name — which the real
+    # one never does from the parser, hence a subclass rather than a fixture.
+    visitor = Class.new(C::Visitor) { define_method(:terret_tag) { |_node, _core| long } }.new("probe")
+    err = assert_raises(C::Error) do
+      visitor.send(:refuse_collection_tag!, Psych::Nodes::Mapping.new, C::CORE_MAPPING_TAGS)
+    end
+    assert_includes err.message, "tags a scalar, not a collection"
+    refute_includes err.message, long, "the over-long tag name must be clipped, not echoed whole"
+    assert_operator err.message.length, :<, long.length
+  end
+
   def test_tags_survive_resolution_unresolved_so_dump_config_can_print_them
     profile("demo", "bundles: [terret]\n")
     ENV["DEMO_KEY"] = "sk-secret"

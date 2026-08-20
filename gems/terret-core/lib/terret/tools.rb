@@ -104,6 +104,16 @@ module Terret
       def install_floor(ctx = @ctx, &predicate)
         ctx.effect do
           previous = @floor
+          # The floor is the autonomous safety mechanism, so a second install
+          # silently swapping it out is worth surfacing. Not refused — a
+          # legitimate re-mount or hot reconfigure disposes the old floor first
+          # (restoring @floor to nil) and then re-installs, so that path sees no
+          # previous floor and stays quiet; only a genuine replace-while-active
+          # warns.
+          if previous
+            warn "terret: install_floor replaced an active tool floor; the " \
+                 "deny-by-default safety floor is now the one just installed"
+          end
           @floor = predicate
           -> { @floor = previous }
         end

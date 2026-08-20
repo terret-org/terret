@@ -149,6 +149,41 @@ class CredentialsTest < Minitest::Test
                  "a two-character value must not be an active scrub pattern"
   end
 
+  # -- a corrupted store fails closed ---------------------------------------
+
+  # A store whose entry is not valid Base64 is a tampered or half-written store.
+  # It must fail closed through the friendly Error — never a raw ArgumentError
+  # from the Base64 decoder, and never plaintext — so the operator gets a
+  # message that names the store rather than a decoder backtrace.
+  def test_a_bad_base64_store_entry_raises_the_friendly_error_never_plaintext
+    Dir.mktmpdir do |dir|
+      key = OpenSSL::Random.random_bytes(32)
+      path = File.join(dir, "creds.json")
+      File.write(path, JSON.generate({ "openrouter" => "not valid base64 !!!" }))
+      ctx = creds_ctx(file: path)
+      with_env("OPENROUTER_API_KEY" => nil,
+               "TERRET_CREDENTIALS_KEY" => Base64.strict_encode64(key)) do
+        assert_raises(Terret::Credentials::Error) { ctx[:credentials].resolve(:openrouter) }
+      end
+    end
+  end
+
+  # Valid Base64, but far too few bytes to hold an iv, an auth tag, and any
+  # ciphertext — a truncated store. The cipher setup raises before it ever
+  # decrypts anything, and that too must surface as the friendly Error.
+  def test_a_truncated_store_entry_raises_the_friendly_error_never_plaintext
+    Dir.mktmpdir do |dir|
+      key = OpenSSL::Random.random_bytes(32)
+      path = File.join(dir, "creds.json")
+      File.write(path, JSON.generate({ "openrouter" => Base64.strict_encode64("short") }))
+      ctx = creds_ctx(file: path)
+      with_env("OPENROUTER_API_KEY" => nil,
+               "TERRET_CREDENTIALS_KEY" => Base64.strict_encode64(key)) do
+        assert_raises(Terret::Credentials::Error) { ctx[:credentials].resolve(:openrouter) }
+      end
+    end
+  end
+
   # -- reversibility --------------------------------------------------------
 
   def test_unloading_the_row_removes_its_scrubber

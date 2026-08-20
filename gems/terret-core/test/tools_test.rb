@@ -76,6 +76,31 @@ class ToolsRegistryTest < Minitest::Test
   # The session is harness-injected, so it must not appear on the wire: a
   # model that could see the keyword in a tool's parameters would learn that
   # sessions are addressable at all, and might start filling it in.
+  # The floor is the autonomous safety mechanism (docs/security.md). Installing
+  # the first one is ordinary; a SECOND install silently replacing it would swap
+  # out the deny-by-default gate with no trace, so a replace warns. It is not
+  # refused — a legitimate re-mount or reconfigure re-installs — only surfaced.
+  def test_installing_a_second_floor_warns_while_the_first_is_silent
+    ctx, = boot
+    _out, err1 = capture_io { ctx[:tools].install_floor(ctx) { |_call| nil } }
+    assert_empty err1, "the initial floor install must not warn"
+
+    _out, err2 = capture_io { ctx[:tools].install_floor(ctx) { |_call| nil } }
+    assert_match(/floor/, err2, "replacing an active floor must warn")
+  end
+
+  # A replace that is undone (the disposer restores the previous floor) leaves
+  # no active floor behind, so re-installing after disposal is a first install
+  # again and stays silent — which is the reconfigure path (dispose, then
+  # re-install) and must not warn on every hot policy change.
+  def test_reinstalling_after_disposing_the_floor_is_silent
+    ctx, = boot
+    disposer = ctx[:tools].install_floor(ctx) { |_call| nil }
+    disposer.call
+    _out, err = capture_io { ctx[:tools].install_floor(ctx) { |_call| nil } }
+    assert_empty err, "installing after the previous floor was disposed must not warn"
+  end
+
   def test_asking_for_the_session_does_not_change_what_the_model_is_shown
     ctx, = boot
     params = { type: "object", properties: { text: { type: "string" } }, required: ["text"] }

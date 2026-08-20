@@ -154,6 +154,29 @@ class CLITest < Minitest::Test
     assert_includes out, "Real\\nfake"
   end
 
+  # Config VALUES already go through one_line/redact, but a config KEY was
+  # interpolated raw — so a newline in an explicit config key could forge a
+  # provenance line the same way a plugin name could. dump-config renders keys
+  # control-safe too.
+  def test_dump_config_neutralizes_a_control_character_in_a_config_key
+    demo_profile
+    profile_patch("demo", %(rows:\n  - id: fs\n    config: { "a\\nforged: line": ok }\n))
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    refute_match(/^forged: line/, out, "a newline in a config key must not forge a line")
+    assert_includes out, "a\\nforged"
+  end
+
+  # A secret typed straight into a config KEY (unusual, but expressible) must be
+  # redacted the same way a secret typed into a value is — this output is pasted
+  # into issues.
+  def test_dump_config_redacts_a_secret_shaped_config_key
+    demo_profile
+    profile_patch("demo", %(rows:\n  - id: fs\n    config: { "sk-live-keyshaped-abcdef123456": v }\n))
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    refute_includes out, "sk-live-keyshaped-abcdef123456"
+    assert_includes out, "redacted"
+  end
+
   def test_dump_config_leaves_setting_references_unresolved_too
     demo_profile
     _status, out, = run_cli("dump-config", "--profile", "demo")
