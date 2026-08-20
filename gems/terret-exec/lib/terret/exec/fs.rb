@@ -122,7 +122,20 @@ module Terret
         resolved
       end
 
-      def resolve_real(expanded)
+      # The kernel gives up on a symlink chain at MAXSYMLINKS and answers ELOOP;
+      # this does the same. A LOOP (a -> b -> a) is a dangling chain that never
+      # terminates, so unbounded recursion here would blow the stack — and
+      # SystemStackError is not a StandardError, so it escapes Registry#execute's
+      # and Loop#guarded_call's rescues and kills the whole turn rather than
+      # failing closed. Capping the hops turns it into an ordinary Denied.
+      MAX_SYMLINK_HOPS = 40
+
+      def resolve_real(expanded, hops = 0)
+        if hops > MAX_SYMLINK_HOPS
+          raise Denied, "#{expanded} resolves through more than #{MAX_SYMLINK_HOPS} symlinks " \
+                        "(a loop, or a chain too long to follow)"
+        end
+
         deepest = expanded
         deepest = File.dirname(deepest) until File.exist?(deepest) || File.symlink?(deepest)
         tail = expanded[deepest.length..]
@@ -131,7 +144,7 @@ module Terret
             # Dangling symlink: resolve one hop to where it points (relative
             # targets against the link's real directory), then keep resolving
             # since the target may itself dangle, be relative, or be symlinked.
-            resolve_real(File.expand_path(File.readlink(deepest), File.realpath(File.dirname(deepest))))
+            resolve_real(File.expand_path(File.readlink(deepest), File.realpath(File.dirname(deepest))), hops + 1)
           else
             File.realpath(deepest)
           end

@@ -229,6 +229,24 @@ class FSTest < Minitest::Test
     end
   end
 
+  # -- containment: symlink LOOP --------------------------------------------
+
+  # A loop (a -> b -> a) is a dangling chain that never terminates, so
+  # #resolve_real used to recurse until it blew the stack. SystemStackError is
+  # not a StandardError, so it escapes Registry#execute's and Loop#guarded_call's
+  # rescues and kills the whole turn; the hop cap turns it into an ordinary
+  # Denied that fails closed like every other bad path.
+  def test_a_symlink_loop_is_denied_rather_than_blowing_the_stack
+    Dir.mktmpdir do |dir|
+      ctx, = boot(workspace: [dir])
+      File.symlink("b", File.join(dir, "a")) # a -> b
+      File.symlink("a", File.join(dir, "b")) # b -> a, closing the loop
+
+      assert_raises(Terret::Exec::Denied) { ctx[:fs].write(File.join(dir, "a"), "x") }
+      assert_raises(Terret::Exec::Denied) { ctx[:fs].read(File.join(dir, "a")) }
+    end
+  end
+
   # -- containment: sibling directory sharing the prefix --------------------
 
   def test_a_sibling_directory_sharing_the_prefix_is_denied
