@@ -408,14 +408,15 @@ module Terret
     # points at. A third-party gem becomes discoverable by shipping normally:
     # nothing to register, nothing to symlink.
     #
-    # The meta-gem's own terret-base is seeded from this checkout first, and an
-    # installed terret gemspec then overwrites it. So a monorepo run resolves
-    # `terret` with no gem installation, and an installed copy wins over the
-    # checkout when both are present.
+    # The meta-gem's own terret-base is seeded from this checkout, and it WINS
+    # over an installed gemspec named `terret`: terret-base is the
+    # security-deciding bundle (the deny-by-default floor, the sandboxed-by-
+    # default rows), so a stale or hostile installed `terret` must not be able to
+    # override it. That is why the checkout is seeded LAST, after the installed
+    # specs — a monorepo run still resolves `terret` with no gem installation,
+    # and when both are present the checkout answers.
     def self.discover_bundles(specs: Gem::Specification)
       found = {}
-      own = File.expand_path("../../config/bundle.yml", __dir__)
-      found["terret"] = load_bundle(own, gem_name: "terret") if File.file?(own)
 
       # Everything about a third-party gem is quarantined to that gem. A
       # malformed bundle, an unreadable file, a metadata value of the wrong
@@ -428,7 +429,16 @@ module Terret
           rel = bundle_metadata(spec)
           next unless rel.is_a?(String)
 
-          root = File.expand_path(spec.full_gem_path.to_s)
+          # A spec with no gem path used to degenerate to cwd (File.expand_path("")
+          # is the working directory), so its relative bundle.yml resolved against
+          # cwd and the containment check below passed for whatever the process was
+          # sitting next to. Refuse an empty or non-existent root outright.
+          gem_root = spec.full_gem_path.to_s
+          next if gem_root.empty?
+
+          root = File.expand_path(gem_root)
+          next unless File.directory?(root)
+
           file = File.expand_path(rel, root)
           # A gem describes its own bundle, not somebody else's file.
           next unless file.start_with?("#{root}/") && File.file?(file)
@@ -438,6 +448,9 @@ module Terret
           Bundle.broken(gem_name: spec.name, path: file || "(unresolved)", error: e)
         end
       end
+
+      own = File.expand_path("../../config/bundle.yml", __dir__)
+      found["terret"] = load_bundle(own, gem_name: "terret") if File.file?(own)
       found
     end
 

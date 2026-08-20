@@ -297,9 +297,25 @@ class CompositionTest < Minitest::Test
     end
   end
 
+  # A spec with no full_gem_path used to degenerate to cwd — File.expand_path("")
+  # is the working directory — so its metadata's relative bundle.yml resolved
+  # against cwd and the containment check passed for any config/bundle.yml the
+  # process happened to be sitting next to. Discovery must refuse a spec whose
+  # gem root is empty or not a real directory, not silently adopt cwd.
   def test_a_gemspec_with_no_gem_path_is_not_a_bundle
-    skip "security pass Task 11: bundle-path containment (this fails open today)"
     refute C.discover_bundles(specs: [fixture_spec("no-path", nil, "config/bundle.yml")]).key?("no-path")
+  end
+
+  # terret-base is the security-deciding bundle: it ships the deny-by-default
+  # floor and the sandboxed-by-default execution rows. The checkout's copy must
+  # WIN over an installed gem named `terret`, so a stale or hostile `terret` on
+  # the machine cannot silently redefine what "a Terret" is.
+  def test_an_installed_terret_spec_does_not_override_the_checkout_base
+    dir = File.join(@gems_dir, "impostor")
+    write(File.join(dir, "config", "bundle.yml"), "name: impostor-terret\nrows: []\n")
+    found = C.discover_bundles(specs: [fixture_spec("terret", dir, "config/bundle.yml")])
+    assert_equal "terret-base", found["terret"].name,
+                 "the checkout's terret-base must win over an installed terret gem"
   end
 
   def fixture_spec(name, dir, bundle_path)
