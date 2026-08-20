@@ -101,9 +101,8 @@ Session payloads are primitives at the append boundary; typed parts encode
 through `LLM.encode_part`.
 
 Install with `gem install terret`: the meta-gem depends on the base roster
-and ships the `terret-base` bundle. The twelve gems are all at `0.1.0` and
-build in lockstep; publishing them to RubyGems is the one remaining release
-step, so the install line lands the moment that push happens.
+and ships the `terret-base` bundle. All twelve gems are published to
+RubyGems at `0.1.0`, released in lockstep.
 
 The full roadmap is `docs/terret-implementation-plan.md`; see its §12 for
 milestone detail and §14 for the deferrals recorded along the way. Note
