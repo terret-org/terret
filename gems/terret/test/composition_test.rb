@@ -331,6 +331,16 @@ class CompositionTest < Minitest::Test
     spec
   end
 
+  # A row id names the row in dump-config's provenance column and doctor's
+  # table. A newline or ANSI escape smuggled into a patch row id could forge or
+  # erase a provenance line, so the id shape is validated at resolution.
+  def test_a_row_id_carrying_a_control_character_is_refused
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", %(rows:\n  - id: "bad\\ninjected: forged"\n    plugin: X::Y\n    after: sessions\n))
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "valid id"
+  end
+
   # -- home ------------------------------------------------------------------
 
   def test_terret_home_overrides_the_default_dotfile_directory

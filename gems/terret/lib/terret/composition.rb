@@ -129,6 +129,32 @@ module Terret
       true
     end
 
+    # Render a value safe to print in a one-line table cell or provenance column:
+    # control characters — a newline forging a fake row, an ANSI escape
+    # rewriting the terminal — become visible escapes. dump-config and doctor
+    # both print row ids, plugin names, and layer labels that can originate in a
+    # patch file, so both pass identifiers through here.
+    def self.one_line(str)
+      str.to_s.gsub(/[\u0000-\u001f\u007f]/) do |c|
+        { "\n" => "\\n", "\t" => "\\t", "\r" => "\\r" }[c] || format("\\x%02x", c.ord)
+      end
+    end
+
+    # Well-known secret shapes, matching terret-base's redactor defaults. Used to
+    # redact a LITERAL secret typed into a config value where a human-facing
+    # command would otherwise print it in full (dump-config). Detection of known
+    # shapes, not a guarantee (docs/security.md).
+    SECRET_SHAPES = [
+      /sk-[A-Za-z0-9_-]{16,}/,
+      /gh[pousr]_[A-Za-z0-9]{20,}/,
+      /AKIA[0-9A-Z]{16}/,
+      /xox[baprs]-[A-Za-z0-9-]{10,}/
+    ].freeze
+
+    def self.redact_secrets(str)
+      SECRET_SHAPES.reduce(str.to_s) { |s, shape| s.gsub(shape, "[redacted]") }
+    end
+
     # -- parsing ---------------------------------------------------------------
 
     # YAML.safe_load DROPS a local tag silently: permitted_classes gates
@@ -585,11 +611,23 @@ module Terret
       ordered
     end
 
+    # A row id addresses a row in a patch and names it in dump-config's
+    # provenance column and doctor's table (docs/composition.md §1, §9, §10). It
+    # is letters, digits and .-_ — the same shape a profile name takes — so a
+    # newline or ANSI escape cannot be smuggled into one to forge or erase a
+    # provenance line in either command's output.
+    ROW_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+
     def self.apply_row(ordered, index, label, kind, raw)
       raise Error, "#{label}: a config row must be a mapping, got #{raw.class}" unless raw.is_a?(Hash)
 
       id = raw[:id].to_s
       raise Error, "#{label}: a config row must have an id" if id.empty?
+      unless ROW_ID.match?(id)
+        raise Error, "#{label}: row id #{id.inspect} is not a valid id; a row id is letters, " \
+                     "digits and .-_ (it names the row in dump-config and doctor, so it may not " \
+                     "carry newlines or control characters)"
+      end
 
       if (existing = index[id])
         replace(ordered, index, label, existing, raw)

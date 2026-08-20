@@ -202,16 +202,20 @@ module Terret
       lines = [["# resolved: profile #{resolved.profile.inspect}", nil], ["rows:", nil]]
 
       resolved.rows.each do |row|
-        lines << ["  - id: #{row.id}", "row: #{row.row_layer}"]
+        # Row ids are validated at resolution, but plugin names (constant paths)
+        # and layer labels (bundle names, --patch paths) are not — so every
+        # identifier printed here goes through one_line, and a newline in one
+        # cannot forge a row or a provenance line in this output.
+        lines << ["  - id: #{safe(row.id)}", "row: #{safe(row.row_layer)}"]
         # Annotated only when a later layer swapped it, so the annotation means
         # "somebody changed this" rather than being visual noise on every row.
         swapped = row.plugin_layer unless row.plugin_layer == row.row_layer
-        lines << ["    plugin: #{row.plugin}", swapped && "plugin: #{swapped}"]
+        lines << ["    plugin: #{safe(row.plugin)}", swapped && "plugin: #{safe(swapped)}"]
         lines << ["    disabled: true", nil] if row.disabled
         if row.config.empty?
-          lines << ["    config: {}", "config: #{row.config_layer}"]
+          lines << ["    config: {}", "config: #{safe(row.config_layer)}"]
         else
-          lines << ["    config:", "config: #{row.config_layer}"]
+          lines << ["    config:", "config: #{safe(row.config_layer)}"]
           yaml_lines(row.config, 3).each { |l| lines << [l, nil] }
         end
       end
@@ -247,13 +251,19 @@ module Terret
 
     def self.nested?(value) = (value.is_a?(Hash) || value.is_a?(Array)) && !value.empty?
 
+    def self.safe(value) = Composition.one_line(value.to_s)
+
     # Psych does the quoting, so a value that would reparse as a boolean, a
-    # number, or a null comes back quoted. A tag renders as itself.
+    # number, or a null comes back quoted. A tag renders as itself (unresolved).
+    # A LITERAL string value is the one way a real secret reaches this output —
+    # !env/!setting stay tags — so a secret-shaped literal is redacted, and any
+    # control characters are neutralized so a value cannot forge a line either.
     def self.scalar(value)
-      return value.to_s if value.is_a?(Composition::Tagged)
+      return safe(value) if value.is_a?(Composition::Tagged)
       return "{}" if value == {}
       return "[]" if value == []
 
+      value = Composition.one_line(Composition.redact_secrets(value)) if value.is_a?(String)
       body = Psych.dump(value).delete_prefix("---").sub(/\n\z/, "").strip
       body.empty? ? "~" : body
     end

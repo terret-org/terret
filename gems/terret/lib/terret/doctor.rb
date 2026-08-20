@@ -122,30 +122,36 @@ module Terret
       out.puts "# doctor: profile #{resolved.profile.inspect}"
       out.puts
       if settings_error
-        out.puts "error  #{settings_error}"
+        out.puts "error  #{Composition.one_line(settings_error)}"
         out.puts
       end
 
+      # Row ids are validated at resolution, but plugin names, error details,
+      # env markers and file paths are not — a newline in any of them could
+      # forge a table row, so every printed value goes through one_line. Widths
+      # are computed on the neutralized plugin so the table stays aligned.
+      plugins = results.to_h { |r| [r[:id], Composition.one_line(r[:plugin])] }
       row_w = [results.map { |r| r[:id].length }.max || 3, 3].max
-      plugin_w = [results.map { |r| r[:plugin].length }.max || 6, 6].max
+      plugin_w = [plugins.values.map(&:length).max || 6, 6].max
       out.puts "#{'row'.ljust(row_w)}  #{'plugin'.ljust(plugin_w)}  status"
       results.each do |r|
-        out.puts "#{r[:id].ljust(row_w)}  #{r[:plugin].ljust(plugin_w)}  #{status_text(r)}"
+        out.puts "#{r[:id].ljust(row_w)}  #{plugins[r[:id]].ljust(plugin_w)}  #{status_text(r)}"
       end
 
       info = info_lines(resolved, load_failures)
       return if info.empty?
 
       out.puts
-      info.each { |line| out.puts "info  #{line}" }
+      info.each { |line| out.puts "info  #{Composition.one_line(line)}" }
     end
 
     def self.status_text(result)
+      detail = Composition.one_line(result[:detail].to_s)
       text = case result[:status]
              when :ok then "ok"
              when :unschema then "unschema'd"
-             when :warn then "warn: #{result[:detail]}"
-             when :error then "error: #{result[:detail]}"
+             when :warn then "warn: #{detail}"
+             when :error then "error: #{detail}"
              end
       result[:disabled] ? "#{text}  (disabled)" : text
     end

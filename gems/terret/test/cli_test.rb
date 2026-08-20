@@ -132,6 +132,28 @@ class CLITest < Minitest::Test
     ENV.delete("OPENROUTER_API_KEY")
   end
 
+  # !env/!setting stay unresolved here, but a LITERAL secret typed straight into
+  # a config value is a plain scalar and used to print in full — and this output
+  # exists to be pasted into an issue. A secret-shaped literal is redacted.
+  def test_dump_config_redacts_a_literal_secret_typed_into_a_value
+    demo_profile
+    profile_patch("demo", %(rows:\n  - id: llm\n    config: { api_key: "sk-live-literal-abcdef123456" }\n))
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    refute_includes out, "sk-live-literal-abcdef123456"
+    assert_includes out, "redacted"
+  end
+
+  # Row ids are validated at resolution, but a plugin NAME is printed verbatim
+  # and never validated (it is a constant path with ::). A newline in a patched
+  # plugin: could forge a provenance line; dump-config renders it control-safe.
+  def test_dump_config_neutralizes_a_control_character_in_a_plugin_name
+    demo_profile
+    profile_patch("demo", %(rows:\n  - id: sessions\n    plugin: "Ok::Real\\nfake: forged"\n))
+    _status, out, = run_cli("dump-config", "--profile", "demo")
+    refute_match(/^fake: forged/, out)
+    assert_includes out, "Real\\nfake"
+  end
+
   def test_dump_config_leaves_setting_references_unresolved_too
     demo_profile
     _status, out, = run_cli("dump-config", "--profile", "demo")
@@ -257,6 +279,15 @@ class CLITest < Minitest::Test
     assert_includes out, "evil_doctor.rb"
   ensure
     $evil_doctor_ran = nil
+  end
+
+  # doctor prints a plugin name into its table and, when the constant does not
+  # resolve, into the error detail. A newline in a patched plugin: could forge a
+  # table row; doctor renders both control-safe.
+  def test_doctor_neutralizes_a_control_character_in_a_plugin_name
+    profile_patch(demo_profile, %(rows:\n  - id: sessions\n    plugin: "Ok::Real\\nfake row forged"\n))
+    _status, out, = run_cli("doctor", "--profile", "demo")
+    refute_match(/^fake row forged/, out)
   end
 
   # A bad !ruby in a ROW is attributed to that row and does not abort the run;
