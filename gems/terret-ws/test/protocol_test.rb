@@ -8,6 +8,7 @@ require "json"
 ASYNC_AVAILABLE = begin
   require "async"
   require "async/queue"
+  require "async/semaphore"
   true
 rescue LoadError
   false
@@ -125,11 +126,12 @@ class ProtocolTest < Minitest::Test
     ->(agent) { root.async { ctx[:loop].resume_turn(agent) } }
   end
 
-  def connect(ctx, agent, root, queue_limit: 256)
+  def connect(ctx, agent, root, queue_limit: 256, replay_limit: nil, replay_gate: nil)
     sock = FakeSocket.new
     conn = Terret::WS::Connection.new(ctx: ctx, agent: agent, io: sock,
                                       runner: runner(ctx, root), resumer: resumer(ctx, root),
-                                      queue_limit: queue_limit)
+                                      queue_limit: queue_limit, replay_limit: replay_limit,
+                                      replay_gate: replay_gate)
     conn_task = root.async { conn.run }
     [sock, conn, conn_task]
   end
@@ -453,6 +455,105 @@ class ProtocolTest < Minitest::Test
       await { sock.events.any? { |f| f[:type] == "turn/end" } }
       sock.client_close
     end
+  end
+
+  # -- replay caps (M8 §9.4) -------------------------------------------------
+
+  # A from_seq reaching further back than replay_limit events behind the tip
+  # must not force an unbounded read+replay: only the newest replay_limit
+  # events come back, and the client is told where its window actually begins
+  # so it never believes it holds history it was never sent.
+  def test_a_subscribe_beyond_the_replay_limit_replays_only_the_newest_and_says_so
+    ctx = boot(script: [])
+    agent, session = spawn_agent(ctx)
+    # session/created is seq 0; twenty messages make the tip seq 20.
+    20.times { |i| ctx[:sessions].append(session.id, "user/message", { text: "m#{i}" }) }
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task, replay_limit: 5)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      await { sock.events.size >= 5 }
+      sleep 0.02 # let an unbounded replay (the bug) spill its extra events
+
+      seqs = sock.events.map { |f| f[:seq] }
+      assert_equal (16..20).to_a, seqs, "only the newest replay_limit events replay"
+
+      trunc = sock.protocol_frames.find { |f| f[:type] == "replay_truncated" }
+      refute_nil trunc, "the client is told, in a frame it can see, that its replay was capped"
+      assert_equal 0, trunc[:requested_from_seq]
+      assert_equal 16, trunc[:from_seq], "the honest start of the replayed window"
+      sock.client_close
+    end
+  end
+
+  # The cap is a ceiling, not a floor: a replay that fits under replay_limit is
+  # gapless from from_seq and carries no truncation signal.
+  def test_a_subscribe_within_the_replay_limit_is_not_truncated
+    ctx = boot(script: [])
+    agent, session = spawn_agent(ctx)
+    5.times { |i| ctx[:sessions].append(session.id, "user/message", { text: "m#{i}" }) }
+
+    Sync do |task|
+      sock, = connect(ctx, agent, task, replay_limit: 100)
+      sock.client_send(type: "subscribe", from_seq: 0)
+      await { sock.events.size >= 6 } # created + five messages
+
+      assert_equal (0..5).to_a, sock.events.map { |f| f[:seq] }
+      assert_empty sock.protocol_frames.select { |f| f[:type] == "replay_truncated" }
+      sock.client_close
+    end
+  end
+
+  # Records how many replay reads sit inside the store at once. sleep is a real
+  # reactor yield, so absent a gate every concurrent subscribe piles into read
+  # together -- which is what lets the test prove the barrier is genuine and
+  # not sequential-by-accident.
+  class CountingStore < Terret::Store::Memory
+    class << self
+      attr_accessor :inside, :high_water
+      def reset!
+        self.inside = 0
+        self.high_water = 0
+      end
+    end
+
+    def read(session_id, from_seq: 0)
+      self.class.inside += 1
+      self.class.high_water = [self.class.high_water, self.class.inside].max
+      sleep 0.05
+      super
+    ensure
+      self.class.inside -= 1
+    end
+  end
+
+  def run_concurrent_replays(gate_limit:, connections:)
+    CountingStore.reset!
+    ctx = boot(script: [], store: CountingStore)
+    agents = Array.new(connections) { spawn_agent(ctx) }
+    gate = Async::Semaphore.new(gate_limit)
+
+    Sync do |task|
+      socks = agents.map do |agent, _session|
+        sock, = connect(ctx, agent, task, replay_gate: gate)
+        sock.client_send(type: "subscribe", from_seq: 0)
+        sock
+      end
+      # every subscribe has finished its one replay read
+      await { CountingStore.inside.zero? && socks.all? { |s| s.events.any? } }
+      socks.each(&:client_close)
+    end
+    CountingStore.high_water
+  end
+
+  # A reconnect storm must not become N concurrent full-history reads: one
+  # shared gate parks the surplus fibers until a slot frees.
+  def test_the_replay_gate_bounds_concurrent_log_reads
+    # genuine overlap: given room for all six, every read is inside at once --
+    # so a bounded high-water later is the gate at work, not accidental order.
+    assert_equal 6, run_concurrent_replays(gate_limit: 6, connections: 6)
+    # the cap: no more than its limit are ever reading the log together.
+    assert_equal 2, run_concurrent_replays(gate_limit: 2, connections: 6)
   end
 
   def test_cancel_racing_a_tool_result_keeps_the_result_and_cancels_the_turn

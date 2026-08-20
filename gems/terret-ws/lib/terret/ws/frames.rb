@@ -74,6 +74,16 @@ module Terret
         h[:message] = message if message
         JSON.generate(h)
       end
+
+      # Honest truncation: a subscribe reaching further back than the server's
+      # replay_limit gets only the newest window, and this frame tells the
+      # client the seq its replay actually begins at (`from_seq`) versus the one
+      # it asked for (`requested_from_seq`), so it never believes it holds the
+      # history in between. Sent before that window's first event.
+      def replay_truncated(requested_from_seq:, from_seq:)
+        JSON.generate(type: "replay_truncated", requested_from_seq: requested_from_seq,
+                      from_seq: from_seq)
+      end
     end
   end
 end

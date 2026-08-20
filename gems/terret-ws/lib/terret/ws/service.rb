@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "openssl"
+require "async/semaphore"
 require_relative "connection"
 
 module Terret
@@ -16,13 +17,24 @@ module Terret
                                    doc: "token => agent-id map authorizing socket connections" },
                     queue_limit: { type: Integer, default: 256,
                                    doc: "max frames buffered per connection before backpressure" },
-                    heartbeat:   { type: Numeric, default: 20, doc: "seconds between server heartbeats" }
+                    heartbeat:   { type: Numeric, default: 20, doc: "seconds between server heartbeats" },
+                    replay_limit: { type: Integer, default: 10_000,
+                                    doc: "max events replayed on one subscribe; a from_seq reaching " \
+                                         "further back gets the newest replay_limit and a replay_truncated frame" },
+                    max_concurrent_replays: { type: Integer, default: 4,
+                                              doc: "max subscribe replays reading the log at once; " \
+                                                   "surplus connections park until a slot frees" }
 
       def start(ctx)
         @ctx = ctx
         @tokens = config[:tokens] || {}
         @queue_limit = config[:queue_limit] || 256
         @heartbeat = config[:heartbeat] || 20
+        @replay_limit = config[:replay_limit] || 10_000
+        # One shared gate across every connection is what makes the cap global;
+        # it is created once and its limit adjusted in place (never replaced),
+        # or old and new connections would each get their own allowance.
+        @replay_gate = Async::Semaphore.new(config[:max_concurrent_replays] || 4)
         @connections = {}
       end
 
@@ -30,6 +42,8 @@ module Terret
         @tokens = config[:tokens] || {}
         @queue_limit = config[:queue_limit] || 256
         @heartbeat = config[:heartbeat] || 20
+        @replay_limit = config[:replay_limit] || 10_000
+        @replay_gate.limit = config[:max_concurrent_replays] || 4
         revoke_stale_connections
       end
 
@@ -67,7 +81,8 @@ module Terret
         @connections[sid]&.shutdown(code: "superseded")
         conn = Connection.new(ctx: @ctx, agent: agent, io: io,
                               runner: runner(runner_task), resumer: resumer(runner_task),
-                              queue_limit: @queue_limit, token: token)
+                              queue_limit: @queue_limit, token: token,
+                              replay_limit: @replay_limit, replay_gate: @replay_gate)
         @connections[sid] = conn
         conn.run
       ensure

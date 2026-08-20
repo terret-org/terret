@@ -226,4 +226,6 @@ No configurable keys.
 | `tokens` | Hash |  | `{}` | token => agent-id map authorizing socket connections |
 | `queue_limit` | Integer |  | `256` | max frames buffered per connection before backpressure |
 | `heartbeat` | Numeric |  | `20` | seconds between server heartbeats |
+| `replay_limit` | Integer |  | `10000` | max events replayed on one subscribe; a from_seq reaching further back gets the newest replay_limit and a replay_truncated frame |
+| `max_concurrent_replays` | Integer |  | `4` | max subscribe replays reading the log at once; surplus connections park until a slot frees |
 

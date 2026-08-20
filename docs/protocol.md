@@ -45,6 +45,13 @@ ISO8601 with microseconds. Event types and payloads are the durable set in
   connect, before anything else. `last_seq` is the highest seq in the log at
   that moment (`session/created` guarantees at least 0). Nothing streams until
   the client subscribes.
+- `{"type":"replay_truncated","requested_from_seq":0,"from_seq":5001}` — sent
+  when a `subscribe` reached further back than the server's `replay_limit`
+  (below). `requested_from_seq` is what the client asked for; `from_seq` is the
+  seq its replay actually begins at. The client is missing everything in
+  `[requested_from_seq, from_seq)` and must not treat this stream as holding it.
+  Sent before that window's first event, so a client that sees it knows its
+  first replayed event is not the one it asked for.
 - `{"type":"error","code":"...","message":"..."}` — codes:
   - `unauthorized` — bad or missing token; connection closes.
   - `superseded` — a newer connection took over this agent; connection closes.
@@ -90,6 +97,29 @@ still arrive before the new replay's first event — that is inherent to a
 full-duplex transport, not a server defect. A client that resubscribes
 mid-stream should discard incoming events until it sees `seq == from_seq`
 (the first event of its new replay).
+
+**Replay is capped.** A single `subscribe` never triggers an unbounded
+history read. The server bounds one reconnect's replay at `replay_limit`
+events (config, default 10000): a `from_seq` reaching further back than that
+many events behind the tip is pulled forward to the newest `replay_limit`
+window, and the server sends a `replay_truncated` frame (above) naming the seq
+the replay actually starts at *before* that window's first event. The
+replayed window is still gapless and duplicate-free and tails live with no
+gap — the cap moves only where the window *starts*, and that move is always
+signaled, never silent. A client that needs the skipped history must read it
+from a durable store out of band; the socket will not resend it. So a
+reconnecting client that has been away a long time should expect its
+subscribe to be capped rather than assume it can recover the whole log over
+the wire.
+
+**Concurrent replays are capped.** Across all connections the server runs at
+most `max_concurrent_replays` replay reads at once (config, default 4). A
+reconnect storm — the predictable failure mode after a deploy — therefore
+does not become N simultaneous log reads; surplus connections wait their turn
+for a replay slot (the connection is held open, not rejected) and proceed as
+slots free. Only the log read is gated, not the live tail, so a slow client
+draining its replay never holds a slot away from another reconnect. Combined
+with jittered client backoff, this keeps a thundering herd off the store.
 
 ### inject
 

@@ -18,7 +18,7 @@ class ServiceTest < Minitest::Test
     skip "async not installed" unless ASYNC_AVAILABLE
   end
 
-  def boot(script:, tokens:, loop_config: {})
+  def boot(script:, tokens:, loop_config: {}, ws_config: {})
     Hames.reset_events!
     Terret.declare_events!
 
@@ -30,7 +30,7 @@ class ServiceTest < Minitest::Test
       { id: "tools",    plugin: Terret::Tools::Registry },
       { id: "llm",      plugin: Terret::LLM::Service, config: { roles: { main: "fake/scripted" } } },
       { id: "loop",     plugin: Terret::Loop, config: loop_config },
-      { id: "ws",       plugin: Terret::WS::Service, config: { tokens: tokens } }
+      { id: "ws",       plugin: Terret::WS::Service, config: { tokens: tokens, **ws_config } }
     ])
     ctx = loader.boot!
     ctx[:llm].register_adapter("fake", Terret::LLM::FakeAdapter.new(script))
@@ -161,6 +161,32 @@ class ServiceTest < Minitest::Test
       refute sock2.closed?, "a session whose token did not change keeps its connection"
       sock2.client_close
       [t1, t2].each(&:wait)
+    end
+  end
+
+  # The configured replay_limit reaches the connections attach builds: a
+  # subscribe reaching past it replays only the newest window and says so.
+  def test_attach_honors_the_configured_replay_limit
+    ctx, = boot(script: [], tokens: { "s1" => "secret" }, ws_config: { replay_limit: 3 })
+
+    Sync do |task|
+      # stage a log longer than the cap before anyone connects
+      ctx[:sessions].create(id: "s1")
+      8.times { |i| ctx[:sessions].append("s1", "user/message", { text: "m#{i}" }) }
+
+      sock = FakeSocket.new
+      t = task.async { ctx[:ws].attach(session_id: "s1", token: "secret", io: sock) }
+      await { sock.written.any? { |f| f[:type] == "hello" } }
+      sock.client_send(type: "subscribe", from_seq: 0)
+      await { sock.written.any? { |f| f[:type] == "replay_truncated" } }
+
+      trunc = sock.written.find { |f| f[:type] == "replay_truncated" }
+      assert_equal 0, trunc[:requested_from_seq]
+      assert_equal 6, trunc[:from_seq], "tip 8 minus replay_limit 3 plus 1"
+      events = sock.written.select { |f| f.key?(:seq) }
+      assert_equal [6, 7, 8], events.map { |f| f[:seq] }
+      sock.client_close
+      t.wait
     end
   end
 

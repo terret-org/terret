@@ -25,7 +25,7 @@ module Terret
       MAX_PATTERN_LENGTH = 256
 
       def initialize(ctx:, agent:, io:, runner:, resumer: ->(_agent) {}, queue_limit: 256,
-                     token: nil)
+                     token: nil, replay_limit: nil, replay_gate: nil)
         @ctx = ctx
         @agent = agent
         @token = token
@@ -34,6 +34,8 @@ module Terret
         @resumer = resumer # ->(agent) { re-enter the log's open turn, same rooting }
         @sid = agent.session_id
         @queue_limit = queue_limit
+        @replay_limit = replay_limit
+        @replay_gate = replay_gate
         @queue = BoundedQueue.new(queue_limit)
         @tail = nil
         @live = false
@@ -127,7 +129,12 @@ module Terret
       def handle_subscribe(from_seq)
         @tail&.call
         @live = false
-        @floor = from_seq
+        # The replay window may start later than the client asked: a from_seq
+        # reaching further back than replay_limit is capped to the newest
+        # window, and the client is told (capped_start). The floor tracks the
+        # real start so the live tail stays contiguous with what was replayed.
+        start_seq = capped_start(from_seq)
+        @floor = start_seq
         buffered = []
         @tail = @ctx.on("session/event") do |ev|
           next unless ev.session_id == @sid && ev.seq >= @floor
@@ -146,10 +153,10 @@ module Terret
           shutdown(code: "internal")
         end
 
-        replayed = sessions.read(@sid, from_seq: from_seq)
+        replayed = read_history(start_seq)
         return unless replay(replayed)
 
-        last = replayed.empty? ? from_seq - 1 : replayed.last.seq
+        last = replayed.empty? ? start_seq - 1 : replayed.last.seq
         until buffered.empty?
           batch = buffered.select { |ev| ev.seq > last }.sort_by(&:seq)
           buffered.clear
@@ -158,6 +165,36 @@ module Terret
           last = batch.last.seq unless batch.empty?
         end
         @live = true
+      end
+
+      # Bound a single reconnect's replay. tip comes from the in-memory working
+      # set (O(1), no store read), so the cap is decided before any history is
+      # touched: a from_seq more than replay_limit events behind the tip is
+      # pulled forward to the newest replay_limit window, and the client is told
+      # where that window really begins so it does not believe it holds the
+      # skipped history. Without a replay_limit the client's from_seq stands.
+      def capped_start(from_seq)
+        return from_seq unless @replay_limit
+
+        tip = sessions.fetch(@sid).events.last&.seq || -1
+        return from_seq if tip - from_seq + 1 <= @replay_limit
+
+        start_seq = tip - @replay_limit + 1
+        push_frame(Frames.replay_truncated(requested_from_seq: from_seq, from_seq: start_seq))
+        start_seq
+      end
+
+      # Read the replay window under the shared concurrency gate: at most
+      # max_concurrent_replays of these run at once, the rest park their fiber
+      # (never the reactor) until a slot frees, so a reconnect storm cannot turn
+      # into N simultaneous log reads. The gate wraps only the read — the
+      # expensive, resource-bound step (plan §9.4) — so a slow client draining
+      # its replay never holds a slot and starves other reconnects. Absent a
+      # gate the read runs straight through.
+      def read_history(from_seq)
+        return sessions.read(@sid, from_seq: from_seq) unless @replay_gate
+
+        @replay_gate.acquire { sessions.read(@sid, from_seq: from_seq) }
       end
 
       # Replay runs in the connection's own fiber, so it waits for the writer
