@@ -126,6 +126,13 @@ never in the kernel or core.
 
 - `docs/terret-implementation-plan.md` — the full roadmap and design
   rationale.
+- `docs/hames-primer.md` — the kernel on its own terms: services in a
+  context, reversible effects, the four dispatch modes, config rows and
+  reconfigure, and `Hames::Schema`. No LLM or agent vocabulary, because the
+  kernel has none.
+- `docs/cookbook/` — worked, end-to-end recipes for building on Terret:
+  adding a tool, adding a provider, adding a bundle. Start at
+  `docs/cookbook/README.md`.
 - `docs/protocol.md` — the WebSocket wire contract (`terret-ws`).
 - `docs/acp.md` — the Agent Client Protocol mapping (`terret-acp`).
 - `docs/mcp.md` — the MCP tool-source mapping (`terret-mcp`).
