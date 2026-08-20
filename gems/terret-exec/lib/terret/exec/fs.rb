@@ -70,16 +70,27 @@ module Terret
         { size: s.size, mtime: s.mtime.utc.iso8601, directory: s.directory? }
       end
 
-      # Pattern is joined against every granted root in turn. A match is kept
-      # only if realpath-ing it (following whatever symlink the glob turned
-      # up) still lands inside the workspace, so a symlinked entry can never
+      # Pattern is joined against every granted root in turn, then each match is
+      # containment-checked (#within_workspace?) so a symlinked entry can never
       # leak an outside path through the listing.
       def glob(pattern)
         @workspace.flat_map { |root| Dir.glob(File.join(root, pattern)) }
-                  .select { |p| contained?(File.realpath(p)) }
+                  .select { |p| within_workspace?(p) }
       end
 
       private
+
+      # A glob match is kept only if realpath-ing it (following whatever symlink
+      # the glob turned up) still lands inside the workspace. A dangling symlink
+      # (Errno::ENOENT) or a symlink loop (Errno::ELOOP) resolves to nothing this
+      # can contain, so it is dropped — quietly, rather than letting File.realpath's
+      # Errno turn the whole listing (and the Grep built on it) into a hard failure
+      # just because one bad symlink exists in the workspace.
+      def within_workspace?(path)
+        contained?(File.realpath(path))
+      rescue SystemCallError
+        false
+      end
 
       # A granted root must itself already exist, and is realpath'd up front
       # for the same reason every op's target is: on macOS in particular,

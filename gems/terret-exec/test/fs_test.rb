@@ -125,6 +125,22 @@ class FSTest < Minitest::Test
     end
   end
 
+  # A dangling symlink is an ordinary directory entry, so Dir.glob lists it, and
+  # File.realpath then raises Errno::ENOENT following it to a missing target.
+  # Left unhandled that turns Glob — and Grep, which is built on it — into a hard
+  # error the moment any dangling symlink exists in the workspace (a plant-a-
+  # symlink search DoS). The entry is skipped; the real matches beside it stand.
+  def test_glob_skips_a_dangling_symlink_rather_than_failing_the_whole_listing
+    Dir.mktmpdir do |dir|
+      ctx, = boot(workspace: [dir])
+      ctx[:fs].write(File.join(dir, "real.rb"), "")
+      File.symlink(File.join(dir, "missing-target"), File.join(dir, "dangling.rb")) # dangling
+
+      matches = ctx[:fs].glob("*.rb")
+      assert_equal [File.join(File.realpath(dir), "real.rb")], matches
+    end
+  end
+
   # -- containment: absolute path outside the workspace ----------------------
 
   def test_an_absolute_path_outside_the_workspace_is_denied
