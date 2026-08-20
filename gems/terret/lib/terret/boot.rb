@@ -73,6 +73,22 @@ module Terret
     # A bundle's requires first, then the profile's own `plugins:` — code that
     # is not a bundle loads last so it can reopen what a bundle defined.
     def require_code!
+      # A bundle's requires: ship inside a gem the operator added to the Gemfile
+      # and installed, so they are trusted and may name a path to their own lib.
+      # A profile's plugins: is portable config a profile "downloaded from
+      # anywhere" (docs/composition.md §5) carries, so a path-shaped one there is
+      # arbitrary code execution — gated behind the same --allow-config-ruby
+      # consent as !ruby. Validate up front so a bad path fails before any
+      # require has run a line of code.
+      resolved.plugins.each do |file|
+        next if allow_config_ruby || Composition.load_path_feature?(file)
+
+        raise Error, "profile #{resolved.profile.inspect} refuses to require #{file.inspect}: " \
+                     "it is a filesystem path, not a load-path feature name. Loading Ruby by " \
+                     "path is arbitrary code execution; pass --allow-config-ruby to permit it " \
+                     "(docs/composition.md §5, docs/security.md)."
+      end
+
       (resolved.requires + resolved.plugins).each do |file|
         require file
       rescue LoadError => e

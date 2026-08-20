@@ -110,6 +110,25 @@ module Terret
       def row(id) = rows.find { |r| r.id == id.to_s }
     end
 
+    # A require target from requires:/plugins: is either a load-path FEATURE
+    # NAME (`terret/exec`, resolved through $LOAD_PATH, which Bundler populates
+    # only from gems the operator installed) or a filesystem PATH (`/opt/evil`,
+    # `../evil`, `./evil`, `~/evil`). Loading Ruby by path is code execution with
+    # a YAML extension — the same thing !ruby gates behind --allow-config-ruby
+    # (§5, docs/security.md). A bundle legitimately names feature names; only a
+    # path can reach code the operator never installed, so a path is what the
+    # consent gate is for. True for a feature name (safe to require without
+    # consent), false for anything path-shaped.
+    def self.load_path_feature?(file)
+      s = file.to_s
+      return false if s.empty?
+      return false if s.start_with?("/", "~", "./", "../")
+      return false if File.absolute_path?(s)      # a Windows drive letter, a UNC path
+      return false if s.split("/").include?("..") # traversal in a deeper segment
+
+      true
+    end
+
     # -- parsing ---------------------------------------------------------------
 
     # YAML.safe_load DROPS a local tag silently: permitted_classes gates

@@ -233,6 +233,32 @@ class CLITest < Minitest::Test
     refute_match(/String\s+unschema'd/, out)
   end
 
+  # doctor is the SAFE preview: it "validates config, not the world"
+  # (docs/composition.md §9). It must not run a profile's requires to do its
+  # job, or `trt doctor` on an untrusted profile — the documented safe way to
+  # inspect one before booting — is itself arbitrary code execution. A
+  # path-shaped require is reported, never executed, without --allow-config-ruby.
+  def test_doctor_does_not_execute_a_path_shaped_profile_require
+    evil = File.join(@home_dir, "evil_doctor.rb")
+    File.write(evil, "$evil_doctor_ran = true\n")
+    profile("demo", <<~YAML)
+      bundles: [terret]
+      plugins:
+        - #{evil}
+      settings:
+        workspace: []
+        store: { path: /tmp/demo.db }
+        model: { main: openrouter/some/model }
+        sandbox: { image: demo:latest }
+    YAML
+
+    _status, out, = run_cli("doctor", "--profile", "demo")
+    refute $evil_doctor_ran, "doctor must not require a filesystem path from a profile"
+    assert_includes out, "evil_doctor.rb"
+  ensure
+    $evil_doctor_ran = nil
+  end
+
   # A bad !ruby in a ROW is attributed to that row and does not abort the run;
   # boot-level !ruby is covered elsewhere, this locks the per-row doctor path.
   def test_doctor_attributes_a_bad_ruby_scalar_to_its_row

@@ -268,6 +268,34 @@ class BootTest < Minitest::Test
     assert_includes err.message, "terret/no_such_file"
   end
 
+  # plugins:/requires: run `require` at boot, so an absolute or traversing PATH
+  # there is arbitrary code execution — the very thing --allow-config-ruby gates
+  # for !ruby (docs/composition.md §5, docs/security.md). A load-path feature
+  # name is legitimate; a filesystem path is refused without consent, and the
+  # file is never required.
+  def test_boot_refuses_a_path_shaped_plugin_require_without_consent
+    name = offline_profile
+    evil = File.join(@workspace, "evil_plugin.rb")
+    File.write(evil, "$evil_plugin_ran = true\n")
+    profile(name, <<~YAML)
+      bundles: [terret]
+      plugins:
+        - #{evil}
+      settings:
+        workspace: [#{@workspace}]
+        store: { path: unused }
+        model: { main: fake/scripted }
+        sandbox: { image: unused }
+    YAML
+
+    err = assert_raises(Terret::Boot::Error) { boot(name) }
+    assert_match(/filesystem path|allow-config-ruby/, err.message)
+    assert_includes err.message, evil
+    refute $evil_plugin_ran, "a refused require must never execute the file"
+  ensure
+    $evil_plugin_ran = nil
+  end
+
   # -- home ------------------------------------------------------------------
 
   def test_the_home_keyword_wins_over_terret_home

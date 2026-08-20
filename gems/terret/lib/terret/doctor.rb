@@ -21,7 +21,7 @@ module Terret
     # Returns a process exit status: 1 when an enabled row's config is wrong,
     # 0 otherwise.
     def self.run(resolved, allow_config_ruby: false, out:)
-      load_failures = require_code(resolved)
+      load_failures = require_code(resolved, allow_config_ruby)
       # Settings resolve once, but a bad !setting/!ruby in settings: must not
       # abort the whole run and hide the row table. It becomes its own error
       # line; rows then materialize against empty settings, so any !setting in a
@@ -42,12 +42,28 @@ module Terret
     # not abort doctor. It surfaces as an info line for the file, and as the
     # per-row "does not resolve" error for every class that file would define —
     # which is more useful than a single aborted run.
-    def self.require_code(resolved)
-      (resolved.requires + resolved.plugins).filter_map do |file|
+    #
+    # doctor is the SAFE preview — "validates config, not the world" — so a
+    # path-shaped require in a profile's plugins: (portable config from anywhere)
+    # is NOT executed to do that job: it surfaces as a load failure the same way
+    # a missing feature does, keeping `trt doctor <untrusted profile>` from being
+    # arbitrary code execution. A bundle's requires: ship inside an installed gem
+    # and are trusted (they may name a path to their own lib);
+    # --allow-config-ruby is the operator's consent to load a profile path too,
+    # exactly as at boot.
+    def self.require_code(resolved, allow_config_ruby)
+      refused, permitted = resolved.plugins.partition do |file|
+        !allow_config_ruby && !Composition.load_path_feature?(file)
+      end
+      failures = (resolved.requires + permitted).filter_map do |file|
         require file
         nil
       rescue LoadError => e
         [file, e.message]
+      end
+      failures + refused.map do |file|
+        [file, "refused: a filesystem path, not a load-path feature name; doctor does " \
+               "not execute untrusted requires — pass --allow-config-ruby to load it"]
       end
     end
 
