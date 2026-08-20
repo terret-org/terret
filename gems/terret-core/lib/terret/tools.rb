@@ -22,6 +22,7 @@ module Terret
       def start(ctx)
         @ctx = ctx
         @defs = {}
+        @floor = nil
       end
 
       # Returns the registration's disposer. The roster itself stays global
@@ -63,6 +64,18 @@ module Terret
         admitted = ctx.waterfall("tools/pre_execute", call)
         return Result.new(id: call.id, content: nil, error: admitted.reason) if admitted.is_a?(Veto)
 
+        # The deny-by-default floor is AUTHORITATIVE. It runs here — on the
+        # exact call the pre_execute waterfall admitted, rewrites included —
+        # not as a waterfall listener a sibling could register ahead of and
+        # short-circuit past. A pre_execute listener can make policy stricter
+        # (a Veto above), never looser: it cannot admit a tool the floor
+        # denies, because that admission never reaches execution. This is the
+        # autonomous safety mechanism (docs/security.md); a listener from a
+        # third-party bundle must not be able to defeat it.
+        if @floor && (veto = @floor.call(admitted)).is_a?(Veto)
+          return Result.new(id: call.id, content: nil, error: veto.reason)
+        end
+
         result = ctx.waterfall("tools/execute", admitted) do |c|
           begin
             d = fetch(c.name)
@@ -74,6 +87,26 @@ module Terret
           end
         end
         ctx.waterfall("tools/post_execute", result)
+      end
+
+      # Install the authoritative deny-by-default floor. The floor is a single
+      # predicate #execute consults on the admitted call, deliberately NOT a
+      # tools/pre_execute listener: a listener is a peer another row's listener
+      # can register ahead of and short-circuit past (the mount-pass bypass
+      # that defeated the floor), whereas this gate sees the call that will
+      # actually run and its Veto is final. The predicate answers a Veto to
+      # deny and anything else to admit. Recorded as an effect of the mounting
+      # row (ctx defaults to the Registry's own root), so unloading that row
+      # removes the floor; a second install replaces the first and disposal
+      # restores whatever it replaced. Only one floor is active — the
+      # deny-by-default policy is one floor, with per-session and per-agent
+      # variation layered above it (policy/updated and per-fork AllowLists).
+      def install_floor(ctx = @ctx, &predicate)
+        ctx.effect do
+          previous = @floor
+          @floor = predicate
+          -> { @floor = previous }
+        end
       end
 
       private
@@ -124,46 +157,24 @@ module Terret
     # never updated. Patterns are File.fnmatch globs; matching is
     # case-sensitive and "*" does not match dotfiles — both fail closed.
     module AllowList
+      # A per-agent (or per-context) allow list as a tools/pre_execute listener.
+      # This is the right shape for an agent's OWN policy: it rides the agent's
+      # fork and can only make the effective policy STRICTER (a veto here stops
+      # the call). It is deliberately NOT the authoritative floor — a listener
+      # is a peer another listener can order itself ahead of. For the
+      # deny-by-default floor that no row's listener may bypass, see
+      # #install_floor.
       def self.install(ctx, patterns)
         floor = Array(patterns).map(&:to_s)
-
-        # Per-install, never global: this cache is a closure local of THIS
-        # install, so a forked agent scope or a hot policy swap that installs
-        # its own AllowList gets its own cache. Two installs sharing one would
-        # leak one agent's policy into another's — the cross-agent bleed this
-        # milestone closed. Keyed by session id; the value is the patterns from
-        # that session's last policy/updated, or nil for "no policy yet, fall
-        # to the floor" (nil is cached too, so a never-updated session also
-        # stops rescanning the log).
-        cache = {}
-
+        cache = new_cache
         pre = ctx.on("tools/pre_execute") do |call, next_|
-          active = active_patterns(ctx, call.session_id, cache) || floor
-          if active.any? { |p| File.fnmatch(p, call.name) }
+          if admits?(ctx, call, floor, cache)
             next_.(call)
           else
             Veto.new(reason: "#{call.name} is not on the allow list")
           end
         end
-
-        # Log-first invalidation. The cache is a read-through of the durable
-        # log, never a second source of truth, so the ONLY write besides a
-        # miss is a policy/updated landing in the log. session/event is emitted
-        # on the context that mounts Sessions — the root of the fork chain, NOT
-        # this forked ctx — and a fork-registered listener would never see it,
-        # so we listen on root. Lifetime still follows the fork: wrapping
-        # root.on in ctx.effect records the teardown as an effect of THIS
-        # context, so disposing the agent (Loop#dispose_agent -> fork.dispose!)
-        # reaps the root listener too, and it also rides the composite disposer
-        # below. Fan-out is synchronous and in seq order, so update's append has
-        # refreshed the entry before the next call reads it.
-        root = ctx
-        root = root.parent while root.parent
-        inval = ctx.effect do
-          root.on("session/event") do |ev|
-            cache[ev.session_id] = ev.payload[:patterns] if ev.type == "policy/updated"
-          end
-        end
+        inval = install_invalidation(ctx, cache)
 
         # Composite: tear the gate and its invalidation down together. Both are
         # already recorded as effects of this context (so fork.dispose! reaps
@@ -171,6 +182,68 @@ module Terret
         lambda do
           pre.call
           inval.call
+        end
+      end
+
+      # The authoritative deny-by-default floor (docs/composition.md §6,
+      # docs/security.md). It runs the SAME per-session, hot-reloadable decision
+      # as #install, but wired into ctx[:tools] as the Registry's floor gate
+      # rather than as a tools/pre_execute listener. That placement is the whole
+      # point: the floor mounts in a later loader pass than a no-inject row, so
+      # as a listener it sat BEHIND that row's listener in the waterfall and a
+      # listener that admitted a call without delegating short-circuited past
+      # it. As the gate, it runs after the waterfall on the call that will
+      # actually execute, so no listener any row registers can bypass it.
+      def self.install_floor(ctx, patterns)
+        floor = Array(patterns).map(&:to_s)
+        cache = new_cache
+        gate = ctx[:tools].install_floor(ctx) do |call|
+          Veto.new(reason: "#{call.name} is not on the allow list") unless admits?(ctx, call, floor, cache)
+        end
+        inval = install_invalidation(ctx, cache)
+
+        lambda do
+          gate.call
+          inval.call
+        end
+      end
+
+      # The shared decision, used by both the per-agent listener and the floor
+      # gate: does the ACTIVE policy for this call's session admit its tool
+      # name? Patterns are File.fnmatch globs; matching is case-sensitive and
+      # "*" does not match dotfiles — both fail closed.
+      def self.admits?(ctx, call, floor, cache)
+        active = active_patterns(ctx, call.session_id, cache) || floor
+        active.any? { |p| File.fnmatch(p, call.name) }
+      end
+
+      # Per-install, never global: a fresh cache is a closure local of THIS
+      # install, so a forked agent scope, a hot policy swap, and the floor each
+      # get their own. Two installs sharing one would leak one agent's policy
+      # into another's — the cross-agent bleed this milestone closed. Keyed by
+      # session id; the value is the patterns from that session's last
+      # policy/updated, or nil for "no policy yet, fall to the floor" (nil is
+      # cached too, so a never-updated session also stops rescanning the log).
+      def self.new_cache = {}
+
+      # Log-first invalidation. The cache is a read-through of the durable log,
+      # never a second source of truth, so the ONLY write besides a miss is a
+      # policy/updated landing in the log. session/event is emitted on the
+      # context that mounts Sessions — the root of the fork chain, NOT a forked
+      # ctx — and a fork-registered listener would never see it, so we listen on
+      # root. Lifetime still follows the caller: wrapping root.on in ctx.effect
+      # records the teardown as an effect of THIS context, so disposing the
+      # agent (Loop#dispose_agent -> fork.dispose!) reaps the root listener too,
+      # and it also rides the composite disposer the callers return. Fan-out is
+      # synchronous and in seq order, so update's append has refreshed the entry
+      # before the next call reads it.
+      def self.install_invalidation(ctx, cache)
+        root = ctx
+        root = root.parent while root.parent
+        ctx.effect do
+          root.on("session/event") do |ev|
+            cache[ev.session_id] = ev.payload[:patterns] if ev.type == "policy/updated"
+          end
         end
       end
 
@@ -224,7 +297,7 @@ module Terret
                                 doc: "tool-name globs the deny-by-default floor permits" }
 
       def start(ctx)
-        AllowList.install(ctx, config[:patterns] || [])
+        AllowList.install_floor(ctx, config[:patterns] || [])
       end
     end
   end
