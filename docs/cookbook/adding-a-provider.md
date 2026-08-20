@@ -227,9 +227,11 @@ doctor listing it would invite someone to set it in YAML.
 ## 6. The test
 
 With the transport injectable, a provider test is a fake transport, a boot,
-and assertions on both what went over the wire and what came back. This is
-`terret-morph`'s own test, and it is the template (`gems/terret-morph/test/
-summarizer_test.rb`):
+and assertions on both what went over the wire and what came back. The
+example below is **adapted from** `terret-morph`'s own test and abridged for
+the page — the real file (`gems/terret-morph/test/summarizer_test.rb`) walks
+six decline cases and richer wire assertions than the two shown here — but the
+shape is the template:
 
 ```ruby
 # frozen_string_literal: true

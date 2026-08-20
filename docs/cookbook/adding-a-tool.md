@@ -4,7 +4,8 @@ This is a complete worked example: an empty gem to a tool a Terret agent
 can call, with honest metadata and a test. The running example is
 `terret-fortune` — a `fortune` tool that returns one line from a vendored
 list — and it is small on purpose, so the shape shows through. Everything
-here is a real gem; `terret-fortune` ships as its own repository, and this
+here is a real, runnable gem; `terret-fortune` will ship as its own
+repository (Task 10 publishes it, and keeps this page in lockstep), and this
 page is that repository made generic.
 
 Read `docs/hames-primer.md` first if the words *service*, *effect*, and

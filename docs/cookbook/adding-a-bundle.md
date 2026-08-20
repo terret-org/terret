@@ -114,19 +114,32 @@ Terret::Composition.discover_bundles
 ```
 
 Three properties of discovery are worth knowing before you rely on it, all
-of them in the source and pinned by `gems/terret/test/composition_test.rb`:
+grounded in the source of `discover_bundles`
+(`gems/terret/lib/terret/composition.rb`):
 
-- **It quarantines what it finds.** A gem whose `bundle.yml` does not parse,
-  or whose metadata points at a file outside its own gem directory, becomes
-  a *broken entry* rather than an exception — one that only a profile
-  *naming* it ever sees. One bad gem in the Gemfile must not take out every
-  profile on the machine, so discovery does not raise (`docs/composition.md`
-  §2). A profile that names a broken bundle fails closed, with the parse
-  error.
-- **A gem describes its own bundle, not somebody else's file.** The resolved
-  path must sit inside the gem's own directory; a metadata value of
-  `../outside.yml` is refused. This is a real check in `discover_bundles`,
-  not a convention.
+- **A bundle that cannot parse becomes a broken entry, not a crash.** A
+  gem whose `bundle.yml` does not parse — a `StandardError` inside
+  `load_bundle` — is caught and turned into a `Bundle.broken` entry rather
+  than an exception; a profile that never names it never sees it, and one
+  that *does* name it fails closed at resolve with a "could not be read"
+  error carrying the parse failure. One bad gem in the Gemfile must not take
+  out every profile on the machine (`docs/composition.md` §2). This is
+  pinned by `test_a_gemspec_that_makes_no_sense_is_not_a_bundle_and_not_a_crash`
+  (which also allows a thoroughly malformed metadata value to be simply
+  absent rather than broken — either way, never a usable bundle).
+- **A path that resolves outside the gem's own directory is silently
+  excluded — not broken.** The `next unless file.start_with?("#{root}/")`
+  guard aborts the entry before it is added to the catalog, so a metadata
+  value like `../outside.yml` leaves the gem *absent* from discovery,
+  indistinguishable from a gem shipping no `terret` metadata at all — a
+  profile naming it gets the generic "unknown bundle; discovered: …" message,
+  not the broken-entry error. That is a different failure mode from the parse
+  case above, and worth not conflating. Treat this as best-effort rather than
+  a security boundary: it is a string-prefix check, and full bundle-path
+  containment is a known gap for a later security pass (Task 11) that **fails
+  open today** — the case of a gemspec reporting no gem path at all is left
+  `skip`ped in the suite (`test_a_gemspec_with_no_gem_path_is_not_a_bundle`,
+  marked "bundle-path containment (this fails open today)").
 - **The monorepo checkout is seeded first, then an installed gem wins.**
   `terret-base` is loaded from the checkout so a monorepo run resolves
   `terret` with no gem installation, and an installed `terret` gemspec
