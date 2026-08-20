@@ -18,7 +18,7 @@ module Terret
   # can drive it in-process with captured IO. exe/trt is the one caller that
   # turns the status into an exit.
   module CLI
-    COMMANDS = %w[boot dump-config doctor].freeze
+    COMMANDS = %w[boot dump-config doctor acp].freeze
 
     USAGE = <<~TXT
       Usage: trt <command> [options]
@@ -28,6 +28,9 @@ module Terret
         dump-config    print the resolved rows, annotated with the layer that
                        contributed each one; secrets stay unresolved
         doctor         resolve a profile and report on its rows without booting
+        acp            compose a profile and serve the Agent Client Protocol
+                       on stdio, so an editor can drive an agent; stdout carries
+                       only ACP frames and diagnostics go to stderr
 
       Options:
         -p, --profile NAME       profile to compose (required)
@@ -40,11 +43,11 @@ module Terret
 
     Options = Struct.new(:command, :profile, :patches, :home, :allow_config_ruby)
 
-    def self.start(argv = ARGV, out: $stdout, err: $stderr)
+    def self.start(argv = ARGV, out: $stdout, err: $stderr, input: $stdin)
       opts = parse(argv, out: out, err: err)
       return opts if opts.is_a?(Integer)
 
-      dispatch(opts, out: out, err: err)
+      dispatch(opts, out: out, err: err, input: input)
     rescue Composition::Error => e
       # Boot failures are caught in .boot, which is also the only command that
       # needs boot.rb — this file must not name a constant from the file that
@@ -63,11 +66,12 @@ module Terret
       130
     end
 
-    def self.dispatch(opts, out:, err:)
+    def self.dispatch(opts, out:, err:, input: $stdin)
       case opts.command
       when "boot" then boot(opts, out: out, err: err)
       when "dump-config" then dump_config(opts, out: out)
       when "doctor" then Doctor.run(resolve(opts), allow_config_ruby: opts.allow_config_ruby, out: out)
+      when "acp" then acp(opts, out: out, err: err, input: input)
       end
     end
 
@@ -138,6 +142,41 @@ module Terret
       # booted world — its container, its bash, its open database. A boot that
       # got as far as a live context is always torn down; a Terret.boot that
       # never returned leaves ctx nil and nothing to shut down.
+      Boot.shutdown(ctx) if ctx
+    end
+
+    # -- acp -------------------------------------------------------------------
+
+    # Boot a profile and serve the Agent Client Protocol on stdio, so an editor
+    # can drive an agent (docs/acp.md). The one hard rule of this wire is that
+    # stdout carries ONLY ACP frames: diagnostics go to `err` (stderr), never
+    # `out`, and `serve` blocks on the reactor until the editor closes the pipe.
+    # The IO trio is injectable so a test drives the whole subcommand over an
+    # in-memory pipe; `exe/trt` passes $stdout/$stderr/$stdin.
+    def self.acp(opts, out:, err:, input:)
+      require_relative "boot"
+      ctx = nil
+      ctx = Terret.boot(profile: opts.profile, home: opts.home, patches: opts.patches,
+                        allow_config_ruby: opts.allow_config_ruby)
+      unless ctx.service?(:acp)
+        err.puts "trt: profile #{opts.profile.inspect} mounts no acp row to serve"
+        return 1
+      end
+
+      err.puts "trt: profile #{opts.profile.inspect} is up; serving ACP on stdio. Interrupt to stop."
+      err.flush
+      ctx[:acp].serve(input: input, output: out)
+      0
+    rescue Interrupt
+      err.puts "trt: interrupted"
+      130
+    rescue StandardError => e
+      err.puts "trt: acp failed: #{e.class}: #{e.message}"
+      1
+    ensure
+      # The same teardown boot does, and for the same reason: a serve that
+      # returned on EOF, or raised, must still take its container, its bash, and
+      # its open database down. A Terret.boot that never returned leaves ctx nil.
       Boot.shutdown(ctx) if ctx
     end
 

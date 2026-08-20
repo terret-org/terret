@@ -97,6 +97,16 @@ class CLITest < Minitest::Test
     assert_includes err, "nope"
   end
 
+  # acp is a registered command (else this would be "unknown command"), and it
+  # needs a profile like the others. Serving over stdio is exercised end to end
+  # in terret-acp's cli_test; here we only pin the routing.
+  def test_acp_is_a_known_command_that_needs_a_profile
+    status, _out, err = run_cli("acp")
+    assert_equal 2, status
+    assert_includes err, "--profile"
+    assert_includes Terret::CLI::COMMANDS, "acp"
+  end
+
   # -- dump-config -----------------------------------------------------------
 
   def test_dump_config_annotates_every_row_with_the_layer_that_contributed_it

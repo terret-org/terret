@@ -1,6 +1,6 @@
 # Terret
 
-Ruby-native, model-agnostic agent harness where everything is a plugin. Eleven gems in one
+Ruby-native, model-agnostic agent harness where everything is a plugin. Twelve gems in one
 repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible effects,
@@ -21,6 +21,10 @@ repo:
 - `gems/terret-ws` is the v1 interface (M4): one WebSocket per agent behind `ctx[:ws]`,
   the §9.2 frames, exact replay-then-tail on the session log; wire contract in
   `docs/protocol.md`; only the real endpoint requires `async-websocket`.
+- `gems/terret-acp` is the second interface (M8): an Agent Client Protocol server behind
+  `ctx[:acp]` so an editor can drive an agent over JSON-RPC on stdio. It consumes
+  `session/event` and drives `ctx[:loop]` — the same two seams the socket does, on a
+  different transport, with no change to core; mapping in `docs/acp.md`. stdlib-only.
 - `gems/terret-mcp` is the MCP client (M5): manceps-backed stdio and streamable-HTTP
   servers mounted as `mcp__<server>__<tool>` sources behind `ctx[:tools]`, per-server
   approval, per-call timeouts, the allow list in terret-core; mapping in `docs/mcp.md`.

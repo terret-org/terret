@@ -7,7 +7,7 @@ guide any horse. **Hames** is the kernel underneath (the load-bearing pieces
 of the harness): services in a context, typed events with four dispatch
 modes, reversible effects, dependency-driven boot.
 
-Eleven gems in one repo:
+Twelve gems in one repo:
 
 - `gems/hames` is the kernel. Services in a context, typed events, reversible
   effects, dependency-driven boot. It knows nothing about LLMs and is
@@ -28,6 +28,11 @@ Eleven gems in one repo:
   `ctx[:ws]`, the wire frames, exact replay-then-tail on the session log; the
   wire contract is in `docs/protocol.md`; only the real endpoint requires
   `async-websocket`.
+- `gems/terret-acp` is the second interface: an Agent Client Protocol server
+  behind `ctx[:acp]` so an editor can drive an agent over JSON-RPC on stdio.
+  It consumes `session/event` and drives `ctx[:loop]` — the same two seams the
+  socket does, on a different transport, with no change to core; mapping in
+  `docs/acp.md`. stdlib-only, no network gem.
 - `gems/terret-mcp` is the MCP client: manceps-backed stdio and
   streamable-HTTP servers mounted as `mcp__<server>__<tool>` sources behind
   `ctx[:tools]`, per-server approval, per-call timeouts, the allow list in
@@ -62,7 +67,8 @@ Eleven gems in one repo:
   the harness, the model seam, the execution world sandboxed with the
   network denied, the standard tool roster, and a policy floor that starts
   closed), the `headless` profile template, and `trt boot` /
-  `trt dump-config` / `trt doctor`. Contract in `docs/composition.md`.
+  `trt dump-config` / `trt doctor` / `trt acp`. Contract in
+  `docs/composition.md`.
 
 ## Status
 
@@ -97,6 +103,7 @@ rake test              # all suites, plain minitest, no bundler needed
 rake events:catalog    # regenerates docs/events.md
 rake config:catalog    # regenerates docs/config-catalog.md
 trt doctor --profile headless   # validate a profile's config without booting
+trt acp --profile headless      # serve the Agent Client Protocol on stdio for an editor
 ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
@@ -118,6 +125,7 @@ never in the kernel or core.
 - `docs/terret-implementation-plan.md` — the full roadmap and design
   rationale.
 - `docs/protocol.md` — the WebSocket wire contract (`terret-ws`).
+- `docs/acp.md` — the Agent Client Protocol mapping (`terret-acp`).
 - `docs/mcp.md` — the MCP tool-source mapping (`terret-mcp`).
 - `docs/exec.md` — the execution world: the seams, workspace scoping, the
   sandbox, the std tool roster, and redaction.

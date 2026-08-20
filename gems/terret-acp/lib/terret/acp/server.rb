@@ -58,6 +58,11 @@ module Terret
 
           dispatch(text)
         end
+      rescue IOError
+        # The input was closed under us (the editor process died mid-read)
+        # rather than reaching a clean EOF; either way there is nothing more to
+        # read, so end the loop the same as EOF.
+        nil
       ensure
         # EOF disposes the connection, NOT the agents (docs/acp.md): they stay
         # in the loop registry, parked per the M6 lifecycle, and re-attach
