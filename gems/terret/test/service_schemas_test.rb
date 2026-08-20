@@ -23,9 +23,20 @@ class ServiceSchemasTest < Minitest::Test
 
   def test_docker_sandbox_schemas_its_image_network_and_workspace
     keys = schema(Terret::Sandbox::Docker).keys
-    assert_equal %i[image network workspace user docker_bin], keys.keys
+    assert_equal %i[image network workspace user docker_bin memory cpus pids], keys.keys
     assert_equal [String, Array], keys[:workspace].type
     assert_equal "none", keys[:network].default
+  end
+
+  def test_docker_sandbox_schemas_optional_resource_limits
+    keys = schema(Terret::Sandbox::Docker).keys
+    assert_equal String, keys[:memory].type
+    assert_equal [String, Numeric], keys[:cpus].type
+    assert_equal Integer, keys[:pids].type
+    %i[memory cpus pids].each do |k|
+      refute keys[k].required, "#{k} must be optional"
+      assert_nil keys[k].default, "#{k} defaults to absent (no limit)"
+    end
   end
 
   def test_web_fetch_schemas_config_but_not_its_injectable_seams

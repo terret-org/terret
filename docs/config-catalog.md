@@ -164,6 +164,9 @@ No configurable keys.
 | `workspace` | String or Array |  | — | host directory root(s) mounted into the container |
 | `user` | String |  | — | container user (default: the host uid:gid); nil runs as root |
 | `docker_bin` | String |  | — | path to the docker binary (default: resolved from PATH) |
+| `memory` | String |  | — | docker --memory limit (e.g. 256m, 1g); unset means no limit |
+| `cpus` | String or Numeric |  | — | docker --cpus limit (e.g. 1.5); unset means no limit |
+| `pids` | Integer |  | — | docker --pids-limit, the container's max process count; unset means no limit |
 
 ## terret-store-sqlite — `Terret::Store::SQLite` (`session_store`)
 

@@ -600,4 +600,74 @@ class SandboxDockerTest < Minitest::Test
       assert_nil sandbox.container
     end
   end
+
+  # -- resource limits, without a daemon --------------------------------------
+  #
+  # Records the actual `docker run` argv by stubbing capture: run_container!
+  # builds the real argv (resource limits and all) and hands the stub a fake id,
+  # so the flags are provable without spinning a container. The docker-gated
+  # live tests above still exercise a real run.
+  class RunArgvRecordingDocker < Terret::Sandbox::Docker
+    attr_reader :run_argv
+
+    def capture(argv)
+      @run_argv = argv
+      [0, "#{'0' * 64}\n"]
+    end
+  end
+
+  def boot_recording(workspace:, **overrides)
+    Hames.reset_events!
+    Terret.declare_events!
+    loader = Hames::Loader.new
+    config = { image: IMAGE, network: "none", workspace: Array(workspace) }.merge(overrides)
+    loader.layer([{ id: "sandbox", plugin: RunArgvRecordingDocker, config: config }])
+    loader.boot![:sandbox]
+  end
+
+  # The value that immediately follows a flag in the argv, or nil if the flag is
+  # absent — so a test can assert "--memory 256m" without pinning the flags' order.
+  def flag_value(argv, flag)
+    i = argv.index(flag)
+    i && argv[i + 1]
+  end
+
+  def test_resource_limits_map_to_docker_run_flags
+    workspace do |ws|
+      sandbox = boot_recording(workspace: ws, memory: "256m", cpus: "1.5", pids: 100)
+      sandbox.workspace_ready!
+      argv = sandbox.run_argv
+
+      assert_equal "256m", flag_value(argv, "--memory")
+      assert_equal "1.5", flag_value(argv, "--cpus")
+      assert_equal "100", flag_value(argv, "--pids-limit"), "pids maps to docker's --pids-limit"
+    end
+  end
+
+  # Absent by default: an unset limit adds no flag at all, so the container runs
+  # unconstrained exactly as it did before this row existed.
+  def test_no_resource_limits_means_no_limit_flags
+    workspace do |ws|
+      sandbox = boot_recording(workspace: ws)
+      sandbox.workspace_ready!
+      argv = sandbox.run_argv
+
+      refute_includes argv, "--memory"
+      refute_includes argv, "--cpus"
+      refute_includes argv, "--pids-limit"
+    end
+  end
+
+  # Each limit is independent: setting one must not conjure the others.
+  def test_a_single_limit_adds_only_its_own_flag
+    workspace do |ws|
+      sandbox = boot_recording(workspace: ws, memory: "512m")
+      sandbox.workspace_ready!
+      argv = sandbox.run_argv
+
+      assert_equal "512m", flag_value(argv, "--memory")
+      refute_includes argv, "--cpus"
+      refute_includes argv, "--pids-limit"
+    end
+  end
 end

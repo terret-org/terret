@@ -82,7 +82,13 @@ module Terret
                                   doc: "host directory root(s) mounted into the container" },
                     user:       { type: String,
                                   doc: "container user (default: the host uid:gid); nil runs as root" },
-                    docker_bin: { type: String, doc: "path to the docker binary (default: resolved from PATH)" }
+                    docker_bin: { type: String, doc: "path to the docker binary (default: resolved from PATH)" },
+                    memory:     { type: String,
+                                  doc: "docker --memory limit (e.g. 256m, 1g); unset means no limit" },
+                    cpus:       { type: [String, Numeric],
+                                  doc: "docker --cpus limit (e.g. 1.5); unset means no limit" },
+                    pids:       { type: Integer,
+                                  doc: "docker --pids-limit, the container's max process count; unset means no limit" }
 
       # Debian-based, and chosen for what it carries rather than for Ruby:
       # ctx[:shell] spawns `bash` (the sentinel protocol is a bash protocol),
@@ -318,7 +324,7 @@ module Terret
         end
 
         argv = [docker_bin, "run", "-d", "--rm", "--label", LABEL, "--network", network,
-                *(user ? ["--user", user] : []), *mounts, image, "sleep", "infinity"]
+                *resource_limits, *(user ? ["--user", user] : []), *mounts, image, "sleep", "infinity"]
         status, out = capture(argv)
         raise ContainerUnavailable, "docker run failed (status #{status.inspect}): #{out}" unless status&.zero?
 
@@ -331,6 +337,20 @@ module Terret
       # worked around, because the alternative (`--mount`) trades a colon
       # problem for a comma problem.
       def mounts = @workspace.flat_map { |dir| ["-v", "#{dir}:#{dir}"] }
+
+      # Optional caps on what a container may consume, each mapping to the docker
+      # run flag of the same intent and each absent by default — an unset key
+      # adds no flag, so the container runs unconstrained unless a profile asks
+      # otherwise. This bounds the blast radius a `sandbox: none` profile has
+      # none of (docs/security.md): a wedged or hostile process in the container
+      # is held to the memory, CPU and pid budget the row granted it.
+      def resource_limits
+        flags = []
+        flags.push("--memory", config[:memory].to_s) if config[:memory]
+        flags.push("--cpus", config[:cpus].to_s) if config[:cpus]
+        flags.push("--pids-limit", config[:pids].to_s) if config[:pids]
+        flags
+      end
 
       # `docker run -d` prints the id on stdout, but a run that had to pull
       # first prints progress too, and this capture merges the streams. Picking
