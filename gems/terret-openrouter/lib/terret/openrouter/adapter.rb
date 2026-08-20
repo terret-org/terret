@@ -12,13 +12,16 @@ module Terret
       DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 
       def initialize(api_key: nil, base_url: DEFAULT_BASE_URL, referer: nil,
-                     title: nil, transport: nil, **retry_opts)
+                     title: nil, transport: nil, credentials: nil, **retry_opts)
         super(**retry_opts)
         @api_key = api_key
         @base_url = base_url.chomp("/")
         @referer = referer
         @title = title
         @transport = transport
+        # An optional resolver callable (the row wires it to ctx[:credentials]),
+        # consulted lazily at request time so mount order never matters.
+        @credentials = credentials
       end
 
       def stream(request, &on_event)
@@ -66,7 +69,13 @@ module Terret
       end
 
       def request_headers
-        key = @api_key || ENV["OPENROUTER_API_KEY"]
+        # Precedence: an explicit config key, then the credentials resolver
+        # (itself ENV-first, then an encrypted store), then the adapter's own
+        # last-resort ENV read so the gem stays usable with no credentials
+        # service mounted.
+        key = @api_key
+        key ||= @credentials.call if @credentials
+        key ||= ENV["OPENROUTER_API_KEY"]
         unless key
           raise LLM::AdapterError, "no OpenRouter API key (set OPENROUTER_API_KEY or pass api_key:)"
         end

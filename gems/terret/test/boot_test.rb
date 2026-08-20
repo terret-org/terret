@@ -148,7 +148,7 @@ class BootTest < Minitest::Test
   def test_the_whole_terret_base_roster_is_mounted_and_addressable
     ctx = boot
     %i[session_store sessions prompt tools llm sandbox subprocess fs shell
-       terminals jobs subagents loop redactor allow_list].each do |key|
+       terminals jobs subagents loop credentials redactor allow_list].each do |key|
       assert ctx.service?(key), "ctx[:#{key}] should be mounted by terret-base"
     end
     assert_equal %w[Bash Edit Glob Grep Read Task TodoWrite WebFetch Write

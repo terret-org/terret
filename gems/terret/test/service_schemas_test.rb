@@ -58,6 +58,16 @@ class ServiceSchemasTest < Minitest::Test
     assert_equal 128, schema(Terret::Loop).keys[:max_agents].default
   end
 
+  # Credentials reads only its optional file path from config; the master key
+  # (ENV TERRET_CREDENTIALS_KEY) and the per-provider keys (ENV
+  # <PROVIDER>_API_KEY) are environment, never config.
+  def test_credentials_schemas_only_its_optional_file_path
+    keys = schema(Terret::Credentials).keys
+    assert_equal %i[file], keys.keys
+    assert_equal String, keys[:file].type
+    refute keys[:file].required, "no file means ENV-only, so it is optional"
+  end
+
   # A service that reads no config declares an empty schema (approvals,
   # subagents) — present, so doctor calls it ok rather than unschema'd.
   def test_a_no_config_service_declares_an_empty_schema

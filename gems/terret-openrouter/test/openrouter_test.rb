@@ -315,6 +315,43 @@ class AdapterTest < Minitest::Test
     assert_raises(L::AdapterError) { a.stream(request) { |_ev| } }
     assert_empty transport.requests
   end
+
+  OK_SSE = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+
+  # The credentials seam: with no config api_key, the adapter asks its
+  # credentials resolver (the row wires it to ctx[:credentials]). Resolved
+  # lazily at request time, so mount order never matters.
+  def test_falls_back_to_the_credentials_resolver_when_no_api_key
+    transport = FakeTransport.new([[200, [OK_SSE]]], [])
+    ENV.delete("OPENROUTER_API_KEY")
+    a = Terret::OpenRouter::Adapter.new(api_key: nil, transport: transport,
+                                        credentials: -> { "sk-from-credentials" })
+    a.stream(request) { |_ev| }
+    assert_equal "Bearer sk-from-credentials", transport.requests.first[:headers]["Authorization"]
+  end
+
+  def test_config_api_key_wins_over_the_credentials_resolver
+    transport = FakeTransport.new([[200, [OK_SSE]]], [])
+    a = Terret::OpenRouter::Adapter.new(api_key: "sk-explicit", transport: transport,
+                                        credentials: -> { raise "resolver must not be consulted" })
+    a.stream(request) { |_ev| }
+    assert_equal "Bearer sk-explicit", transport.requests.first[:headers]["Authorization"]
+  end
+
+  # ENV-direct still works when no credentials resolver is wired at all (the
+  # adapter's own last-resort fallback), so the openrouter gem stays usable
+  # without terret-core's credentials service mounted.
+  def test_env_still_resolves_the_key_with_no_resolver
+    transport = FakeTransport.new([[200, [OK_SSE]]], [])
+    begin
+      ENV["OPENROUTER_API_KEY"] = "sk-from-env"
+      a = Terret::OpenRouter::Adapter.new(api_key: nil, transport: transport)
+      a.stream(request) { |_ev| }
+    ensure
+      ENV.delete("OPENROUTER_API_KEY")
+    end
+    assert_equal "Bearer sk-from-env", transport.requests.first[:headers]["Authorization"]
+  end
 end
 
 # The plugin form: a config row mounts the adapter into ctx.llm behind the
@@ -403,6 +440,47 @@ class PluginTest < Minitest::Test
     tool_msg = second_request[:messages].find { |m| m[:role] == "tool" }
     assert_equal "22C in CDMX", tool_msg[:content]
     assert_equal "tc1", tool_msg[:tool_call_id]
+  end
+
+  # The row, given no api_key of its own, resolves through ctx[:credentials]:
+  # the Plugin wires a resolver to the mounted credentials service, and a
+  # credentials-backed key rides out on the request.
+  def test_the_row_resolves_its_api_key_through_credentials
+    Hames.reset_events!
+    Terret.declare_events!
+    transport = AdapterTest::FakeTransport.new([[200, [AdapterTest::OK_SSE]]], [])
+    loader = Hames::Loader.new
+    loader.layer([
+      { id: "session_store", plugin: Terret::Store::Memory },
+      { id: "sessions", plugin: Terret::Sessions },
+      { id: "credentials", plugin: Terret::Credentials },
+      { id: "llm", plugin: Terret::LLM::Service,
+        config: { roles: { main: "openrouter/openai/gpt-5-mini" } } },
+      { id: "openrouter", plugin: Terret::OpenRouter::Plugin, config: { transport: transport } }
+    ])
+    ctx = loader.boot!
+    adapter, = ctx[:llm].resolve(:main)
+    req = Terret::LLM::Request.new(
+      model: "openai/gpt-5-mini", system: "Be terse.",
+      messages: [Terret::LLM::Message.new(role: :user,
+                                          parts: [Terret::LLM::Text.new(text: "Hi")])],
+      tools: []
+    )
+    begin
+      ENV["OPENROUTER_API_KEY"] = "sk-via-credentials-0123"
+      adapter.stream(req) { |_ev| }
+    ensure
+      ENV.delete("OPENROUTER_API_KEY")
+    end
+    assert_equal "Bearer sk-via-credentials-0123", transport.requests.first[:headers]["Authorization"]
+
+    # Proof the row went THROUGH credentials rather than the adapter's own raw
+    # ENV fallback: resolving registered the key as a scrub pattern, so it is
+    # now caught in the durable log.
+    session = ctx[:sessions].create
+    ev = ctx[:sessions].append(session.id, "tool/result",
+                               { id: "tc1", content: "leaked sk-via-credentials-0123" })
+    assert_equal "leaked [REDACTED]", ev.payload[:content]
   end
 end
 

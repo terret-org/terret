@@ -134,6 +134,15 @@ rows:
     plugin: Terret::Loop
 
   # -- policy ---------------------------------------------------------------
+  # Provider secrets resolved in one place (plan §6.9): ENV <PROVIDER>_API_KEY
+  # always wins, then an optional AES-256-GCM file store (its master key in ENV
+  # TERRET_CREDENTIALS_KEY, never config). Every value it resolves is fed to the
+  # scrubber below, so a resolved credential can never reach the log even if a
+  # tool echoes it. With no `file:` set this is ENV-only — the current behavior
+  # — and inert until a deployment points it at an encrypted store.
+  - id: credentials
+    plugin: Terret::Credentials
+
   # The scrubber at the append boundary and at tools/post_execute: a
   # credential that reaches a tool result never reaches the session log or the
   # model. These patterns are a floor, not a guarantee — add the shapes your

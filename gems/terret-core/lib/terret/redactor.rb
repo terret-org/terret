@@ -18,8 +18,10 @@ module Terret
   # agree by construction, so the log invariant needs nothing special here.
   #
   # What this is not: comprehensive. Patterns are regexp sources on this row's
-  # config, so it catches shapes a deployment named and nothing else. Driving
-  # them from ctx[:credentials] (plan §6.9) is M8's job.
+  # config, so it catches shapes a deployment named and nothing else. Catching a
+  # secret by its exact bytes rather than by a named shape is ctx[:credentials]'s
+  # job (plan §6.9, Terret::Credentials): it registers every value it resolves
+  # as its own append-boundary scrubber, running alongside this one.
   class Redactor < Hames::Service
     service_key :redactor
     inject :sessions

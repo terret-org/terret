@@ -19,6 +19,12 @@ No configurable keys.
 |---|---|---|---|---|
 | `budget` | Integer |  | — | token budget that triggers compaction; unset or falsy disables it |
 
+## terret-core — `Terret::Credentials` (`credentials`)
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `file` | String |  | — | path to an AES-256-GCM encrypted credential store, provider => base64(iv+tag+ciphertext); the master key is ENV TERRET_CREDENTIALS_KEY (base64 of 32 bytes) and the per-provider ENV <PROVIDER>_API_KEY always wins — neither is config, and with no file only ENV resolves |
+
 ## terret-core — `Terret::LLM::Service` (`llm`)
 
 | Key | Type | Required | Default | Description |

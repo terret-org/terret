@@ -36,7 +36,14 @@ module Terret
                     base_delay:   { type: Numeric, default: 0.5, doc: "seconds of the first retry backoff" }
 
       def start(ctx)
-        adapter = Adapter.new(**config)
+        # A resolver evaluated at REQUEST time, not now: it checks for the
+        # credentials service at call time, so the row need not inject it (the
+        # gem stays usable without terret-core's credentials mounted) and mount
+        # order between the two rows never matters. resolve(:openrouter) is
+        # ENV-first, so ENV-direct keeps working; when it resolves anything, the
+        # value is registered as a scrub pattern (plan §6.9).
+        credentials = -> { ctx[:credentials].resolve(:openrouter) if ctx.service?(:credentials) }
+        adapter = Adapter.new(**config, credentials: credentials)
         ctx.effect { ctx[:llm].register_adapter("openrouter", adapter) }
       end
     end
