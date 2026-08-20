@@ -331,6 +331,18 @@ class CompositionTest < Minitest::Test
     spec
   end
 
+  # A refusal interpolates attacker-influenced text — here a !setting path. An
+  # unbounded fragment could bury the actual message or flood a terminal/log, so
+  # each is capped.
+  def test_a_refusal_caps_attacker_supplied_text
+    huge = "x" * 5000
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config: { model: !setting #{huge} }\n")
+    err = assert_raises(C::Error) { materialize(resolve) }
+    assert_operator err.message.length, :<, 500, "the 5000-char path must not appear in full"
+    assert_includes err.message, "chars)"
+  end
+
   # A row id names the row in dump-config's provenance column and doctor's
   # table. A newline or ANSI escape smuggled into a patch row id could forge or
   # erase a provenance line, so the id shape is validated at resolution.

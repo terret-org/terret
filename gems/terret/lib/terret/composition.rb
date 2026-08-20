@@ -155,6 +155,16 @@ module Terret
       SECRET_SHAPES.reduce(str.to_s) { |s, shape| s.gsub(shape, "[redacted]") }
     end
 
+    # A refusal interpolates attacker-influenced text — an env var name, a
+    # !setting path, a !ruby source, a raw tag, a scalar value, an underlying
+    # error message. Cap each such fragment so a multi-kilobyte value cannot bury
+    # the message it is embedded in or flood a terminal or log.
+    CLIP = 200
+    def self.clip(text)
+      s = text.to_s
+      s.length > CLIP ? "#{s[0, CLIP]}… (#{s.length} chars)" : s
+    end
+
     # -- parsing ---------------------------------------------------------------
 
     # YAML.safe_load DROPS a local tag silently: permitted_classes gates
@@ -254,11 +264,13 @@ module Terret
       # Date" describes the machinery rather than the fix.
       def needs_quoting(node, error)
         klass = error.message[/unspecified class:\s*(\S+)/, 1] || "value"
-        "#{@label}: #{node.value.inspect} reads as a #{klass}, and a Terret config " \
-          "carries only plain data — quote it (\"#{node.value}\") to keep it a string."
+        value = Composition.clip(node.value)
+        "#{@label}: #{value.inspect} reads as a #{klass}, and a Terret config " \
+          "carries only plain data — quote it (\"#{value}\") to keep it a string."
       end
 
       def refusal(name, raw, core_allowed)
+        raw = Composition.clip(raw)
         hint =
           if TAGS.include?(name) then " — !#{name} is the tag you want, and #{raw} is a different one"
           elsif CORE_TAGS.include?(name) then " — !!#{name} does not describe this kind of node"
@@ -361,21 +373,21 @@ module Terret
     def self.read_env(name, where)
       ENV[name]
     rescue StandardError => e
-      raise Error, "#{where}: !env #{name.inspect}: #{e.message}"
+      raise Error, "#{where}: !env #{clip(name).inspect}: #{clip(e.message)}"
     end
 
     # The asymmetry with !env is intentional (§5): an unset environment
     # variable is an ordinary deployment state, while a !setting pointing at
     # nothing is a typo in a file the profile author controls.
     def self.dig_setting(settings, path, where)
-      raise Error, "#{where}: !setting #{path} may not appear inside a profile's own settings:" if settings.nil?
+      raise Error, "#{where}: !setting #{clip(path)} may not appear inside a profile's own settings:" if settings.nil?
 
       keys = path.to_s.split(".").map(&:to_sym)
       raise Error, "#{where}: !setting with an empty path" if keys.empty?
 
       found = keys.reduce(settings) do |node, key|
         unless node.is_a?(Hash) && node.key?(key)
-          raise Error, "#{where}: !setting #{path} resolves to nothing in the profile's settings"
+          raise Error, "#{where}: !setting #{clip(path)} resolves to nothing in the profile's settings"
         end
 
         node[key]
@@ -401,7 +413,7 @@ module Terret
     # from anywhere should not be reading this method's locals either.
     def self.eval_ruby(source, allow_config_ruby, where)
       unless allow_config_ruby
-        raise Error, "#{where}: !ruby #{source} is refused; pass allow_config_ruby: true " \
+        raise Error, "#{where}: !ruby #{clip(source)} is refused; pass allow_config_ruby: true " \
                      "(trt --allow-config-ruby) to let this profile run Ruby"
       end
 
@@ -411,7 +423,7 @@ module Terret
         # ScriptError is not a StandardError, so a !ruby that does not even
         # parse would otherwise walk past every rescue between here and the
         # operator's terminal.
-        raise Error, "#{where}: !ruby #{source}: #{e.class}: #{e.message.lines.first.to_s.strip}"
+        raise Error, "#{where}: !ruby #{clip(source)}: #{e.class}: #{clip(e.message.lines.first.to_s.strip)}"
       end
     end
 
