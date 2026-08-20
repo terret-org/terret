@@ -573,6 +573,11 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   scrubber folds string *values* but not hash *keys*, so a credential used as a key would
   reach the log unscrubbed. Unreachable through the fixed-schema std tools, which is why
   it waited; fold keys through the scrubber, respecting the structural exemption, in M8.
+  *Paid down during M8*: `normalize_payload` now folds a hash key through the same
+  scrubber as its values once past the structural surface — a secret-shaped content key
+  scrubs, a structural field name stays exempt — with a fail-closed corner where two
+  content keys redacting to the same token collide and the append raises rather than
+  dropping one.
   (6) Two TOCTOU windows are accepted with their reasoning: the fs symlink fix put
   `O_NOFOLLOW` on the leaf open, so the racy leaf swap is closed, but an *intermediate*
   component swapped mid-operation remains a window — single-agent sequential execution
@@ -588,6 +593,11 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   loopback floor never sees an IPv6 bracket literal such as `[::1]` because the resolver
   answers nothing for it and the connect then fails on its own — safe today by accident,
   which is the kind of safety worth pinning with a test in M8's security pass.
+  *Paid down during M8*: `FS#resolve_real` caps its symlink hops (`MAX_SYMLINK_HOPS`), so a
+  dangling loop raises `Denied` rather than `SystemStackError`; `FS#glob` drops an entry
+  whose realpath raises `ENOENT`/`ELOOP` rather than crashing the listing; and the
+  `WebFetch` floor resolves the bracket-stripped `uri.hostname`, so `[::1]` is refused as
+  loopback rather than reaching the connect — each pinned by a test.
 - **Accepted in M8's job seam.** Two things the code and `docs/subagents.md` §6
   both point here for. (1) *A grandchild can outlive its job's disposal.* Ending a
   job signals its process group, and that signal is only sent while the leader is
@@ -605,6 +615,44 @@ Prompt-injection stance: tool results are data. The loop never executes instruct
   which is why jobs and children do not mix in v1. Lifting it means a lineage link
   the runtime does not have yet, and a decision about what a child may do with a
   job it did not start; the fail-closed answer holds until both exist.
+- **Paid down during the M8 security pass.** Three security surfaces closed in M8's
+  closing pass, beyond the M7-§14 exec quick-wins and the hash-key scrub marked paid
+  above. (1) *The floor-bypass.* The deny-by-default allow list was a `tools/pre_execute`
+  listener, and a no-inject row's listener mounted ahead of it could admit a call without
+  delegating and short-circuit past — defeating the autonomous safety mechanism by
+  registration order. It is now an authoritative gate the registry consults after the
+  waterfall, on the exact admitted call, so no listener any row registers can bypass it,
+  and a per-agent `AllowList` can only narrow. (2) *Replay caps.* The socket's
+  `replay_limit` (default 10,000, with a `replay_truncated` frame) and
+  `max_concurrent_replays` (default 4) bound what a reconnect's `from_seq` and a reconnect
+  storm can make the server read — the concrete cap §9.4 and §13 promised. (3) *The
+  consent gate.* A profile's `plugins:` entry naming a filesystem path is code execution
+  with a YAML extension, so it is now gated behind `--allow-config-ruby` exactly as a
+  `!ruby` scalar is, while a bundle's own `requires:` (operator-installed, trusted) and a
+  load-path feature name are not; `doctor` refuses a path-shaped require by default, so
+  inspecting an untrusted profile does not run it (docs/security.md, docs/composition.md).
+- **Accepted deferrals from the M8 security pass.** Each re-examined in the pass and
+  deferred deliberately, with its reason. (1) `WebFetch` still has no total wall-clock
+  deadline — a slowloris server can hold a fiber past any single phase — bounded in
+  practice by `MAX_REDIRECTS × timeout`; a real deadline waits. (2) `WebFetch`'s SSRF
+  floor leaves private ranges reachable; a `block_private_ranges` knob to close them is
+  M9. (3) `ctx[:credentials]` ships only the on-disk AES-256-GCM store format — an
+  OS-keychain backend and a `trt credentials set` writer CLI are deferred, so a deployment
+  writes the store itself for now. (4) A hot-narrowed per-session policy does not reach a
+  `Task` child: a child gets a fresh session with no `policy/updated`, so it runs at the
+  floor rather than the parent's narrowing — a narrowing that must reach children belongs
+  in the floor, and lineage-scoped policy inheritance is future work. (5) Child sessions
+  accumulate unbounded — nothing evicts an idle session, the M6-recorded lifecycle gap,
+  and eviction is M9. (6) Resume's `redacted?` check, which refuses to replay an owed call
+  carrying the replacement token, folds hash *values* but not *keys*, so a redacted token
+  planted in a tool-arg key would not trip it — a very-low edge given the fixed-schema
+  tools. (7) The test-diagnostic materialize path exposes fixture env values only, because
+  boot needs plaintext settings and a test asserts it; not a production surface. (8)
+  `install_floor` is a privileged plugin capability by design — a mounted plugin can
+  replace the floor — because plugin trust and supply-chain are out of scope under the v1
+  multi-tenancy stance (mutually untrusted code belongs in a separate process). (9)
+  `Composition.load_path_feature?` classifies POSIX path shapes; a Windows backslash path
+  (`..\evil`) is not caught, which is acceptable for a POSIX-targeted runtime.
 - **MCP wire and fiber-safety, from M5.** v1 targets the deployed legacy wire (protocol
   revisions 2025-11-25/2025-06-18); the 2026-07-28 stateless revision stays out of scope
   until something actually deploys it. manceps' fiber-safety under the async scheduler is

@@ -235,11 +235,18 @@ do not read this row as "a sandbox makes `Bash` stop asking".
 executing every call in a step sequentially in M7; the field exists so
 M8's tool barrier has something honest to read when it starts letting
 `:parallel`-declared calls actually run concurrently. `Task`, `job_*`, and
-`TodoWrite` are M8 tools (they need `ctx[:jobs]` and the subagent seam)
-and are not in this roster. Their names follow the same rule as the rest
-of it: Claude Code's spelling verbatim where CC has the tool, snake_case
-where it does not — which is why `Task` and `TodoWrite` are capitalized
-and the job tools are not (docs/subagents.md).
+`TodoWrite` are the M8 tools that live on `ctx[:jobs]` and the subagent
+seam; they carry their own roster in docs/subagents.md rather than this
+one. `job_start` in particular derives its approval from sandbox isolation
+exactly as `Bash` does above — `:always` unsandboxed, `:policy` sandboxed,
+re-derived on a hot sandbox swap through the same `config/updated`
+listener — because it runs `bash -lc <cmd>` in a fresh shell, so a
+background command is never silently at a weaker bar than a foreground one
+(`job_collect` reads a buffer and never asks; `job_stop` is a static
+`:policy`). Their names follow the same rule as the rest of it: Claude
+Code's spelling verbatim where CC has the tool, snake_case where it does
+not — which is why `Task` and `TodoWrite` are capitalized and the job
+tools are not (docs/subagents.md).
 
 ## 6. Redaction
 

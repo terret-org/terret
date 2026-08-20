@@ -34,6 +34,47 @@ with a permissive allow list and `sandbox: none` has no backstop between a
 prompt-injected instruction and a shell command. The sandbox (below)
 bounds the blast radius when that happens; it does not prevent it.
 
+## The tool floor
+
+The deny-by-default allow list is enforced as an *authoritative floor*, not
+as one `tools/pre_execute` listener among peers. The distinction is the
+whole point, because it is what makes the floor unbypassable regardless of
+listener registration order. The floor is a single predicate the tool
+registry consults after the `pre_execute` waterfall has run, on the exact
+call that is about to execute — rewrites and all — rather than as a listener
+some other row's listener could register ahead of and short-circuit past.
+That ordering bug was real: mounted in a later loader pass, the floor sat
+behind a no-inject row's listener in the waterfall, and a listener that
+admitted a call without delegating never reached it. As the registry gate,
+it sees the admitted call and its veto is final.
+
+The consequence is a one-way valve. A `pre_execute` listener can make policy
+*stricter* — a veto there stops the call — but never looser: an admission it
+returns cannot resurrect a tool the floor denies, because that admission is
+exactly what the floor gate re-checks before execution. A per-agent
+`AllowList` (docs/mcp.md, docs/lifecycle.md) rides the agent's forked context
+as such a listener, so it can only *narrow* what the gate would already
+admit — a veto it adds is honored, but an admission it returns cannot lift a
+denial the gate makes. Deny-by-default is the ground state, and nothing a
+row registers, in any order, can widen it.
+
+`install_floor` — replacing that gate — is a *privileged plugin capability*,
+not a model-reachable one. A mounted plugin can install or replace the floor,
+which is consistent with the rest of this house: a mounted plugin is trusted
+code the operator chose to boot (see the consent model below). A model, a
+tool result, and a socket frame cannot reach it. A second install replacing
+an active floor now warns (a legitimate re-mount or hot reconfigure disposes
+the old floor first and stays silent), so an unexpected swap of the
+autonomous safety mechanism leaves a trace rather than happening in silence.
+
+The *patterns* the gate enforces are a separate matter from the gate itself.
+They are the per-session, hot-reloadable policy — the last durable
+`policy/updated` in the session, or the bundle's install-time floor when a
+session never updated (docs/lifecycle.md). A bearer token can rewrite them
+for its agent over the socket via `set_policy`, which changes what the gate
+admits for that one session; it does not, and cannot, replace the gate. That
+token authority is the socket's concern, below.
+
 ## Sandbox defaults
 
 `docker`, with `network: none`, is the default for untrusted work; `none`
@@ -53,9 +94,22 @@ solely by its own domain allow list (deny-by-default), plus its own SSRF
 floor — it resolves each target, on the model's URL and on every redirect
 hop, and refuses loopback and link-local addresses so an allowlisted name
 cannot launder a fetch to `127.0.0.1` or the `169.254.169.254`
-cloud-metadata endpoint. That floor is not full SSRF control: private
-ranges stay reachable by default (an M8 config knob), and it is resolve-
-then-connect rather than IP-pinned, so it is not DNS-rebinding protection.
+cloud-metadata endpoint. The floor resolves the bracket-*stripped* hostname,
+so an IPv6 bracket literal such as `[::1]` is caught the same way
+`127.0.0.1` always was — `uri.host` keeps the brackets, which no resolver
+recognizes, so the check uses `uri.hostname`, which strips them. The domain
+policy (allow/deny) is a separate, coarser thing: it matches an IPv6 literal
+only when the pattern spells it *bracketed* (`[::1]`), because it globs the
+host as written rather than resolving it. The floor is what actually stops
+the IPv6 loopback reach; the domain policy is IP-as-hostname string matching.
+
+That floor is not full SSRF control on three counts. Private ranges stay
+reachable by default — a `block_private_ranges` knob to close them is a
+recorded §14 deferral (M9), not shipped here. It is resolve-then-connect
+rather than IP-pinned, so it is not DNS-rebinding protection (also §14).
+And `WebFetch` has per-phase timeouts but no total wall-clock deadline, so
+a slowloris-shaped server can hold a fiber longer than any single phase
+allows — bounded in practice by `MAX_REDIRECTS × timeout`, recorded in §14.
 
 `landlock` (Linux) and `seatbelt` (macOS) are named in plan §6.6 as future
 providers and are not built in M7 — only `none` and `docker` exist. A
@@ -66,16 +120,20 @@ for it yet.
 
 Mutating fs tools (`Write`, `Edit`) default to `:policy` — they ask a
 human only where the approvals row is mounted at all, and even then only
-because they are mutating; `Read`/`Glob`/`Grep` never ask. `Bash` is the
-one tool whose approval is not a static default: it derives from sandbox
-isolation at registration (docs/exec.md §5) — `:always` when the sandbox
-is not isolating (`ctx[:sandbox].isolated?` is false), `:policy` when it
-is. The reasoning is direct: outside a sandbox, arbitrary shell execution
-is the least contained thing in the system and gets asked about every
-single time regardless of policy; inside one, the container is already a
-backstop, so `Bash` is governed like any other mutating tool instead of
-specially. `WebFetch` defaults to `:policy` behind its own domain-allow
-row (docs/exec.md §5).
+because they are mutating; `Read`/`Glob`/`Grep` never ask. Two tools have
+an approval that is *not* a static default: `Bash` and `job_start` both
+derive theirs from sandbox isolation at registration (docs/exec.md §5) —
+`:always` when the sandbox is not isolating (`ctx[:sandbox].isolated?` is
+false), `:policy` when it is. The reasoning is the same for both:
+`job_start` runs `bash -lc <cmd>` in a fresh shell, so outside a sandbox it
+is arbitrary shell execution exactly as `Bash` is, and gets asked about
+every single time regardless of policy; inside one, the container is
+already a backstop, so each is governed like any other mutating tool
+instead of specially. Both captures are re-derived through the
+`config/updated` listener on a hot sandbox swap, so neither is left at the
+weaker bar after the isolation underneath it changes. (`job_collect` reads
+a buffer and never asks; `job_stop` is a static `:policy`.) `WebFetch`
+defaults to `:policy` behind its own domain-allow row (docs/exec.md §5).
 
 Every one of these is a default a profile can turn off. `:policy` inside
 a profile with no approvals row mounted at all reduces to the allow list
@@ -108,10 +166,26 @@ tool results before they are logged, and a `Sessions#register_scrubber`
 backstop running inside `normalize_payload` at the append boundary, so
 every event type — not just tool results — gets scrubbed before it
 becomes durable, and the log-invariant digest sees the same scrubbed
-bytes on both sides by construction. Patterns are config (regexp sources)
-until `ctx[:credentials]` (plan §6.9) lands in M8; a pattern that doesn't
-match a secret's actual shape doesn't catch it. This is detection of
-known shapes, not a guarantee that no credential can ever reach the log.
+bytes on both sides by construction. The redactor's patterns are config —
+regexp source strings — so they catch known *shapes*: a pattern that
+doesn't match a secret's actual shape doesn't catch it. This is detection
+of known shapes, not a guarantee that no credential can ever reach the
+log. What closes that gap for a credential the harness actually resolved
+is `ctx[:credentials]`, below.
+
+`ctx[:credentials]` (plan §6.9) now exists, and its security point is
+exactly that loop. It resolves a provider's secret ENV-first by convention
+(`<PROVIDER>_API_KEY`), then from an optional AES-256-GCM file store —
+master key in `TERRET_CREDENTIALS_KEY`, and a store present with no key
+REFUSES rather than falling back to anything unprotected. ENV always wins.
+The payoff is not the lookup but what it does with the answer: every value
+it resolves is fed to the append-boundary scrubber
+(`Sessions#register_scrubber`) as an exact-string pattern, so a resolved
+credential is caught by its literal bytes rather than by a shape a
+deployment had to name in advance — even if a tool echoes it straight back
+into a result. The on-disk store format is documented in `credentials.rb`;
+a `trt credentials set` writer CLI and an OS-keychain backend are deferred
+(§14), so today a deployment writes the store itself.
 
 Four boundaries belong in any threat model built on this (docs/exec.md §6
 carries the mechanism). A log is append-only, so turning a redactor on
@@ -127,7 +201,11 @@ id, or the `verdict` key the approvals gate reads back, would break the
 session rather than protect it. A secret-shaped Hash key deeper in content
 — an MCP tool's `structured_content`, say — is scrubbed like any leaf; it
 is only where a structural identifier belongs that a credential a model
-plants there is not caught.
+plants there is not caught. Folding keys has one fail-closed corner: two
+content keys in the same mapping that redact to the *same* token would
+collide, and the append raises rather than silently dropping one — the turn
+fails, no secret leaks, and the cost is a low-grade denial of service a
+model would have to engineer against itself.
 
 ## The socket's authority model
 
@@ -142,6 +220,41 @@ implicit — splitting per-frame capabilities from the bearer token is real
 design work that belongs with the multi-tenant story below, not with M7.
 Treat a bearer token as equivalent to full operator access to that agent,
 because it is.
+
+Replay is the socket's other authority surface, and it is bounded rather
+than open: a reconnect's `from_seq` cannot make the server read an
+unbounded history. Two caps enforce it — `replay_limit` (default 10,000)
+pulls a from_seq reaching further back than the window forward to the
+newest `replay_limit` events and tells the client so with a
+`replay_truncated` frame, and `max_concurrent_replays` (default 4) gates
+how many replays read the log at once so a burst of reconnects cannot
+stampede it. This is the concrete cap plan §9.4 promised; the wire detail
+lives in docs/protocol.md.
+
+## The consent model
+
+Config is data; code is consent. A Terret profile is portable
+configuration an operator may have downloaded from anywhere, so the two
+places a profile could smuggle in code execution are both gated behind an
+explicit `--allow-config-ruby` flag (docs/composition.md, §5): a `!ruby`
+scalar, and a `plugins:` entry that names a filesystem PATH rather than a
+load-path feature name. Requiring a path is code execution with a YAML
+extension — it reaches Ruby the operator never installed — so it needs the
+same consent the `!ruby` tag does. A load-path feature name
+(`terret/exec`) is different: it resolves only through gems the operator's
+Bundler already put on the path, so it requires no flag.
+
+A bundle's own `requires:` are not gated the same way, and the asymmetry
+is deliberate. A bundle ships inside an installed gem — it is the
+operator-installed gem's own trusted decision about what to load before
+its rows resolve — whereas a profile is config that merely names bundles.
+Trust follows installation, not authorship of a YAML file.
+
+`doctor` is safe-by-default: it resolves and reports on a profile's rows
+without booting, and by default it refuses a path-shaped `plugins:`
+require rather than running it (it still loads load-path feature names,
+which are operator-installed code). So `trt doctor <untrusted profile>`
+inspects the profile rather than executing code it carries.
 
 ## Multi-tenancy
 
