@@ -72,7 +72,7 @@ Twelve gems in one repo:
 
 ## Status
 
-Milestones M0 through M7 are shipped: the Hames kernel, the session log
+Milestones M0 through M8 are shipped: the Hames kernel, the session log
 with the "model-visible means logged" invariant, the tools pipeline, the
 agent loop, the OpenRouter adapter, durable SQLite sessions, the WebSocket
 interface, the MCP client, long-lived agent hardening — durable
@@ -82,15 +82,31 @@ hot-reloadable per-agent policy — and the execution world: the filesystem,
 subprocess, shell, and terminal seams under workspace scoping, the standard
 tool roster on top of them, credential redaction at both the tool pipeline
 and the log-append boundary, and a sandbox seam whose `docker` provider
-moves everything a tool executes into a container from one config row.
+moves everything a tool executes into a container from one config row. M8
+added subagents and the release: the `Task` tool over a subagent seam (a
+child agent on its own fresh session, run to completion and its text
+returned), background `job_*` tools and `TodoWrite`, and a tool barrier that
+runs a message's `concurrency: :parallel` calls together on the reactor while
+a `:serial` tool is a barrier of one; the meta-gem's composition layer and
+the `trt` CLI (`boot`/`dump-config`/`doctor`/`acp`); `trt doctor` validating
+a profile against each service's `Hames::Schema`; the ACP editor interface; a
+bench lane with regression floors; a `ctx[:credentials]` seam (ENV-first,
+an optional AES-256-GCM store, every resolved value fed to the scrubber); and
+a security pass that made the allow-list floor authoritative, folded hash
+keys through the log scrubber, gated config-borne Ruby behind an explicit
+consent flag, and capped socket replay.
 `LLM::FakeAdapter` (canned script replay) remains the test/demo default;
 the OpenRouter path is proven by canned-wire tests plus a live smoke lane.
 Session payloads are primitives at the append boundary; typed parts encode
 through `LLM.encode_part`.
 
-The full roadmap, including what is not yet built (M8 subagents and the 0.1
-release), is `docs/terret-implementation-plan.md`; see its §12 for
-milestone detail. Note
+Install with `gem install terret`: the meta-gem depends on the base roster
+and ships the `terret-base` bundle. The twelve gems are all at `0.1.0` and
+build in lockstep; publishing them to RubyGems is the one remaining release
+step, so the install line lands the moment that push happens.
+
+The full roadmap is `docs/terret-implementation-plan.md`; see its §12 for
+milestone detail and §14 for the deferrals recorded along the way. Note
 the plan has drifted from the code in places: it specifies RSpec (this uses
 minitest), Ruby 3.4+ (this targets 4.0.6), and a separate `terret-llm` gem
 (the vocabulary lives in `terret-core`). Treat the code as current and the

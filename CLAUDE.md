@@ -10,7 +10,12 @@ repo:
   LLM seam (vocabulary, `AdapterBase` retry policy, `FakeAdapter`), plus the M6
   long-lived-agent services: durable approvals (`ctx[:approvals]`, opt-in per tool), the
   compactor on the sole-provider `ctx[:summarizer]` seam, the titler, and hot-reloadable
-  per-agent policy (`AllowList` as a log projection).
+  per-agent policy (`AllowList` as a log projection). M8 added the sole-provider
+  `ctx[:subagents]` seam (a child agent on a fresh session, run to completion) and the
+  loop's tool barrier, which runs a message's `concurrency: :parallel` calls together on
+  the reactor while a `:serial` tool is a barrier of one. `Terret::Credentials`
+  (`ctx[:credentials]`) lives here too: ENV `<PROVIDER>_API_KEY` first, then an optional
+  AES-256-GCM file store, every resolved value fed to the scrubber.
 - `gems/terret-openrouter` is the one real adapter (plan §6.5): OpenRouter's
   OpenAI-compatible API behind `ctx.llm`, streaming SSE with tool calling and usage
   accounting. The transport is injectable, so its unit tests need no network and no
@@ -43,7 +48,9 @@ repo:
   Code's names verbatim, no alias map — registered on those seams with honest
   `mutating`/`approval`/`concurrency` metadata. `Bash`'s approval derives from
   `sandbox.isolated?` at registration; `WebFetch` sits behind a deny-by-default domain
-  policy re-checked per redirect hop, plus a host-side loopback/link-local floor.
+  policy re-checked per redirect hop, plus a host-side loopback/link-local floor. M8 added
+  `Task` (delegate to a child agent via `ctx[:subagents]`), `TodoWrite`, and
+  `job_start`/`job_collect`/`job_stop` over `ctx[:jobs]`.
 - `gems/terret-sandbox-docker` is the container provider (M7): a long-lived container per
   boot, each workspace dir bind-mounted at the same absolute path, argv wrapped into
   `docker exec`, `--network none` by default. One patch row moves the execution world into
@@ -52,17 +59,25 @@ repo:
   ordered config rows, profiles stack bundles, patches adjust rows by id, and
   `Terret.boot` hands the result to the Hames loader. It ships `terret-base`
   (`config/bundle.yml`), the `headless` profile template, and the `trt` executable
-  (`boot`, `dump-config`, `doctor`). The contract is `docs/composition.md`; read it and
-  plan §7 before changing anything here. `Terret::Meta::VERSION` is the gem's version —
+  (`boot`, `dump-config`, `doctor`, `acp`). Its `discover_bundles` mounts a third-party
+  bundle off that gem's gemspec `metadata["terret"]`, so a plugin gem becomes composable
+  by shipping normally. The contract is `docs/composition.md`; read it and plan §7 before
+  changing anything here. `Terret::Meta::VERSION` is the gem's version —
   `Terret::VERSION` belongs to terret-core.
 
 The full roadmap is `docs/terret-implementation-plan.md`; phases are in its §12. What is
-here covers M0–M7: kernel, session log with the invariant, tools pipeline, loop, the
-OpenRouter adapter, the socket, the MCP client, long-lived agent hardening (durable
-approvals, resumable turns, compaction, titling, cost accounting, hot-reloadable policy),
-and the execution world (fs/subprocess/shell/terminals seams under workspace scoping, the
-std tools, sandbox `none` and `docker`, credential redaction at the tool pipeline and the
-log-append boundary).
+here covers M0–M8, the whole harness: kernel, session log with the invariant, tools
+pipeline, loop, the OpenRouter adapter, the socket, the MCP client, long-lived agent
+hardening (durable approvals, resumable turns, compaction, titling, cost accounting,
+hot-reloadable policy), the execution world (fs/subprocess/shell/terminals seams under
+workspace scoping, the std tools, sandbox `none` and `docker`, credential redaction at the
+tool pipeline and the log-append boundary), and subagents plus the 0.1 release (the `Task`
+tool over the `ctx[:subagents]` seam, background `job_*` tools, `TodoWrite`, and a tool
+barrier that honors each tool's `concurrency:`; the composition/boot meta-gem and the `trt`
+CLI; `trt doctor` validating a profile against each service's `Hames::Schema`; the ACP
+editor interface; the bench lane; `ctx[:credentials]`; and a security pass that made the
+allow-list floor authoritative, folded hash keys through the log scrubber, gated
+config-borne Ruby behind an explicit consent flag, and capped socket replay).
 `LLM::FakeAdapter` (canned script replay) remains the test/demo default; the OpenRouter
 path is proven by canned-wire tests plus a live smoke lane. Session payloads are
 primitives at the append boundary; typed parts encode through `LLM.encode_part`.
