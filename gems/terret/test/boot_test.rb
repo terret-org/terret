@@ -210,6 +210,30 @@ class BootTest < Minitest::Test
                  "a first-pass pre_execute listener that admits without next_ must not bypass the floor")
   end
 
+  # The floor is hot-reloadable policy (docs/lifecycle.md). A reconfigure that
+  # TIGHTENS it — drops a pattern — must take effect on the next call; the base
+  # Service#reconfigure only warns, which would silently keep the looser
+  # patterns start captured and leave the deny-by-default policy looser than the
+  # operator asked for.
+  def test_reconfiguring_the_floor_retightens_policy_on_the_next_call
+    ctx = boot
+    ctx[:tools].register(name: "widget", description: "d", params: { type: "object", properties: {} },
+                         ctx: ctx) { "spun" }
+    session = ctx[:sessions].create(id: "reconf")
+    call = Terret::Tools::Call.new(id: "c1", name: "widget", args: {}, session_id: session.id)
+
+    # widget is not in the base floor roster, so it is denied to start with.
+    assert_match(/not on the allow list/, ctx[:tools].execute(call, ctx: ctx).error.to_s)
+
+    # Loosen the floor to admit widget; the very next call runs it.
+    ctx[:loader].reconfigure!("allow_list", { patterns: ["widget"] })
+    assert_equal "spun", ctx[:tools].execute(call, ctx: ctx).content
+
+    # Tighten it again; the drop takes effect immediately, not after a remount.
+    ctx[:loader].reconfigure!("allow_list", { patterns: ["nothing"] })
+    assert_match(/not on the allow list/, ctx[:tools].execute(call, ctx: ctx).error.to_s)
+  end
+
   # -- failure modes ---------------------------------------------------------
 
   def test_a_plugin_constant_that_does_not_resolve_names_the_row_and_the_constant

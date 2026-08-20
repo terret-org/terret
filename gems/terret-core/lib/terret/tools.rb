@@ -297,7 +297,20 @@ module Terret
                                 doc: "tool-name globs the deny-by-default floor permits" }
 
       def start(ctx)
-        AllowList.install_floor(ctx, config[:patterns] || [])
+        @ctx = ctx
+        @disposer = AllowList.install_floor(ctx, config[:patterns] || [])
+      end
+
+      # Hot-reconfigure the floor. The base Service#reconfigure only warns, so a
+      # config/updated that TIGHTENS the floor (drops a pattern) would silently
+      # keep the looser patterns start captured — the deny-by-default policy
+      # left looser than the operator asked for. Tear the old gate and its
+      # invalidation down and re-install with the new patterns; this runs under
+      # with_owner(id), so the new registrations are owned by this row exactly
+      # as start's were, and take effect on the next call.
+      def reconfigure(config)
+        @disposer&.call
+        @disposer = AllowList.install_floor(@ctx, config[:patterns] || [])
       end
     end
   end
