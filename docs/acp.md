@@ -12,6 +12,11 @@
 > has moved. What is *not* borrowed from the spec, and is this document's
 > own claim, is the mapping: which Terret seam each operation lands on,
 > and what is deliberately not implemented.
+>
+> **M8 verification (2026-08-19).** Re-checked against `schema/v1/schema.json`
+> and agentclientprotocol.com: every wire fact below matched the digest, so
+> no correction to the wire was needed. The server reports `protocolVersion`
+> **1** (an integer). `schema/v2` exists and is draft; it is not built.
 
 ## What ACP is
 
@@ -227,25 +232,33 @@ of its own (docs/lifecycle.md): `completed`, `cancelled`, `rejected`,
 correspond one to one, which is a mapping question rather than a bug in
 either:
 
+The mapping Task 7 pins (`Server#stop_reason`):
+
 - `completed` → `end_turn`, and `cancelled` → `cancelled`. These are the
   two that carry almost all the traffic.
+- `empty` → `end_turn`. An empty turn spent no step because there was
+  nothing to send; it closed cleanly, so the honest answer to the editor
+  is an ordinary end of turn, not an error.
+- `rejected` → `refusal`. A rejected turn is a `agent/pre_step` veto —
+  policy declined to run the work — and `refusal` is the one ACP stop
+  reason that means "the agent chose not to act." It is a successful
+  JSON-RPC *result*, because nothing errored: the agent refused, on
+  purpose, and said so.
+- `failed` → a JSON-RPC **error** response (`-32603`) to the pending
+  prompt, not a stop reason. A turn that raised is not a turn that ended
+  with a sad outcome; it is a request that could not be completed, and the
+  transport already has a shape for that.
 - `max_turn_requests` is the semantic peer of `Loop::MAX_STEPS` — a turn
   that would log a 26th step — but it is not what Terret produces today. A
   step-ceiling overflow raises inside the turn body, which the turn's own
   rescue path closes as `turn/end {status: "failed"}` *and* re-raises. So
-  a runaway turn currently lands in the JSON-RPC error branch, not on this
-  stop reason. Answering `max_turn_requests` instead would be a
+  a runaway turn lands in the `failed` → `-32603` branch above, and this
+  server does **not** answer `max_turn_requests`. Doing so would be a
   deliberate change, not a projection of something that already exists.
-- `max_tokens` and `refusal` have no Terret producer: neither the
-  adapter's finish reason nor a model refusal is projected into
-  `turn/end`.
-- `rejected`, `empty`, and `failed` have no ACP peer. A `failed` turn
-  reads most naturally as a JSON-RPC error response to the pending prompt
-  rather than as a successful result carrying a sad stop reason, and
-  `rejected`/`empty` are turns that spent no step at all.
-
-Task 7 pins what the unmapped statuses answer with; it is recorded rather than
-resolved by whoever writes the line.
+- `max_tokens` and `refusal` (the *model's* refusal, as opposed to a
+  policy `rejected`) have no Terret producer: neither the adapter's finish
+  reason nor a model refusal is projected into `turn/end`, so neither stop
+  reason is ever the answer.
 
 ## Framing, concurrency, and failure
 
@@ -340,19 +353,37 @@ with one provider — the fork (docs/subagents.md §2) — and the seam is
 where that second provider will land when it does, with no change to the
 `Task` tool.
 
-## Open for the Task-7 implementer
+## Resolved in Task 7
 
-The wire facts above are schema-verified; these are decisions, not
-unknowns:
+The three decisions the wire left to the implementer, now pinned in code:
 
-1. The three `turn/end` statuses with no stop reason (`rejected`, `empty`,
-   `failed`), and whether `MAX_STEPS` answers `max_turn_requests`.
-2. Whether `cwd` from `session/new` is honored inside the granted
-   workspace or ignored entirely.
-3. The `ToolKind` table for MCP tools, whose names arrive at runtime.
+1. **The `turn/end` statuses with no stop reason.** Recorded in "Stop
+   reasons" above: `empty` → `end_turn`, `rejected` → `refusal`, `failed`
+   → a `-32603` error response. `MAX_STEPS` does **not** answer
+   `max_turn_requests` — a runaway raises and lands in the `failed`
+   branch.
 
-Re-verify the wire against the live spec at build time regardless, and
-record the protocol version the server reports.
+2. **`cwd` and `mcpServers` from `session/new`.** Both are required by the
+   schema, so a request missing either answers `-32602`; `cwd` must be a
+   non-empty string. Neither widens the agent's reach: `cwd` does not
+   grant filesystem access the `workspace:` row did not (docs/exec.md §3)
+   and is not used as a working directory in v1, and `mcpServers` is
+   accepted but not mounted (the same escalation `ctx[:subagents]` refuses
+   by construction). Honoring either as authority would let a client
+   extend the agent past the profile's floor.
+
+3. **The `ToolKind` table** (`Server#tool_kind`). `Read` → `read`; `Glob`
+   and `Grep` → `search`; `Write` and `Edit` → `edit`;
+   `Bash`/`job_*`/`terminal_*` → `execute`; `WebFetch` → `fetch`. `Task`,
+   every `mcp__<server>__<tool>` (names arrive at runtime), and any tool
+   not in the std roster fall to `other` — the enum's own catch-all.
+
+`$/cancel_request` (the protocol-level cancel in "Framing" below) is
+implemented as a thin alias: a `{requestId}` naming the pending prompt of
+some session lands on the same `Agent#cancel` path as `session/cancel`, so
+the prompt then answers `stopReason: "cancelled"`. A `requestId` matching
+no pending prompt is ignored, which is what a notification for
+already-finished work should do.
 
 ## Running it
 
