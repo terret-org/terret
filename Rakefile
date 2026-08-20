@@ -2,7 +2,10 @@ task default: :test
 
 desc "Run all test suites"
 task :test do
-  Dir["gems/*/test/*_test.rb"].each do |f|
+  # gems/*/test holds each gem's suite; release/test holds the repo-level
+  # release tooling's suite (the build/push ordering), which spans every gem
+  # and so belongs to no single one.
+  (Dir["gems/*/test/*_test.rb"] + Dir["release/test/*_test.rb"]).each do |f|
     sh "ruby #{f}"
   end
 end
@@ -123,4 +126,61 @@ task :"config:catalog" do
     #{sections.join("\n")}
   MD
   puts "wrote docs/config-catalog.md (#{ConfigCatalog.entries.length} services)"
+end
+
+namespace :release do
+  desc "Build every gem into pkg/ with --strict (proof the gemspecs are valid). " \
+       "Reversible — pkg/ is gitignored — and the local half of a release; " \
+       "release:push is the irreversible half."
+  task :build do
+    require_relative "release/ordering"
+    require "fileutils"
+
+    pkg = File.expand_path("pkg", __dir__)
+    FileUtils.rm_rf(pkg)
+    FileUtils.mkdir_p(pkg)
+
+    built = Release::Ordering.ordered_specs.map do |spec|
+      output = File.join(pkg, "#{spec.name}-#{spec.version}.gem")
+      # gem build validates the files list relative to the working directory, so
+      # each build runs from its own gem dir; --output writes back into pkg/.
+      # --strict escalates any spec warning to a build failure.
+      Dir.chdir(File.dirname(spec.loaded_from)) do
+        sh "gem build #{File.basename(spec.loaded_from)} --strict --output #{output}"
+      end
+      File.basename(output)
+    end
+
+    puts "\nBuilt #{built.length} gems into pkg/ (build/push order):"
+    built.each { |f| puts "  #{f}" }
+  end
+
+  desc "Push pkg/*.gem to RubyGems in dependency order (hames first, terret last). " \
+       "Run by a human: gem push needs RubyGems MFA. A version already published " \
+       "is skipped, so a half-finished release is safe to re-run."
+  task :push do
+    require_relative "release/ordering"
+
+    published = lambda do |name, version|
+      require "open-uri"
+      require "json"
+      body = URI.open("https://rubygems.org/api/v1/versions/#{name}.json", &:read)
+      JSON.parse(body).any? { |v| v["number"] == version.to_s }
+    rescue OpenURI::HTTPError
+      false # 404 => the gem has never been published, so there is nothing to skip
+    end
+
+    Release::Ordering.ordered_specs.each do |spec|
+      gem_file = File.expand_path("pkg/#{spec.name}-#{spec.version}.gem", __dir__)
+      abort "release:push: #{gem_file} is missing — run `rake release:build` first" unless File.exist?(gem_file)
+
+      if published.call(spec.name, spec.version)
+        puts "skip  #{spec.name} #{spec.version} (already on RubyGems)"
+        next
+      end
+
+      puts "push  #{File.basename(gem_file)}"
+      sh "gem push #{gem_file}"
+    end
+  end
 end

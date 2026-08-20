@@ -5,10 +5,10 @@ module Terret
   # terret.gemspec reads, so the number lives in exactly one place.
   #
   # Deliberately NOT Terret::VERSION: terret-core already owns that constant
-  # and it is terret-core's number. The two are not on the same version until
-  # the lockstep release, and quietly redefining a sibling gem's version
-  # constant is not a thing this gem gets to do.
+  # and it is terret-core's number. The 0.1.0 lockstep release aligns the two
+  # numbers, but they stay distinct constants — quietly redefining a sibling
+  # gem's version constant is not a thing this gem gets to do.
   module Meta
-    VERSION = "0.0.2"
+    VERSION = "0.1.0"
   end
 end
