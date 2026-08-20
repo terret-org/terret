@@ -30,7 +30,7 @@ All frames in both directions are JSON text frames, one object per frame.
 Two frame families, distinguished by the `seq` key: session events have it,
 protocol frames never do.
 
-**Session events** — the durable envelope serialized as-is:
+**Session events** are the durable envelope serialized as-is:
 
     {"id":"5f2c...","session_id":"s1","seq":7,"at":"2026-08-18T04:10:11.123456Z",
      "type":"assistant/chunk","payload":{"text":"22C"}}
@@ -41,30 +41,30 @@ ISO8601 with microseconds. Event types and payloads are the durable set in
 
 **Protocol frames:**
 
-- `{"type":"hello","proto":1,"session_id":"s1","last_seq":41}` — sent once on
-  connect, before anything else. `last_seq` is the highest seq in the log at
-  that moment (`session/created` guarantees at least 0). Nothing streams until
-  the client subscribes.
-- `{"type":"replay_truncated","requested_from_seq":0,"from_seq":5001}` — sent
-  when a `subscribe` reached further back than the server's `replay_limit`
-  (below). `requested_from_seq` is what the client asked for; `from_seq` is the
-  seq its replay actually begins at. The client is missing everything in
-  `[requested_from_seq, from_seq)` and must not treat this stream as holding it.
-  Sent before that window's first event, so a client that sees it knows its
-  first replayed event is not the one it asked for.
-- `{"type":"error","code":"...","message":"..."}` — codes:
-  - `unauthorized` — bad or missing token; connection closes.
-  - `superseded` — a newer connection took over this agent; connection closes.
-  - `lagged` — the client read too slowly and its outbound queue overflowed;
+- `{"type":"hello","proto":1,"session_id":"s1","last_seq":41}` is sent once
+  on connect, before anything else. `last_seq` is the highest seq in the log
+  at that moment (`session/created` guarantees at least 0). Nothing streams
+  until the client subscribes.
+- `{"type":"replay_truncated","requested_from_seq":0,"from_seq":5001}` is
+  sent when a `subscribe` reached further back than the server's
+  `replay_limit` (below). `requested_from_seq` is what the client asked for;
+  `from_seq` is the seq its replay begins at. The client is missing
+  everything in `[requested_from_seq, from_seq)` and must not treat this
+  stream as holding it. Sent before that window's first event, so a client
+  that sees it knows its first replayed event is not the one it asked for.
+- `{"type":"error","code":"...","message":"..."}`, where `code` is one of:
+  - `unauthorized`: bad or missing token; connection closes.
+  - `superseded`: a newer connection took over this agent; connection closes.
+  - `lagged`: the client read too slowly and its outbound queue overflowed;
     connection closes. Resubscribe from your last durable seq.
-  - `bad_frame` — unparseable or invalid client frame; connection stays open.
-  - `not_running` — `cancel` arrived while no turn was running; stays open.
-  - `stale_call` — `approve`/`deny` named a call with no standing approval
+  - `bad_frame`: unparseable or invalid client frame; connection stays open.
+  - `not_running`: `cancel` arrived while no turn was running; stays open.
+  - `stale_call`: `approve`/`deny` named a call with no standing approval
     request (already resolved, never requested, or a typo); nothing is
     appended and the connection stays open.
-  - `unsupported` — the frame needs a plugin this deployment does not mount
+  - `unsupported`: the frame needs a plugin this deployment does not mount
     (`approve`/`deny` without the approvals row); stays open.
-  - `internal` — the server hit an unexpected error serving this connection;
+  - `internal`: the server hit an unexpected error serving this connection;
     connection closes. Resubscribe from your last durable seq.
 
 ## Client → server
@@ -87,13 +87,13 @@ Frames larger than 1 MiB are rejected as `bad_frame`.
 `from_seq` is the first seq the client wants, **inclusive**. A fresh client
 sends 0. A reconnecting client sends `<highest seq it has durably recorded> + 1`.
 The server replays the log from `from_seq` and then tails live dispatch, with
-no gap and no duplicate — exact, not best-effort, because seq is gapless and
-the log is append-only. Subscribing again replaces the previous subscription
-(the tail is re-established from the new `from_seq`).
+no gap and no duplicate: the guarantee is exact, not best-effort, because seq
+is gapless and the log is append-only. Subscribing again replaces the
+previous subscription (the tail is re-established from the new `from_seq`).
 
 Resubscribing mid-stream replaces the subscription server-side, but frames
 from the replaced subscription that were already queued or in flight may
-still arrive before the new replay's first event — that is inherent to a
+still arrive before the new replay's first event. This is inherent to a
 full-duplex transport, not a server defect. A client that resubscribes
 mid-stream should discard incoming events until it sees `seq == from_seq`
 (the first event of its new replay).
@@ -103,20 +103,19 @@ history read. The server bounds one reconnect's replay at `replay_limit`
 events (config, default 10000): a `from_seq` reaching further back than that
 many events behind the tip is pulled forward to the newest `replay_limit`
 window, and the server sends a `replay_truncated` frame (above) naming the seq
-the replay actually starts at *before* that window's first event. The
+the replay starts at *before* that window's first event. The
 replayed window is still gapless and duplicate-free and tails live with no
-gap — the cap moves only where the window *starts*, and that move is always
+gap. The cap moves only where the window *starts*, and that move is always
 signaled, never silent. A client that needs the skipped history must read it
-from a durable store out of band; the socket will not resend it. So a
+from a durable store out of band; the socket will not resend it. A
 reconnecting client that has been away a long time should expect its
-subscribe to be capped rather than assume it can recover the whole log over
-the wire.
+subscribe to be capped. It cannot recover the whole log over the wire.
 
 **Concurrent replays are capped.** Across all connections the server runs at
 most `max_concurrent_replays` replay reads at once (config, default 4). A
-reconnect storm — the predictable failure mode after a deploy — therefore
-does not become N simultaneous log reads; surplus connections wait their turn
-for a replay slot (the connection is held open, not rejected) and proceed as
+reconnect storm (the predictable failure mode after a deploy) therefore does
+not become N simultaneous log reads; surplus connections wait their turn for
+a replay slot (the connection is held open, not rejected) and proceed as
 slots free. Only the log read is gated, not the live tail, so a slow client
 draining its replay never holds a slot away from another reconnect. Combined
 with jittered client backoff, this keeps a thundering herd off the store.
@@ -124,48 +123,48 @@ with jittered client backoff, this keeps a thundering herd off the store.
 ### inject
 
 `wake: true` on an idle agent starts a turn with `text` as its input. On a
-busy agent (or with `wake: false`) the text is queued in the agent's inbox and
-rides into the next step of the current or next turn — that is the mid-turn
-steer. Injection is acknowledged by the log itself, and the event type records
-which of the two it was: the waking text that starts a turn lands as that
-turn's own durable `user/message`, while a steer drained from the inbox lands
-as durable `context/injected`. Both project into model history as user
-messages; the distinction is provenance, kept because the log is the record of
-what actually happened.
+busy agent (or with `wake: false`) the text is queued in the agent's inbox
+and rides into the next step of the current or next turn. That is the
+mid-turn steer. Injection is acknowledged by the log itself, and the event
+type records which of the two it was: the waking text that starts a turn
+lands as that turn's own durable `user/message`, while a steer drained from
+the inbox lands as durable `context/injected`. Both project into model
+history as user messages; the distinction is provenance, kept because the
+log is the record of what happened.
 
-If the log holds an **open turn** (a `turn/start` with no `turn/end` after it —
-the process died mid-turn, or was deployed over), `wake: true` on an idle agent
-**resumes that turn** rather than starting a new one: no second `turn/start`,
-the tool calls the open step still owes are executed, and the wake text rides
+If the log holds an **open turn** (a `turn/start` with no `turn/end` after
+it, because the process died mid-turn or was deployed over), `wake: true` on
+an idle agent **resumes that turn**: no second `turn/start` is appended, the
+tool calls the open step still owes are executed, and the wake text rides
 the resumed turn's next step as `context/injected`. Any stimulus resumes; an
 approval verdict is not required.
 
-No wake is ever dropped. Two `wake: true` frames arriving in one read burst can
-both find the agent idle before either turn starts; the loser's turn refuses,
-and its text is requeued into the inbox to ride the winner's next step. A
-client therefore never has to detect or retry a lost wake.
+No wake is ever dropped. Two `wake: true` frames arriving in one read burst
+can both find the agent idle before either turn starts; the loser's turn
+refuses, and its text is requeued into the inbox to ride the winner's next
+step. A client therefore never has to detect or retry a lost wake.
 
 ### cancel
 
 Requests a cooperative stop of the running turn. The loop honors it at step
-boundaries: a cancel that races a tool result loses the race to the log entry
-but wins the turn — the `tool/result` is recorded, then the turn closes with
-`turn/end {status: "cancelled", reason: ...}`. A cancel with no turn running
-is answered `not_running`.
+boundaries: a cancel that races a tool result loses the race to the log
+entry but wins the turn: the `tool/result` is recorded, then the turn closes
+with `turn/end {status: "cancelled", reason: ...}`. A cancel with no turn
+running is answered `not_running`.
 
 A cancel observed part-way through a step's tool batch truncates the rest of
 that batch: every remaining call in it still logs its `tool/call` and a
 `tool/result` carrying the error `cancelled before execution`, so nothing runs
 but the projection never holds a call without a result.
 
-The M8 tool barrier moves where that truncation can land without changing the
-guarantee. Calls declared `concurrency: :parallel` execute in maximal runs
-under one barrier (docs/subagents.md §5), and a run is not interruptible from
-outside once it starts — so a cancel is observed *between* runs rather than
-between individual calls, and a batch cancelled mid-run produces fewer
-`cancelled before execution` results than the same batch would have before the
-barrier existed. Every call in the batch still ends with a `tool/result`
-either way.
+The M8 tool barrier moves where that truncation can land without changing
+the guarantee. Calls declared `concurrency: :parallel` execute in maximal
+runs under one barrier (docs/subagents.md §5), and a run is not interruptible
+from outside once it starts. A cancel is therefore observed *between* runs
+rather than between individual calls, and a batch cancelled mid-run produces
+fewer `cancelled before execution` results than the same batch would have
+before the barrier existed. Every call in the batch still ends with a
+`tool/result` either way.
 
 `turn/end`'s `status` is one of `completed`, `cancelled`, `rejected`, `empty`,
 or `failed` (see docs/lifecycle.md, "The status machine"). A failed *resume*
@@ -186,27 +185,26 @@ is not mounted, nothing ever parks and both frames answer `unsupported`.
 Where it is mounted, a tool whose definition demands a decision parks inside
 the tools pipeline and the server appends durable `approval/requested`
 `{call_id:, name:, args:}`. A verdict appends durable `approval/resolved` with
-`{call_id:, verdict: "approved"|"denied", reason?:}`, which unparks the call —
-approved runs it, denied returns an error result to the model. `call_id` is the
-`id` of the corresponding `tool/call` event; it is named `call_id` rather than
-`id` because inside an approval payload a bare `id` would read as the
+`{call_id:, verdict: "approved"|"denied", reason?:}`, which unparks the call:
+approved runs it, denied returns an error result to the model. `call_id` is
+the `id` of the corresponding `tool/call` event; it is named `call_id` rather
+than `id` because inside an approval payload a bare `id` would read as the
 approval's own identifier, not the call it references.
 
-Verdicts are validated against the log, not taken on faith: only a `call_id`
-with a standing request and no verdict yet is accepted. Anything else — an
-already-resolved call, a call that never asked, a typo — answers `stale_call`
-and appends nothing, so a double approve cannot pollute the log. "Standing"
-means within the **open turn**: a request whose turn has since closed is
-settled, and a verdict arriving for it answers `stale_call` too. Provider
-tool call ids are not contractually unique, so a decision never carries
-across a turn boundary.
+Verdicts are validated against the log: only a `call_id` with a standing
+request and no verdict yet is accepted. Anything else (an already-resolved
+call, a call that never asked, a typo) answers `stale_call` and appends
+nothing, so a double approve cannot pollute the log. "Standing" means within
+the **open turn**: a request whose turn has since closed is settled, and a
+verdict arriving for it answers `stale_call` too. Provider tool call ids are
+not contractually unique, so a decision never carries across a turn boundary.
 
-Both sides being durable is what survives a process death. If the server
-restarted while a call was parked, no fiber is waiting when the verdict lands;
-the server sees an idle agent with an open turn in the log and resumes the
-turn, which re-executes the owed call and finds the recorded verdict instead of
-parking again (see docs/lifecycle.md, "Durable approvals" and "Resuming an open
-turn").
+Both request and verdict are durable, and that is what survives a process
+death. If the server restarted while a call was parked, no fiber is waiting
+when the verdict lands; the server sees an idle agent with an open turn in
+the log and resumes the turn, which re-executes the owed call and finds the
+recorded verdict instead of parking again (see docs/lifecycle.md, "Durable
+approvals" and "Resuming an open turn").
 
 ### set_model
 
@@ -216,13 +214,13 @@ the live service. Takes effect at the next step. Invalid specs get `bad_frame`.
 ### set_policy
 
 Replaces the agent's active tool allow list with `patterns` (a list of
-`File.fnmatch` globs). Appends durable `policy/updated {patterns}` — the
-last one appended wins, it is effective on the very next tool call with no
+`File.fnmatch` globs). Appends durable `policy/updated {patterns}`: the last
+one appended wins, it is effective on the very next tool call with no
 reinstall, and it survives a restart because replay rebuilds it (see
 docs/lifecycle.md, "Hot-reloadable permissions"). `patterns` must be an
 array of strings; anything else gets `bad_frame` and nothing is appended. It
-is bounded at 128 patterns of at most 256 characters each — the set is
-durable and every later tool call scans it — and a frame over either bound
+is bounded at 128 patterns of at most 256 characters each (the set is
+durable and every later tool call scans it), and a frame over either bound
 gets `bad_frame` with nothing appended.
 
 ## Liveness
@@ -235,12 +233,12 @@ frame stops a turn.
 ## Backpressure
 
 Outbound events go through a bounded per-connection queue. Session dispatch
-never blocks on a slow socket: when the queue overflows, the client is dropped
-with `lagged` rather than allowed to stall the loop. Reconnect-then-replay and
-snapshot-then-tail are the same mechanism, so recovery is one `subscribe`.
-Replay is flow-controlled: the server waits for the client while replaying
-history, so a long log never looks like a slow reader. Only the live tail is
-drop-eligible.
+never blocks on a slow socket: when the queue overflows, the server drops
+the client with `lagged` to keep the loop from stalling. Reconnect-then-replay
+and snapshot-then-tail are the same mechanism, so recovery is one
+`subscribe`. Replay is flow-controlled: the server waits for the client
+while replaying history, so a long log never looks like a slow reader. Only
+the live tail is drop-eligible.
 
 ## Versioning
 

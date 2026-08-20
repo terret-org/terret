@@ -2,21 +2,21 @@
 
 This is a complete worked example: an empty gem to a tool a Terret agent
 can call, with honest metadata and a test. The running example is
-`terret-fortune` — a `fortune` tool that returns one line from a vendored
-list — and it is small on purpose, so the shape shows through. Everything
-here is a real, runnable gem; `terret-fortune` will ship as its own
-repository (Task 10 publishes it, and keeps this page in lockstep), and this
-page is that repository made generic.
+`terret-fortune`, a `fortune` tool that returns one line from a vendored
+list. It is small on purpose, so the shape shows through. Everything here
+is a real, runnable gem. `terret-fortune` will ship as its own repository;
+Task 10 publishes it and keeps this page in lockstep. This page is that
+repository made generic.
 
 Read `docs/hames-primer.md` first if the words *service*, *effect*, and
-*row* are not yet familiar — a tool provider is an ordinary Hames service,
+*row* are not yet familiar. A tool provider is an ordinary Hames service,
 and nothing here escapes the kernel's five nouns. The tool pipeline it
 plugs into is `docs/exec.md` §5 and the roster it joins is
 `gems/terret-tools-std`; the discovery mechanism that mounts it is
 `docs/composition.md`, walked end to end in
 `docs/cookbook/adding-a-bundle.md`.
 
-## 1. What a tool actually is
+## 1. What a tool is
 
 A tool is a `Terret::Tools::Definition` sitting in `ctx[:tools]`, the
 registry (`gems/terret-core/lib/terret/tools.rb`). You never build the
@@ -27,17 +27,17 @@ def register(name:, description:, params: {}, mutating: false,
              approval: :never, concurrency: :serial, ctx: @ctx, &handler)
 ```
 
-- `name` — the string the model calls, and the string an allow list matches
+- `name`: the string the model calls, and the string an allow list matches
   against (§5). Claude Code's spelling verbatim where CC has the tool,
   snake_case where it does not (`docs/exec.md` §5); `fortune` has no CC
   equivalent, so it is lowercase.
-- `description` — what the model reads to decide whether to call it.
-- `params` — a JSON-Schema object describing the arguments; `{}` for a tool
+- `description`: what the model reads to decide whether to call it.
+- `params`: a JSON-Schema object describing the arguments; `{}` for a tool
   that takes none.
-- `mutating`, `approval`, `concurrency` — the honest metadata of §4.
-- `ctx:` — **pass this explicitly** (§3). It is what ties the registration's
-  lifetime to the mounting row.
-- the block — the handler, receiving the model's arguments as keywords.
+- `mutating`, `approval`, `concurrency`: the honest metadata of §4.
+- The `ctx:` keyword: **pass this explicitly** (§3). It ties the
+  registration's lifetime to the mounting row.
+- the block: the handler, receiving the model's arguments as keywords.
 
 `register` returns the registration's disposer, because registering a tool
 is an ordinary reversible effect (`docs/hames-primer.md` §2): unmount the
@@ -64,11 +64,11 @@ terret-fortune/
     └── fortune_test.rb
 ```
 
-The gemspec declares the gem a bundle with one line of metadata, and — this
-is the half people forget — **depends on the gems its rows mount**. A
-bundle does not have to contain the code it mounts, but it has to make it
-available, and for a Ruby gem that means a dependency Bundler will put on
-the load path (`docs/composition.md` §2):
+The gemspec declares the gem a bundle with one line of metadata. This is
+the half people forget: it also **depends on the gems its rows mount**. A
+bundle has to make the code it mounts available; it does not have to
+contain that code itself. For a Ruby gem, that means a dependency Bundler
+puts on the load path (`docs/composition.md` §2):
 
 ```ruby
 # terret-fortune.gemspec
@@ -179,7 +179,7 @@ module Terret
 end
 ```
 
-Three things are worth reading twice:
+Three things in the example repay a second read:
 
 **`inject :tools`.** That, and nothing more, is what orders this row after
 the registry in the dependency-driven boot (`docs/hames-primer.md` §1). The
@@ -189,14 +189,14 @@ a silent misorder.
 
 **`ctx:` is passed, not defaulted.** The comment in the code says why, and
 it is the same reason the entire standard roster passes it: a tool carries
-authority — even a harmless one occupies a name in the roster — and its
-registration must die with the agent that made it, not outlive it on the
-root context. Leave it off and the tool works, right up until a forked
-agent scope disposes and its tool is still there.
+authority (even a harmless one occupies a name in the roster), and its
+registration must die with the agent that made it. Leave it off and the
+tool works, right up until a forked agent scope disposes and its tool is
+still there, live on the root context.
 
 **`params: {}`.** `fortune` takes no arguments, so its schema is the empty
 object and its handler takes no keywords. A tool with arguments describes
-them as a JSON-Schema object and receives them as keywords — see
+them as a JSON-Schema object and receives them as keywords. See
 `gems/terret-tools-std/lib/terret/tools_std/files.rb` for `Read`'s
 `file_path:` and `Grep`'s `pattern:`/`glob:`, where the handler's keyword
 signature matches the schema's `properties` and `required`.
@@ -218,17 +218,18 @@ all three are the permissive value *honestly*. Contrast the standard roster
 (`docs/exec.md` §5): `Write` and `Edit` are `mutating: true`,
 `approval: :policy`, `concurrency: :serial`, because they change files, may
 warrant a human, and must not interleave. Set these to what your tool
-actually does, not to what makes it convenient to call:
+does. Choosing them for convenience defeats the point of the
+metadata:
 
 - **`mutating`** is true if the call changes state anything else can
-  observe — a file, a process, a remote resource. The approvals gate's rule
+  observe: a file, a process, a remote resource. The approvals gate's rule
   is `always || (policy && mutating)`, so `mutating: false` with
   `approval: :policy` never parks; a mutating tool is where `:policy` bites.
 - **`approval`** is `:never`, `:policy`, or `:always`. `:never` skips the
   gate; `:always` asks every time; `:policy` asks only where an approvals
   row is mounted *and* the tool is mutating. Note the honest limit: in a
-  profile with no approvals row, `:policy` reduces to the allow list alone —
-  it is not a guarantee a human is watching (`docs/security.md`, "Approval
+  profile with no approvals row, `:policy` reduces to the allow list alone.
+  It is not a guarantee a human is watching (`docs/security.md`, "Approval
   defaults").
 - **`concurrency`** is `:parallel` or `:serial` (the default). The loop
   runs a message's calls in maximal runs of `:parallel`-declared
@@ -238,12 +239,11 @@ actually does, not to what makes it convenient to call:
 
 ## 5. The allow list denies it until a profile says otherwise
 
-This is the one thing that surprises people, so it goes in bold: **mounting
-the tool does not make it callable.** Terret's tool policy is
+**Mounting the tool does not make it callable.** Terret's tool policy is
 deny-by-default (`gems/terret-core/lib/terret/tools.rb`, `AllowList`), and
 the base floor names exactly the standard roster and nothing else
 (`gems/terret/config/bundle.yml`). A `fortune` arriving from a third-party
-bundle is denied — "fortune is not on the allow list" — until a profile
+bundle is denied ("fortune is not on the allow list") until a profile
 adds it:
 
 ```yaml
@@ -262,18 +262,17 @@ rows:
         # ... restate the rest: a patch replaces the row's config WHOLESALE
 ```
 
-Two properties of that list are the ones to internalize. It is
+That list is
 **wholesale-replaced**, like every patch (`docs/composition.md` §4), so the
-patch above must restate every pattern the floor had — a patch that mentions
+patch above must restate every pattern the floor had. A patch that mentions
 only `fortune` drops the standard roster with it. And the patterns are
-`File.fnmatch` globs, case-sensitive, where `*` does not match a leading
-dot — both failing closed. That deny-by-default floor is exactly what
-deny-by-default buys: a tool from a bundle you added cannot run until a
-profile decides it may, which is the point.
+`File.fnmatch` globs: case-sensitive, and `*` does not match a leading dot.
+Both fail closed. A tool from a bundle you added cannot run until a
+profile decides it may.
 
 An agent can also widen its own live policy at runtime through
-`AllowList.update` (a durable `policy/updated` in its session), and that
-takes effect on the very next call and survives a restart. The floor is the
+`AllowList.update` (a durable `policy/updated` in its session). That takes
+effect on the very next call and survives a restart. The floor is the
 fallback for a session that never updated. See `docs/lifecycle.md`,
 "Hot-reloadable permissions", for the running-agent story;
 `docs/composition.md` §6 for the floor as a config row.
@@ -338,9 +337,9 @@ end
 ```
 
 `Terret::Tools::Call` and the `execute(call, ctx:)` signature are the real
-ones (`gems/terret-core/lib/terret/tools.rb`); `execute` runs the
-three-waterfall pipeline — `pre_execute` (where the allow list would veto,
-if one were mounted), `execute`, `post_execute` — and returns a
+ones (`gems/terret-core/lib/terret/tools.rb`). `execute` runs the
+three-waterfall pipeline: `pre_execute` (where the allow list would veto,
+if one were mounted), `execute`, `post_execute`. It returns a
 `Terret::Tools::Result` with `content` and `error`. The test above mounts
 no allow list, so the call is not gated; a test that wanted to prove the
 deny-by-default behavior would mount `Terret::Tools::AllowListFloor` with an
@@ -350,7 +349,7 @@ empty `patterns:` and assert the result's `error` names the allow list.
 
 The gem carries its own one-row bundle so a profile can stack it by name.
 That row, the metadata that makes it discoverable, and how a profile names
-the bundle are `docs/cookbook/adding-a-bundle.md` — this page ends where the
+the bundle are `docs/cookbook/adding-a-bundle.md`. This page ends where the
 tool is registered and tested; that one carries it into a running Terret.
 The bundle file is one row:
 
@@ -364,7 +363,7 @@ rows:
     plugin: Terret::Fortune::Tool
 ```
 
-And a profile that wants it stacks the bundle and — because of §5 — permits
+And a profile that wants it stacks the bundle and, because of §5, permits
 the tool:
 
 ```yaml
@@ -374,8 +373,5 @@ bundles:
   - terret-fortune  # this gem
 ```
 
-That is the whole path: a gem with one tool, honest about what it does,
-discoverable by shipping normally, denied until a profile says otherwise,
-and mounted by naming it. For the seam-implementation cousin of this
-recipe — a provider claiming a sole-provider key rather than adding a tool —
-see `docs/cookbook/adding-a-provider.md`.
+For the seam-implementation cousin of this recipe, a provider claiming a
+sole-provider key, see `docs/cookbook/adding-a-provider.md`.

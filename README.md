@@ -2,10 +2,10 @@
 
 A Ruby-native, model-agnostic agent harness where **everything is a plugin**,
 informed by DeepSeek Harness. A *terret* is the ring on a horse harness that
-the driving reins pass through — the small component that lets one driver
-guide any horse. **Hames** is the kernel underneath (the load-bearing pieces
-of the harness): services in a context, typed events with four dispatch
-modes, reversible effects, dependency-driven boot.
+the driving reins pass through: the small component that lets one driver guide
+any horse. **Hames** is the kernel underneath (the load-bearing pieces of the
+harness): services in a context, typed events with four dispatch modes,
+reversible effects, dependency-driven boot.
 
 Twelve gems in one repo:
 
@@ -30,83 +30,82 @@ Twelve gems in one repo:
   `async-websocket`.
 - `gems/terret-acp` is the second interface: an Agent Client Protocol server
   behind `ctx[:acp]` so an editor can drive an agent over JSON-RPC on stdio.
-  It consumes `session/event` and drives `ctx[:loop]` — the same two seams the
+  It consumes `session/event` and drives `ctx[:loop]`, the same two seams the
   socket does, on a different transport, with no change to core; mapping in
   `docs/acp.md`. stdlib-only, no network gem.
 - `gems/terret-mcp` is the MCP client: manceps-backed stdio and
   streamable-HTTP servers mounted as `mcp__<server>__<tool>` sources behind
   `ctx[:tools]`, per-server approval, per-call timeouts, the allow list in
   `terret-core`; mapping in `docs/mcp.md`.
-- `gems/terret-morph` is a `ctx[:summarizer]` provider: Morph's Compact API
-  on the wire proven in the deployed agora integration, extractive-
-  compressing a session's history instead of asking a model to write a
-  summary. Every failure declines to nil rather than raising, and an
-  injectable transport keeps its unit tests off the network.
+- `gems/terret-morph` is a `ctx[:summarizer]` provider: Morph's Compact API on
+  the wire proven in the deployed agora integration. It compresses a session's
+  history extractively instead of asking a model to write a summary. Every
+  failure declines to nil and never raises. An injectable transport keeps
+  its unit tests off the network.
 - `gems/terret-exec` is the execution world: `ctx[:fs]`, whose every path
   is contained to a granted workspace directory; `ctx[:subprocess]`, spawn
   and PTY under the one reactor with cooperative cancellation;
   `ctx[:shell]`, one persistent bash per agent whose cwd and environment
   survive between calls; `ctx[:terminals]`, named long-lived PTYs; and the
   `ctx[:sandbox]` seam every argv passes through before it spawns.
-- `gems/terret-tools-std` is the standard tool roster, carrying Claude
-  Code's names verbatim — `Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`,
-  `WebFetch`, and `terminal_open`/`input`/`read`/`close` — registered on
-  those seams with honest `mutating` and `approval` metadata. `Bash`
-  derives its approval from whether the sandbox isolates, and `WebFetch`
-  sits behind a deny-by-default domain policy re-checked on every redirect
-  hop.
+- `gems/terret-tools-std` is the standard tool roster, carrying Claude Code's
+  names verbatim (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `Bash`, `WebFetch`,
+  and `terminal_open`/`input`/`read`/`close`), registered on those seams with
+  honest `mutating` and `approval` metadata. `Bash` derives its approval from
+  whether the sandbox isolates. `WebFetch` sits behind a deny-by-default
+  domain policy re-checked on every redirect hop.
 - `gems/terret-sandbox-docker` is the container sandbox: one patch row
   moves the whole execution world into a long-lived container, with each
   workspace directory bind-mounted at the same absolute path and
   `--network none` by default.
-- `gems/terret` is the meta-gem: the composition layer and the `trt`
-  command. Bundles ship ordered config rows, profiles stack bundles,
-  patches adjust rows by id, and `Terret.boot` hands the result to the
-  Hames loader — so which plugins run, in what order, with what config is
-  a question YAML answers rather than Ruby. Ships `terret-base` (the log,
-  the harness, the model seam, the execution world sandboxed with the
-  network denied, the standard tool roster, and a policy floor that starts
-  closed), the `headless` profile template, and `trt boot` /
-  `trt dump-config` / `trt doctor` / `trt acp`. Contract in
-  `docs/composition.md`.
+- `gems/terret` is the meta-gem: the composition layer and the `trt` command.
+  Bundles ship ordered config rows, profiles stack bundles, patches adjust
+  rows by id, and `Terret.boot` hands the result to the Hames loader. Which
+  plugins run, in what order, and with what config, is a question YAML
+  answers; nobody edits Ruby to change it. Ships `terret-base` (the log, the
+  harness, the model seam,
+  the execution world sandboxed with the network denied, the standard tool
+  roster, and a policy floor that starts closed), the `headless` profile
+  template, and `trt boot` / `trt dump-config` / `trt doctor` / `trt acp`.
+  Contract in `docs/composition.md`.
 
 ## Status
 
-Milestones M0 through M8 are shipped: the Hames kernel, the session log
-with the "model-visible means logged" invariant, the tools pipeline, the
-agent loop, the OpenRouter adapter, durable SQLite sessions, the WebSocket
-interface, the MCP client, long-lived agent hardening — durable
-approvals, resumable turns that survive a `kill -9`, context compaction
-behind a summarizer seam, session titling, per-session cost accounting, and
-hot-reloadable per-agent policy — and the execution world: the filesystem,
+Milestones M0 through M8 are shipped: the Hames kernel, the session log with
+the "model-visible means logged" invariant, the tools pipeline, the agent
+loop, the OpenRouter adapter, durable SQLite sessions, the WebSocket
+interface, and the MCP client. Long-lived agent hardening shipped durable
+approvals, resumable turns that survive a `kill -9`, context compaction behind
+a summarizer seam, session titling, per-session cost accounting, and
+hot-reloadable per-agent policy. The execution world added the filesystem,
 subprocess, shell, and terminal seams under workspace scoping, the standard
-tool roster on top of them, credential redaction at both the tool pipeline
-and the log-append boundary, and a sandbox seam whose `docker` provider
-moves everything a tool executes into a container from one config row. M8
-added subagents and the release: the `Task` tool over a subagent seam (a
-child agent on its own fresh session, run to completion and its text
-returned), background `job_*` tools and `TodoWrite`, and a tool barrier that
-runs a message's `concurrency: :parallel` calls together on the reactor while
-a `:serial` tool is a barrier of one; the meta-gem's composition layer and
-the `trt` CLI (`boot`/`dump-config`/`doctor`/`acp`); `trt doctor` validating
-a profile against each service's `Hames::Schema`; the ACP editor interface; a
-bench lane with regression floors; a `ctx[:credentials]` seam (ENV-first,
-an optional AES-256-GCM store, every resolved value fed to the scrubber); and
-a security pass that made the allow-list floor authoritative, folded hash
-keys through the log scrubber, gated config-borne Ruby behind an explicit
-consent flag, and capped socket replay.
-`LLM::FakeAdapter` (canned script replay) remains the test/demo default;
-the OpenRouter path is proven by canned-wire tests plus a live smoke lane.
-Session payloads are primitives at the append boundary; typed parts encode
-through `LLM.encode_part`.
+tool roster built on them, credential redaction at both the tool pipeline and
+the log-append boundary, and a sandbox seam whose `docker` provider moves
+everything a tool executes into a container from one config row. M8 added
+subagents and the release. The `Task` tool delegates to a child agent over a
+subagent seam: a fresh session, run to completion, with its text returned.
+Background `job_*` tools and `TodoWrite` shipped alongside it, plus a tool
+barrier that runs a message's `concurrency: :parallel` calls together on the
+reactor while a `:serial` tool is a barrier of one. The meta-gem's composition
+layer and the `trt` CLI (`boot`/`dump-config`/`doctor`/`acp`) shipped too, and
+so did the ACP editor interface, a bench lane with regression floors, and a
+`ctx[:credentials]` seam (ENV-first, an optional AES-256-GCM store, every
+resolved value fed to the scrubber). `trt doctor` validates a profile against
+each service's `Hames::Schema`. A security pass closed out the milestone: it
+made the allow-list floor authoritative, folded hash keys through the log
+scrubber, gated config-borne Ruby behind an explicit consent flag, and capped
+socket replay. `LLM::FakeAdapter` (canned script replay) remains the test/demo
+default; the OpenRouter path is proven by canned-wire tests plus a live smoke
+lane. Session payloads are primitives at the append boundary; typed parts
+encode through `LLM.encode_part`.
 
 Install with `gem install terret`: the meta-gem depends on the base roster
 and ships the `terret-base` bundle. All twelve gems are published to
 RubyGems at `0.1.0`, released in lockstep.
 
 The full roadmap is `docs/terret-implementation-plan.md`; see its §12 for
-milestone detail and §14 for the deferrals recorded along the way. Note
-the plan has drifted from the code in places: it specifies RSpec (this uses
+milestone detail and §14 for the deferrals recorded along the way. Note the
+plan has drifted from the code in places: it specifies RSpec (this uses
 minitest), Ruby 3.4+ (this targets 4.0.6), and a separate `terret-llm` gem
 (the vocabulary lives in `terret-core`). Treat the code as current and the
 plan as intent.
@@ -132,32 +131,31 @@ ruby examples/boot_demo.rb   # bundles, profiles, patches; dump-config, boot, on
 ```
 
 Ruby 4.0.6, pinned in `.ruby-version` and `mise.toml`. `hames` and
-`terret-core` have zero runtime dependencies beyond stdlib, and that is a
-design constraint rather than a coincidence. Network-touching dependencies
-belong in adapter/interface gems (`terret-openrouter` carries `async-http`),
-never in the kernel or core.
+`terret-core` have zero runtime dependencies beyond stdlib, a deliberate
+design constraint. Network-touching dependencies belong in adapter/interface
+gems (`terret-openrouter` carries `async-http`), never in the kernel or core.
 
 ## Documentation
 
-- `docs/terret-implementation-plan.md` — the full roadmap and design
+- `docs/terret-implementation-plan.md` is the full roadmap and design
   rationale.
-- `docs/hames-primer.md` — the kernel on its own terms: services in a
+- `docs/hames-primer.md` covers the kernel on its own terms: services in a
   context, reversible effects, the four dispatch modes, config rows and
-  reconfigure, and `Hames::Schema`. No LLM or agent vocabulary, because the
-  kernel has none.
-- `docs/cookbook/` — worked, end-to-end recipes for building on Terret:
+  reconfigure, and `Hames::Schema`. It carries no LLM or agent vocabulary,
+  because the kernel has none.
+- `docs/cookbook/` holds worked, end-to-end recipes for building on Terret:
   adding a tool, adding a provider, adding a bundle. Start at
   `docs/cookbook/README.md`.
-- `docs/protocol.md` — the WebSocket wire contract (`terret-ws`).
-- `docs/acp.md` — the Agent Client Protocol mapping (`terret-acp`).
-- `docs/mcp.md` — the MCP tool-source mapping (`terret-mcp`).
-- `docs/exec.md` — the execution world: the seams, workspace scoping, the
+- `docs/protocol.md` is the WebSocket wire contract (`terret-ws`).
+- `docs/acp.md` is the Agent Client Protocol mapping (`terret-acp`).
+- `docs/mcp.md` is the MCP tool-source mapping (`terret-mcp`).
+- `docs/exec.md` covers the execution world: the seams, workspace scoping, the
   sandbox, the std tool roster, and redaction.
-- `docs/security.md` — the threat model the execution world is built
-  against, and where its boundaries honestly stop.
-- `docs/events.md` — the generated event catalog; regenerate with
+- `docs/security.md` is the threat model the execution world is built against,
+  and where its boundaries honestly stop.
+- `docs/events.md` is the generated event catalog; regenerate with
   `rake events:catalog` whenever an event's contract changes.
-- `docs/config-catalog.md` — the generated config catalog, one section per
+- `docs/config-catalog.md` is the generated config catalog, one section per
   service with a schema; regenerate with `rake config:catalog` whenever a
   service's config surface changes. `trt doctor` validates a profile against
   these same schemas.
