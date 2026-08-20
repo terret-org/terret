@@ -21,7 +21,7 @@ module Terret
     # Both stay the row's decision, where a deployment can see them.
     class Jobs < Hames::Service
       service_key :tools_std_jobs
-      inject :tools, :jobs
+      inject :tools, :jobs, :sandbox
       config_schema max_output: { type: Integer, default: 30_000,
                                   doc: "bytes of collected job output returned to the model before truncation" }
 
@@ -60,14 +60,34 @@ module Terret
 
       def start(ctx)
         @ctx = ctx
-        register_start
         register_collect
         register_stop
+        # job_start's approval is derived from sandbox isolation the way Bash's
+        # is (docs/exec.md §5, §13): job_start runs `bash -lc <cmd>` in a fresh
+        # shell, so unsandboxed it is arbitrary shell execution and needs a human
+        # every time, while inside a sandbox the container is the backstop and it
+        # is governed like any other mutating tool. The verdict is captured at
+        # registration, so a hot sandbox swap re-derives it through the
+        # config/updated listener rather than leaving a stale value in front of a
+        # shell whose isolation changed underneath it.
+        #
+        # The effect frame owns whichever registration is current: the loader
+        # emits config/updated OUTSIDE with_owner, so a registration made from
+        # the listener would belong to no row — and an ownerless job_start would
+        # outlive the row that mounted it, holding process-spawning authority
+        # nothing in the harness could still take away.
+        @ctx.effect do
+          register_start
+          -> { @start_registration&.call }
+        end
+        @ctx.on("config/updated") { |_id, _config| refresh_start! }
       end
 
       # max_output is read at call time, so a swapped row governs the very next
       # call; every other knob these tools reach (the job cap, the cwd) belongs
-      # to the jobs row and is read there.
+      # to the jobs row and is read there. job_start's approval, by contrast, IS
+      # a registration-time capture — the config/updated listener above, not a
+      # remount, is what keeps it current.
       def reconfigure(_config); end
 
       private
@@ -101,10 +121,22 @@ module Terret
         # omits it has made a mistake, and an omitted keyword would cost a
         # whole turn to an ArgumentError where a defaulted one costs a result
         # the model can read and correct.
-        tool("job_start", START_DESCRIPTION, params, mutating: true, approval: :policy,
-             concurrency: :serial) do |session_id:, command: nil|
+        @start_approval = derive_approval
+        @start_registration = tool("job_start", START_DESCRIPTION, params, mutating: true,
+             approval: @start_approval, concurrency: :serial) do |session_id:, command: nil|
           started(@ctx[:jobs].start(command!(command), session: session_id))
         end
+      end
+
+      # §13 / docs/exec.md §5: the sandbox's own verdict, never a config knob of
+      # this row's — an isolation claim belongs to the thing doing the isolating.
+      def derive_approval = @ctx[:sandbox].isolated? ? :policy : :always
+
+      def refresh_start!
+        return if derive_approval == @start_approval
+
+        @start_registration&.call
+        register_start
       end
 
       def register_collect

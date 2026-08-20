@@ -10,12 +10,20 @@ class JobToolsTest < Minitest::Test
   RUBY = RbConfig.ruby
   ROSTER = %w[job_start job_collect job_stop].freeze
 
-  def boot(config: {}, jobs_config: {}, extra_rows: [])
+  # Stands in for the docker provider (plan §12), exactly as bash_test's does: a
+  # sandbox whose verdict is a config knob, so a row swap can flip `isolated?`
+  # hot without a second plugin class.
+  class ConfiguredSandbox < Terret::Exec::SandboxNone
+    def isolated? = config.fetch(:isolated, false)
+    def reconfigure(_config); end
+  end
+
+  def boot(config: {}, jobs_config: {}, sandbox: Terret::Exec::SandboxNone, sandbox_config: {}, extra_rows: [])
     Hames.reset_events!
     Terret.declare_events!
     loader = Hames::Loader.new
     loader.layer([
-      { id: "sandbox", plugin: Terret::Exec::SandboxNone },
+      { id: "sandbox", plugin: sandbox, config: sandbox_config },
       { id: "subprocess", plugin: Terret::Exec::Subprocess },
       { id: "jobs", plugin: Terret::Exec::Jobs, config: jobs_config },
       { id: "tools", plugin: Terret::Tools::Registry },
@@ -90,14 +98,15 @@ class JobToolsTest < Minitest::Test
     assert_equal ROSTER.sort, ctx[:tools].schemas.map { |s| s[:name] }.sort
   end
 
-  # The two that spawn or signal a process are mutating and governed by
-  # policy; reading a buffer asks nobody, which is what lets a subagent watch
-  # a job it could not have started.
+  # The two that spawn or signal a process are mutating; reading a buffer asks
+  # nobody, which is what lets a subagent watch a job it could not have started.
+  # job_start's approval is derived from sandbox isolation like Bash's (below),
+  # so unsandboxed — the default here — it is :always.
   def test_the_three_tools_declare_the_metadata_the_contract_names
     ctx, = boot
     start = ctx[:tools].fetch("job_start")
     assert start.mutating
-    assert_equal :policy, start.approval
+    assert_equal :always, start.approval, "unsandboxed, a background shell needs a human every time"
     assert_equal :serial, start.concurrency
 
     collect = ctx[:tools].fetch("job_collect")
@@ -109,6 +118,46 @@ class JobToolsTest < Minitest::Test
     assert stop.mutating
     assert_equal :policy, stop.approval
     assert_equal :serial, stop.concurrency
+  end
+
+  # job_start runs `bash -lc <cmd>` in a fresh shell, so it is arbitrary shell
+  # execution exactly as Bash is — and gets the same §13 treatment: a human
+  # every time outside a sandbox, governed like any other mutating tool inside
+  # one. The hardcoded :policy it used to carry ran that unsandboxed shell at
+  # the weaker bar Bash is specifically not allowed to use.
+  def test_job_start_needs_a_human_every_time_outside_a_sandbox
+    ctx, = boot(sandbox: ConfiguredSandbox, sandbox_config: { isolated: false })
+    assert_equal :always, ctx[:tools].fetch("job_start").approval
+  end
+
+  def test_job_start_is_governed_like_any_other_mutating_tool_inside_a_sandbox
+    ctx, = boot(sandbox: ConfiguredSandbox, sandbox_config: { isolated: true })
+    assert_equal :policy, ctx[:tools].fetch("job_start").approval
+  end
+
+  def test_a_hot_sandbox_swap_re_registers_job_start_with_the_freshly_derived_approval
+    ctx, loader = boot(sandbox: ConfiguredSandbox, sandbox_config: { isolated: false })
+    assert_equal :always, ctx[:tools].fetch("job_start").approval
+
+    loader.reconfigure!("sandbox", { isolated: true })
+    assert_equal :policy, ctx[:tools].fetch("job_start").approval,
+                 "an approval captured at registration must not outlive the sandbox it was derived from"
+
+    loader.reconfigure!("sandbox", { isolated: false })
+    assert_equal :always, ctx[:tools].fetch("job_start").approval, "and back, when the sandbox goes away"
+  end
+
+  # The re-registration trap Bash documents: config/updated is emitted outside
+  # with_owner, so a job_start re-registered from the listener must still belong
+  # to its row, or it would outlive the row holding process-spawning authority.
+  def test_the_re_registered_job_start_still_dies_with_the_row
+    ctx, loader = boot(sandbox: ConfiguredSandbox, sandbox_config: { isolated: false })
+    loader.reconfigure!("sandbox", { isolated: true })
+    assert_equal 1, ctx[:tools].schemas.count { |s| s[:name] == "job_start" },
+                 "re-registration replaces the definition rather than doubling it"
+
+    loader.unload!("std_jobs")
+    assert_empty ctx[:tools].schemas, "a re-registered tool must still belong to its row"
   end
 
   def test_job_start_takes_a_command_string_like_bash_does

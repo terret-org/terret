@@ -351,7 +351,7 @@ shells and its terminals do.
 
 | Tool | mutating | approval | concurrency |
 |---|---|---|---|
-| `job_start` | `true` | `:policy` | `:serial` |
+| `job_start` | `true` | `:always` unsandboxed / `:policy` sandboxed | `:serial` |
 | `job_collect` | `false` | `:never` | `:parallel` |
 | `job_stop` | `true` | `:policy` | `:serial` |
 
@@ -361,7 +361,13 @@ exactly as written. Job tools are
 snake_case because they have no Claude Code equivalent to be verbatim
 with — the same rule that produced `terminal_open` in M7.
 
-`job_start` and `job_stop` are `:policy` on a mutating tool, which means a
+`job_start`'s approval is derived from sandbox isolation exactly as `Bash`'s
+is (docs/exec.md §5): it runs `bash -lc <cmd>` in a fresh shell, so unsandboxed
+it is arbitrary shell execution and is `:always`, and inside a sandbox the
+container is the backstop so it is `:policy` like any other mutating tool. The
+verdict is captured at registration and re-derived on a hot sandbox swap
+through the `config/updated` listener, the same mechanism `Bash` uses.
+`job_stop` is `:policy`. Either way both need an approver, which means a
 **subagent cannot start or stop a job** in a profile where approvals are
 mounted: §2's fail-closed rule denies the call rather than parking it. And a
 child cannot read its parent's either. A job's ledger is keyed by the session
