@@ -170,6 +170,22 @@ class MCPServiceTest < Minitest::Test
     assert d.mutating
   end
 
+  # A server's tools/list is remote input. One entry with a control-char name
+  # would otherwise be interpolated straight into a tool id and a log line; it
+  # is skipped with a warning instead, and the well-named tools beside it still
+  # mount — one bad entry must not crash the mount or contaminate the roster.
+  def test_a_tool_with_an_unsafe_name_is_skipped_and_the_valid_ones_still_mount
+    fake = FakeClient.new(tools: [FakeTool.new("search", "Find", {}),
+                                  FakeTool.new("evil#{0.chr}name", "bad", {})])
+    ctx = boot(servers: { "nexus" => { url: "https://x/mcp" } }, factory: ->(*) { fake })
+
+    _out, err = capture_io { ctx[:mcp].mount! }
+
+    assert_equal ["mcp__nexus__search"], ctx[:tools].schemas.map { |s| s[:name] },
+                 "the control-char tool must not be mounted"
+    assert_match(/skipping tool with an unsafe name/, err)
+  end
+
   def test_unmount_reverses_every_registration_and_disconnects
     fake = FakeClient.new(tools: [FakeTool.new("a", "", {}), FakeTool.new("b", "", {})])
     ctx = boot(servers: { "s" => { url: "https://x/mcp" } }, factory: ->(*) { fake })

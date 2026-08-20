@@ -8,6 +8,16 @@ module Terret
     module Translate
       NAME_RE = /\A[a-z0-9_-]+\z/
 
+      # A tool name comes from the server's tools/list — remote input, not the
+      # operator's config — and is interpolated into the `mcp__server__name` tool
+      # id and into every log line that names the call. A control-char or
+      # whitespace name would poison both, so a tool is held to a safe identifier
+      # charset before it is mounted (Service#sync_tools skips one that fails).
+      # It is broader than the operator-chosen server NAME_RE on purpose — real
+      # MCP tools are named in mixed case and sometimes carry dots — but it still
+      # admits nothing that is not a plain, log-safe identifier character.
+      TOOL_NAME_RE = /\A[A-Za-z0-9_.-]+\z/
+
       module_function
 
       def assert_server_name!(name)
@@ -16,6 +26,8 @@ module Terret
 
         name
       end
+
+      def valid_tool_name?(name) = name.is_a?(String) && name.match?(TOOL_NAME_RE)
 
       def tool_name(server, tool) = "mcp__#{server}__#{tool}"
 

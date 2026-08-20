@@ -36,6 +36,25 @@ class TranslateTest < Minitest::Test
     assert_equal "ok-name_1", T.assert_server_name!("ok-name_1")
   end
 
+  # A tool name comes from the server's tools/list, not from the operator, and
+  # is interpolated into the mcp__server__name tool id and every log line that
+  # names the call. A control-char or whitespace name would poison both, so it
+  # is held to a safe identifier charset before it is mounted.
+  def test_a_tool_name_is_validated_against_a_safe_charset
+    assert T.valid_tool_name?("search")
+    assert T.valid_tool_name?("get_weather")
+    assert T.valid_tool_name?("listResources"), "mixed case is a real MCP convention"
+    assert T.valid_tool_name?("io.github.tool-v2"), "dots and hyphens are ordinary in tool names"
+
+    refute T.valid_tool_name?("evil#{0.chr}name"), "a NUL must not reach a tool id"
+    refute T.valid_tool_name?("ring#{7.chr}bell"), "a control char must not reach a tool id"
+    refute T.valid_tool_name?("has space")
+    refute T.valid_tool_name?("with/slash")
+    refute T.valid_tool_name?(""), "an empty name names nothing"
+    refute T.valid_tool_name?(nil)
+    refute T.valid_tool_name?(:search), "a non-string is not a valid name"
+  end
+
   def test_structured_content_wins_and_is_returned_as_primitives
     result = FakeResult.new(content: [FakeContent.new("text", "ignored", nil)],
                             structured_content: { "total" => 3 })

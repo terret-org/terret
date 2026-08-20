@@ -143,6 +143,14 @@ module Terret
 
         @ctx.with_owner("mcp:#{name}") do
           tools.each do |tool|
+            # The name is remote input interpolated into the tool id and the log;
+            # one entry with an unsafe name is skipped rather than mounted, and
+            # the rest of the roster still comes up (Translate.valid_tool_name?).
+            unless Translate.valid_tool_name?(tool.name)
+              warn "terret-mcp: #{name}: skipping tool with an unsafe name #{tool.name.inspect}"
+              next
+            end
+
             args = Translate.definition_args(server: name, tool: tool, approval: approval)
             remote = tool.name
             entry[:disposers] << @ctx[:tools].register(**args) do |**call_args|
