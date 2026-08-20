@@ -208,11 +208,20 @@ module Terret
         tag = terret_tag(node, CORE_SCALAR_TAGS)
         return register(node, Tagged.new(tag: tag, argument: node.value)) if tag
 
-        begin
+        value = begin
           super
         rescue Psych::DisallowedClass => e
           raise Error, needs_quoting(node, e)
         end
+
+        # Unlike a Date, a sexagesimal (10:30 -> 37800, 1:2:3 -> 3723) is a plain
+        # Integer the restricted loader builds without complaint, so it slips past
+        # the DisallowedClass guard above. A colon-bearing plain scalar that came
+        # back a number is almost never the base-60 number YAML made of it —
+        # refuse it and say to quote it, the same fix the Date guard gives.
+        raise Error, sexagesimal_needs_quoting(node) if value.is_a?(Numeric) && node.value.include?(":")
+
+        value
       end
 
       # A collection carrying one of our tags is refused rather than silently
@@ -267,6 +276,13 @@ module Terret
         value = Composition.clip(node.value)
         "#{@label}: #{value.inspect} reads as a #{klass}, and a Terret config " \
           "carries only plain data — quote it (\"#{value}\") to keep it a string."
+      end
+
+      def sexagesimal_needs_quoting(node)
+        value = Composition.clip(node.value)
+        "#{@label}: #{value.inspect} reads as a base-60 (sexagesimal) number, not the " \
+          "text it looks like — a Terret config carries plain data, so quote it " \
+          "(\"#{value}\") to keep it a string."
       end
 
       def refusal(name, raw, core_allowed)

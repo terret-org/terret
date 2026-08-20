@@ -331,6 +331,21 @@ class CompositionTest < Minitest::Test
     spec
   end
 
+  # YAML 1.1 reads an unquoted 10:30 as the base-60 Integer 37800, silently,
+  # since it is a plain Integer the restricted loader is happy to build — the
+  # same surprise as the Date guard, one type system over. A colon-bearing
+  # scalar that reads as a number is refused with the fix (quote it); a quoted
+  # one stays the string it looks like.
+  def test_a_colon_bearing_scalar_reading_as_a_base60_number_is_refused
+    profile("demo", "bundles: [terret]\n")
+    profile_patch("demo", "rows:\n  - id: llm\n    config: { model: 10:30 }\n")
+    err = assert_raises(C::Error) { resolve }
+    assert_includes err.message, "quote"
+
+    profile_patch("demo", %(rows:\n  - id: llm\n    config: { model: "10:30" }\n))
+    assert_equal "10:30", resolve.rows.find { |r| r.id == "llm" }.config[:model]
+  end
+
   # A refusal interpolates attacker-influenced text — here a !setting path. An
   # unbounded fragment could bury the actual message or flood a terminal/log, so
   # each is capped.
