@@ -201,7 +201,14 @@ module Terret
         raise Terret::Tools::Failure, "url names no host; nothing was fetched" if host.empty?
 
         check_policy!(host)
-        check_address!(host)
+        # The SSRF floor resolves the bracket-STRIPPED hostname. `uri.host` keeps
+        # the brackets on an IPv6 literal ("[::1]"), which no resolver recognizes
+        # — the floor would see no address and connect straight through to the
+        # loopback the brackets name. `uri.hostname` strips them ("::1"), which is
+        # what resolves and what IPAddr classifies as loopback/link-local. (IPv4
+        # `127.0.0.1` has no brackets, so it was caught either way; this closes
+        # the IPv6 hole the bracket form opened.)
+        check_address!(uri.hostname.to_s.downcase)
         uri
       end
 

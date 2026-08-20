@@ -307,6 +307,24 @@ class WebFetchToolTest < Minitest::Test
     assert_empty recorder.urls
   end
 
+  # An IPv6 loopback written as a bracket literal. uri.host keeps the brackets
+  # ("[::1]"), which no resolver recognizes, so the floor would see no address
+  # and wave the connection straight through to ::1 — the IPv4 loopback is
+  # caught, the IPv6 one was not. The floor must resolve the bracket-stripped
+  # hostname ("::1"), which is what resolves and what IPAddr can classify. The
+  # resolver is host-keyed so the bug is visible: it answers a loopback address
+  # only for the stripped form the fixed code passes it.
+  def test_an_ipv6_loopback_bracket_literal_is_refused_by_the_floor
+    recorder = Recorder.new
+    resolver = ->(host) { host == "::1" ? ["::1"] : [] }
+    ctx, = boot(config: { allow: ["*"], transport: recorder, resolver: resolver })
+    result = call(ctx, url: "http://[::1]/")
+
+    assert_nil result.content
+    assert_match(/loopback or link-local/, result.error)
+    assert_empty recorder.urls, "an IPv6 loopback literal must never reach the transport"
+  end
+
   def test_a_redirect_to_a_link_local_host_is_refused_mid_chain
     recorder = Recorder.new({
       "https://entry.example/" => [302, { "location" => "https://internal.example/" }, "moved"]
