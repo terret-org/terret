@@ -348,7 +348,7 @@ key.
 trt boot        --profile NAME [--patch FILE]... [--allow-config-ruby]
 trt doctor      --profile NAME
 trt dump-config --profile NAME
-trt acp         --profile NAME          # docs/acp.md
+trt acp         --profile NAME          # docs/acp.md, docs/zed.md
 ```
 
 Non-interactive, optparse, no thor, no REPL, no TUI. Plan §1's non-goals bar

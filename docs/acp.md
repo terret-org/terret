@@ -392,8 +392,10 @@ already-finished work should do.
 ## Running it
 
 ```
-trt acp --profile headless
+trt acp --profile zed
 ```
 
 Boots a profile (docs/composition.md) and serves ACP on stdio. That is the
-command an editor is configured to spawn.
+command an editor is configured to spawn. Driving it from Zed — the
+profile, the launcher, and the behaviors that actually cost time — is
+docs/zed.md.
