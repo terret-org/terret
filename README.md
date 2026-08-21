@@ -101,7 +101,9 @@ encode through `LLM.encode_part`.
 
 Install with `gem install terret`: the meta-gem depends on the base roster
 and ships the `terret-base` bundle. All twelve gems are published to
-RubyGems at `0.1.0`, released in lockstep.
+RubyGems. Ten are at `0.1.0`; `hames` and `terret-core` are at `0.1.1`,
+which is the first build of those two carrying their full file list. Every
+dependency is `~> 0.1`, so the versions resolve together.
 
 The full roadmap is `docs/terret-implementation-plan.md`; see its §12 for
 milestone detail and §14 for the deferrals recorded along the way. Note the

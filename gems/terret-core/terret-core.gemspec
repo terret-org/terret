@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = "terret-core"
-  s.version = "0.1.0"
+  s.version = "0.1.1"
   s.summary = "Terret agent harness core: session log, tools pipeline, agent loop"
   s.description = "The core of the Terret agent harness: an append-only session log " \
                   "that is the single source of model-visible truth, a scoped tool " \

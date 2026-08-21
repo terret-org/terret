@@ -7,7 +7,7 @@ rescue LoadError
 end
 
 module Terret
-  VERSION = "0.1.0"
+  VERSION = "0.1.1"
 
   # Event vocabulary. Durable events land in the session log; the rest are
   # live extension points. Modes are the public contract (see docs/events.md).

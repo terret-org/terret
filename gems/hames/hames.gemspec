@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name = "hames"
-  s.version = "0.1.0"
+  s.version = "0.1.1"
   s.summary = "Plugin kernel: services, typed events, reversible effects"
   s.description = "Hames is a small plugin kernel for Ruby: services resolved by key " \
                   "in a context, typed events with four dispatch modes enforced at " \

@@ -4,7 +4,7 @@
 # four dispatch modes, reversible effects, and dependency-driven boot. It has
 # no knowledge of LLMs and is reusable for any plugin-composed application.
 module Hames
-  VERSION = "0.1.0"
+  VERSION = "0.1.1"
 end
 
 require_relative "hames/events"
