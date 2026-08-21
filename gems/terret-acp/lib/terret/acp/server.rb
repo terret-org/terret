@@ -345,9 +345,7 @@ module Terret
               content: text_block(ev.payload[:text]) }
           when "tool/call"
             announce(ev.payload[:id])
-            { sessionUpdate: "tool_call", toolCallId: ev.payload[:id],
-              title: ev.payload[:name].to_s, kind: tool_kind(ev.payload[:name]),
-              status: "pending" }
+            tool_call_frame(ev.payload)
           when "tool/result"
             id = ev.payload[:id]
             # On the resume path complete_dangling can append a tool/result for a
@@ -381,16 +379,40 @@ module Terret
       # announced, reading its name from the log. Ordered ahead of the caller's
       # tool_call_update because both go through the one FIFO queue.
       def synthesize_tool_call(sid, id)
-        name = tool_name_for(sid, id)
+        payload = tool_call_payload_for(sid, id) || { id: id, name: nil }
         announce(id)
-        notify(sid, { sessionUpdate: "tool_call", toolCallId: id, title: name.to_s,
-                      kind: tool_kind(name), status: "pending" })
+        notify(sid, tool_call_frame(payload))
       end
 
-      def tool_name_for(sid, id)
+      # rawInput is the logged args. Append already folded them through the
+      # session scrubbers, so a credential that made it into a call argument
+      # is [REDACTED] here the same way it is in the log — nothing reaches
+      # the editor that is not in the log first. locations is filled when
+      # the std file tools named a file_path, so the editor can follow along.
+      def tool_call_frame(payload)
+        args = payload[:args]
+        frame = { sessionUpdate: "tool_call", toolCallId: payload[:id],
+                  title: payload[:name].to_s, kind: tool_kind(payload[:name]),
+                  status: "pending" }
+        frame[:rawInput] = args unless args.nil?
+        locs = locations_for(args)
+        frame[:locations] = locs if locs
+        frame
+      end
+
+      def locations_for(args)
+        return unless args.is_a?(Hash)
+
+        path = args[:file_path] || args["file_path"]
+        return unless path.is_a?(String) && !path.empty?
+
+        [{ path: path }]
+      end
+
+      def tool_call_payload_for(sid, id)
         @ctx[:sessions].fetch(sid).events.reverse_each
                        .find { |e| e.type == "tool/call" && e.payload[:id] == id }
-                       &.payload&.[](:name)
+                       &.payload
       end
 
       def tool_kind(name)

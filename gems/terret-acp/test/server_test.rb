@@ -254,6 +254,8 @@ class ServerTest < Minitest::Test
       assert_equal "weather", tool_call[:title]
       assert_equal "other", tool_call[:kind]
       assert_equal "pending", tool_call[:status]
+      assert_equal({ city: "CDMX" }, tool_call[:rawInput])
+      assert_nil tool_call[:locations]
 
       update = dx.updates.find { |u| u[:sessionUpdate] == "tool_call_update" }
       assert_equal "tc1", update[:toolCallId]
@@ -588,6 +590,32 @@ class ServerTest < Minitest::Test
     end
   end
 
+  def test_tool_call_projects_raw_input_and_file_locations
+    call = Terret::LLM::ToolCall.new(id: "tc1", name: "Read",
+                                     args: { file_path: "/tmp/x.rb" })
+    ctx = boot(script: [{ text: "reading", tool_calls: [call] }, { text: "done" }])
+    ctx.with_owner("files") do
+      ctx[:tools].register(name: "Read", description: "Read a file",
+                           params: { file_path: "string" }) { |file_path:| "ok" }
+    end
+    Sync do |task|
+      dx = Duplex.new
+      dx.serve(ctx, task)
+      sid = new_session(dx)
+      dx.send(jsonrpc: "2.0", id: 2, method: "session/prompt",
+              params: { sessionId: sid, prompt: [{ type: "text", text: "read it" }] })
+      await { dx.response(2) }
+
+      tool_call = dx.updates.find { |u| u[:sessionUpdate] == "tool_call" }
+      assert_equal "Read", tool_call[:title]
+      assert_equal "read", tool_call[:kind]
+      assert_equal({ file_path: "/tmp/x.rb" }, tool_call[:rawInput])
+      assert_equal([{ path: "/tmp/x.rb" }], tool_call[:locations])
+      dx.disconnect
+      dx.drain
+    end
+  end
+
   # -- resume/reattach synthesizes the opening tool_call (findings 3 + 8) -----
 
   # Stage the log of a turn that died mid-tool: opened, one step, a model reply
@@ -634,6 +662,7 @@ class ServerTest < Minitest::Test
       assert_equal "tc1", tool_call[:toolCallId]
       assert_equal "weather", tool_call[:title], "the tool name is read from the log"
       assert_equal "other", tool_call[:kind]
+      assert_equal({ city: "CDMX" }, tool_call[:rawInput], "synthesized rawInput comes from the log")
 
       done = dx.updates.find { |u| u[:sessionUpdate] == "tool_call_update" }
       assert_equal "tc1", done[:toolCallId]

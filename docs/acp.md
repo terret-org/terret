@@ -173,7 +173,7 @@ field **`sessionUpdate`**, not `type`.
 | durable event | `sessionUpdate` | note |
 |---|---|---|
 | `assistant/chunk` | `agent_message_chunk` | `{content: {type: "text", …}}` |
-| `tool/call` | `tool_call` | `toolCallId`, `title`, `kind`, `status: "pending"` |
+| `tool/call` | `tool_call` | `toolCallId`, `title`, `kind`, `status: "pending"`, `rawInput` (logged args), `locations` when `file_path` is set |
 | `tool/result` | `tool_call_update` | same `toolCallId`, terminal `status`, content |
 
 `tool_call`'s `kind` is an enum (`read`, `edit`, `delete`, `move`,
@@ -185,6 +185,13 @@ std roster maps onto it cleanly enough that the table is mechanical:
 `status` enum is `pending | in_progress | completed | failed`, which is why
 one Terret event opens the call and a second closes it. No single event
 carries both.
+
+`rawInput` is the tool's logged `args`. They already passed the append
+scrubbers (docs/exec.md §6), so a credential in an argument is
+`[REDACTED]` in the editor the same way it is in the log — the
+projection does not grow a second, unscrubbed channel. `locations` is
+filled when those args name a `file_path` (Read, Write, Edit), which is
+what lets an editor follow along in the buffer.
 
 Those three are the whole of what v1 emits. Eight further variants exist
 in the schema and none of them are sent:
