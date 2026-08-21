@@ -107,9 +107,15 @@ module Terret
       end
 
       def resolve(role)
-        spec = @roles.fetch(role) { raise KeyError, "no model role #{role.inspect}" }
+        spec = role_spec(role)
         provider, model = spec.split("/", 2)
         [@adapters.fetch(provider), model]
+      end
+
+      # The "provider/model" spec a role currently points at. Logged on
+      # step/start so a session says which model ran, not just what it cost.
+      def role_spec(role)
+        @roles.fetch(role) { raise KeyError, "no model role #{role.inspect}" }
       end
 
       # §9.2 set_model lands here: repoint a role at a "provider/model" spec

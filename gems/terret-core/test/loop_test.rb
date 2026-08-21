@@ -87,6 +87,17 @@ class TurnFlowTest < Minitest::Test
     assert_equal "Checking the weather.", chunk_text
   end
 
+  def test_step_start_records_the_resolved_model
+    ctx, = boot(script: [{ text: "hi" }])
+    agent, session = spawn(ctx)
+    ctx[:loop].run_turn(agent, "hi")
+
+    starts = session.events.select { |e| e.type == "step/start" }
+    assert_equal 1, starts.length
+    assert_equal 1, starts.first.payload[:n]
+    assert_equal "fake/scripted", starts.first.payload[:model]
+  end
+
   def test_derived_history_carries_the_tool_result_into_step_two
     ctx, = boot(script: two_step_script)
     register_weather(ctx)

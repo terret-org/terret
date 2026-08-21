@@ -222,7 +222,9 @@ title is metadata: it never enters `derive_messages`'s projection.
 
 ## Cost accounting
 
-Usage figures arrive on `step/end` events: the adapter yields them, and for
+`step/start` records the resolved `provider/model` spec for `:main`, so a
+session resumed after a profile change can tell which model produced which
+step. Usage figures arrive on `step/end` events: the adapter yields them, and for
 OpenRouter that means every final SSE chunk carries usage automatically, with
 no separate accounting call. `Sessions#usage(session_id)` sums every
 `step/end`'s usage across the whole log into `{prompt_tokens:,

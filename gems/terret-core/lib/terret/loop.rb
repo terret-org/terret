@@ -323,7 +323,7 @@ module Terret
         steps += 1
         raise "runaway turn" if steps > MAX_STEPS
 
-        sessions.append(sid, "step/start", { n: steps })
+        sessions.append(sid, "step/start", { n: steps, model: ctx[:llm].role_spec(:main) })
         claim.messages.each { |(type, text)| sessions.append(sid, type, { text: text }) }
         state.steered = [] # once logged, these must never requeue
         pending = []
