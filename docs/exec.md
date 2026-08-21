@@ -227,9 +227,9 @@ are the M8 tools that live on `ctx[:jobs]` and the subagent seam; they carry
 their own roster in docs/subagents.md, not this one. `job_start` in
 particular derives its approval from sandbox isolation exactly as `Bash` does
 above: `:always` unsandboxed, `:policy` sandboxed, re-derived on a hot
-sandbox swap through the same `config/updated` listener. It runs `bash -lc
-<cmd>` in a fresh shell, so a background command is never silently at a
-weaker bar than a foreground one (`job_collect` reads a buffer and never
+sandbox swap through the same `config/updated` listener. It runs
+`bash -lc <cmd>` in a fresh shell, so a background command is never silently
+at a weaker bar than a foreground one (`job_collect` reads a buffer and never
 asks; `job_stop` is a static `:policy`). Their names follow the same rule as
 the rest of it: Claude Code's spelling verbatim where CC has the tool,
 snake_case where it does not, so `Task` and `TodoWrite` are capitalized and

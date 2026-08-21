@@ -23,13 +23,13 @@ No configurable keys.
 
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `file` | String |  | — | path to an AES-256-GCM encrypted credential store, provider => base64(iv+tag+ciphertext); the master key is ENV TERRET_CREDENTIALS_KEY (base64 of 32 bytes) and the per-provider ENV <PROVIDER>_API_KEY always wins — neither is config, and with no file only ENV resolves |
+| `file` | String |  | — | path to an AES-256-GCM encrypted credential store, provider =&gt; base64(iv+tag+ciphertext); the master key is ENV TERRET_CREDENTIALS_KEY (base64 of 32 bytes) and the per-provider ENV &lt;PROVIDER&gt;_API_KEY always wins — neither is config, and with no file only ENV resolves |
 
 ## terret-core — `Terret::LLM::Service` (`llm`)
 
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `roles` | Hash |  | `{}` | role => "provider/model" map; an open set of roles |
+| `roles` | Hash |  | `{}` | role =&gt; "provider/model" map; an open set of roles |
 
 ## terret-core — `Terret::Loop` (`loop`)
 
@@ -139,7 +139,7 @@ No configurable keys.
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `strict` | boolean |  | `false` | when true, a server that fails to mount fails the boot |
-| `servers` | Hash |  | `{}` | name => server config (url or command, args, env, bearer, approval, timeout) |
+| `servers` | Hash |  | `{}` | name =&gt; server config (url or command, args, env, bearer, approval, timeout) |
 
 ## terret-morph — `Terret::Morph::Summarizer` (`summarizer`)
 
@@ -223,7 +223,7 @@ No configurable keys.
 
 | Key | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `tokens` | Hash |  | `{}` | token => agent-id map authorizing socket connections |
+| `tokens` | Hash |  | `{}` | token =&gt; agent-id map authorizing socket connections |
 | `queue_limit` | Integer |  | `256` | max frames buffered per connection before backpressure |
 | `heartbeat` | Numeric |  | `20` | seconds between server heartbeats |
 | `replay_limit` | Integer |  | `10000` | max events replayed on one subscribe; a from_seq reaching further back gets the newest replay_limit and a replay_truncated frame |

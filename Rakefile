@@ -67,7 +67,11 @@ module ConfigCatalog
   end
 
   def default(value) = value.nil? ? "—" : "`#{value.inspect}`"
-  def doc(text) = text.to_s.gsub("|", "\\|")
+  # A doc string lands in a markdown table cell, so it owes the cell two
+  # things: pipes escaped, and angle brackets escaped. `<PROVIDER>_API_KEY` in
+  # a description is prose, but kramdown reads it as a raw HTML tag and eats
+  # the rest of the document.
+  def doc(text) = text.to_s.gsub("|", "\|").gsub("<", "&lt;").gsub(">", "&gt;")
 end
 
 desc "Run the bench lane (plan §11): dispatch overhead + chunk throughput. " \
