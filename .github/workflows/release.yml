@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes every gem whose version is not yet on RubyGems, using trusted
+# publishing: GitHub hands RubyGems a short-lived OIDC token and RubyGems hands
+# back a short-lived API key. No stored secret, no API key in the repo, and no
+# MFA prompt per gem — which is the whole point, because a twelve-gem release
+# otherwise means twelve taps on a security key.
+#
+# This workflow is the identity RubyGems trusts, so its FILENAME is part of the
+# trust configuration. Renaming this file breaks publishing until each gem's
+# trusted publisher is updated to match (docs: guides.rubygems.org/trusted-publishing).
+#
+# Releasing is deliberately manual: bump the versions you mean to ship, land
+# them on main, then run this workflow. `rake release:push` skips anything
+# already published, so a re-run after a partial failure is safe and a run with
+# nothing to do is a no-op.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    # A GitHub environment lets you require a review before anything reaches
+    # RubyGems, and it is the second half of the trusted publisher's identity
+    # if you register it. Remove this line if you register the publisher
+    # without an environment.
+    environment: release
+
+    permissions:
+      contents: read
+      # The OIDC token this exchanges for a RubyGems API key. Publishing fails
+      # without it, and the failure looks like an ordinary auth error.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: .ruby-version
+          bundler-cache: true
+
+      # A release that cannot pass its own suite is not a release. CI already
+      # ran this on the commit; running it again here costs a few minutes and
+      # removes the "which commit did we actually build" question.
+      - name: Test suites
+        run: bundle exec rake test
+
+      # --strict escalates any gemspec warning to a build failure, and the
+      # build is what proves each gemspec's file list is what we think it is.
+      # hames 0.1.0 and terret-core 0.1.0 shipped to RubyGems missing files
+      # because nobody looked inside the built gem; the next step is what makes
+      # that impossible to repeat silently.
+      - name: Build every gem
+        run: bundle exec rake release:build
+
+      # Each gem must carry every .rb file its lib/ holds. A gemspec whose
+      # files list has drifted builds happily and installs broken, so the diff
+      # is asserted here rather than discovered by whoever runs gem install.
+      - name: Built gems carry their full file lists
+        run: |
+          failed=0
+          for gem_file in pkg/*.gem; do
+            name=$(basename "$gem_file" .gem)
+            dir=$(mktemp -d)
+            tar -xf "$gem_file" -C "$dir"
+            tar -tzf "$dir/data.tar.gz" | grep '\.rb$' | sort > "$dir/packaged.txt"
+            src=gems/${name%-*}
+            (cd "$src" && find lib -name '*.rb' | sort) > "$dir/checkout.txt"
+            missing=$(comm -13 "$dir/packaged.txt" "$dir/checkout.txt")
+            if [ -n "$missing" ]; then
+              echo "::error::$name is missing files that exist in $src/lib:"
+              echo "$missing" | sed 's/^/    /'
+              failed=1
+            fi
+          done
+          exit $failed
+
+      # Exchanges the OIDC token for a short-lived RubyGems API key and writes
+      # it where `gem push` looks. Every gem being published must already list
+      # this repo and this workflow as a trusted publisher on RubyGems.
+      - uses: rubygems/configure-rubygems-credentials@v1
+
+      # Pushes in dependency order (hames first, terret last) and skips any
+      # version already on RubyGems.
+      - name: Push to RubyGems
+        run: bundle exec rake release:push
