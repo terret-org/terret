@@ -121,7 +121,7 @@ rake config:catalog    # regenerates docs/config-catalog.md
 rake bench             # bench/README.md — chunk throughput + dispatch overhead
 rake bench BENCH_FLOORS=1   # also asserts against bench/floors.yml (CI runs this)
 trt doctor --profile headless   # validate a profile's config without booting
-trt acp --profile headless      # serve the Agent Client Protocol on stdio for an editor
+trt acp --profile zed           # ACP on stdio for an editor; needs terret-acp (docs/zed.md)
 ruby examples/headless_demo.rb
 OPENROUTER_API_KEY=... ruby examples/openrouter_demo.rb   # real model; needs async-http
 bundle exec ruby examples/ws_demo.rb   # real websocket loopback demo
